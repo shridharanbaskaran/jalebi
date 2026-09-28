@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# environments
+.venv/
+.venv-jalebi/
+venv/
+env/
+
+# notebooks
+.ipynb_checkpoints/
+
+# JALEBI outputs (the bundled line lists, FITS and CSV example data under src/ ARE tracked)
+results/
+examples/results/
+jalebi_demo/
+jalebi_examples/
+install_log.txt
+*.h5
+chain.npz
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

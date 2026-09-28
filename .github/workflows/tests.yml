@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install JALEBI with the test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[app,dev]"
+          python -m pip install tomli   # tomllib backport for Python 3.10 (packaging test)
+      - name: Installer dry run
+        run: python install.py --yes --env current --extras app --no-demo --dry-run --no-color
+      - name: Doctor
+        run: jalebi doctor
+      - name: Tests
+        run: pytest -q
+      - name: Lint
+        run: ruff check src tests examples install.py
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build twine
+          python -m build
+          twine check dist/*
+      - name: Install the wheel in a clean venv and run the doctor
+        run: |
+          python -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
+          cd /tmp && /tmp/w/bin/jalebi doctor && /tmp/w/bin/jalebi examples /tmp/ex && ls /tmp/ex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

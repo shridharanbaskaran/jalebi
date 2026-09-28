@@ -1,0 +1,29 @@
+# JALEBI example: three-temperature water model of FZ Tau.  Hot and warm components use HITEMP
+# (complete at high E_up), the cold component HITRAN 2020 (accurate low-E_up lines at 17–27 µm).
+# Line lists are chosen per component with linelist_release; both are bundled.
+target:
+  name: FZ Tau
+  path: example:FZ_Tau
+  distance_pc: 130
+  rv_kms: 20
+continuum:
+  method: irsqr
+  refine_iterations: 0
+linedata:
+  releases: {H2O: hitemp}          # default for H2O components that do not set linelist_release
+components:
+  - {name: H2O_hot,  molecule: H2O, logN: 18.2, T: 850, logR: -0.6, linelist_release: hitemp}
+  - {name: H2O_warm, molecule: H2O, logN: 17.8, T: 450, logR: -0.1, linelist_release: hitemp}
+  - {name: H2O_cold, molecule: H2O, logN: 17.5, T: 180, logR:  0.4, linelist_release: hitran}
+  - {name: CO2,      molecule: CO2, logN: 17.5, T: 500, logR: -0.5}
+  - {name: 13CO2,    molecule: 13CO2, tie_to: CO2, ratio: 70, fixed: [ratio]}
+  - {name: C2H2,     molecule: C2H2, logN: 17.0, T: 500, logR: -0.8, bounds: {logR: [-2.0, 0.0]}}
+  - {name: HCN,      molecule: HCN,  logN: 16.5, T: 500, logR: -0.8, bounds: {logR: [-2.0, 0.0]}}
+fit:
+  # include the long-wavelength window where the cold water (E_up < 2000 K) lines live
+  windows: [[13.45, 17.5], [21.0, 27.0]]
+  ordering: [[H2O_hot, H2O_warm], [H2O_warm, H2O_cold]]
+  grid: {logN: [15, 20, 21], T: [100, 1200, 17]}
+  optimise: {maxiter: 150, popsize: 12, workers: 4}
+  mcmc: {nwalkers: 64, nsteps: 3000, processes: 4}
+output: results/FZ_Tau_water_hot_cold

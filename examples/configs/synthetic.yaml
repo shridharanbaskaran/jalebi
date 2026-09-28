@@ -1,0 +1,38 @@
+# JALEBI example: a synthetic MIRI-MRS channel-3 spectrum whose answers are known
+# (true parameters in synthetic_truth.yaml).  Used by `jalebi demo` and examples/02_synthetic_fit.py.
+#   jalebi fit synthetic.yaml                     # grid -> optimise -> mcmc
+#   jalebi fit synthetic.yaml --stages grid,optimise
+target:
+  name: synthetic disk
+  path: example:synthetic/synthetic_miri_ch3.csv   # "example:" = data bundled with the package
+  distance_pc: 140
+  rv_kms: 0
+  spike_filter: false
+continuum:
+  # MINDS-style iteratively reweighted spline quantile regression.  In dense line forests the lower
+  # envelope rides on the blended-line pseudo-continuum; a low quantile with wide knot spacing and one
+  # model-aware refinement pass put it closest to the true continuum here (examples/03_continuum_methods.py
+  # compares all methods against the truth).
+  method: irsqr
+  quantile: 0.05
+  knot_spacing: 50
+  refine_iterations: 1     # re-estimate the continuum under the best-fit gas model (kept only if chi2 improves)
+masks:
+  default_lines: true
+  oh_prompt: false
+components:                # starting guesses, deliberately away from the truth
+  - {name: H2O,   molecule: H2O,   logN: 17.5, T: 450, logR: -0.2, linelist_release: hitran}
+  - {name: CO2,   molecule: CO2,   logN: 17.0, T: 550, logR: -0.6}
+  - {name: 13CO2, molecule: 13CO2, tie_to: CO2, ratio: 70, fixed: [ratio]}
+  # organics come from the inner disk: an emitting radius below 1 au (logR < 0) keeps the sampler out of
+  # the optically thin, huge-area corner where only N x area is constrained (see README, "Degeneracies")
+  - {name: C2H2,  molecule: C2H2,  logN: 16.5, T: 500, logR: -0.8, bounds: {logR: [-2.0, 0.0]}}
+  - {name: HCN,   molecule: HCN,   logN: 16.5, T: 500, logR: -0.8, bounds: {logR: [-2.0, 0.0]}}
+fit:
+  windows: [[13.6, 16.3]]
+  area_param: logR
+  oversample: 4            # fine-grid points per line FWHM (6 = default; 4 is faster, <1 % flux error)
+  grid: {logN: [15.0, 19.5, 10], T: [200, 1200, 11]}
+  optimise: {method: de, maxiter: 40, popsize: 8, workers: 1}
+  mcmc: {nwalkers: 32, nsteps: 300, processes: 1, checkpoint: false}
+output: results/synthetic

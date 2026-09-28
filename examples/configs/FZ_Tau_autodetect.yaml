@@ -1,0 +1,20 @@
+# JALEBI example: let the data decide which molecules to fit.
+#   jalebi detect FZ_Tau_autodetect.yaml --write FZ_Tau_detected.yaml   # look first
+#   jalebi fit    FZ_Tau_autodetect.yaml --stages grid,optimise          # detect, then fit what was found
+target:
+  name: FZ Tau
+  path: example:FZ_Tau
+  distance_pc: 130
+  rv_kms: 20
+continuum:
+  method: irsqr
+components: []                  # filled in by the detection
+fit:
+  auto_detect: true
+  detect:
+    threshold: 10               # ΔBIC above which a molecule counts as detected
+    candidates: []              # empty = every molecule with a line list (bundled + your cache)
+    replace_windows: true
+  optimise: {maxiter: 60, popsize: 10, workers: 4}
+  mcmc: {nwalkers: 48, nsteps: 2000, processes: 4}
+output: results/FZ_Tau_autodetect

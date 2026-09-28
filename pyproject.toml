@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jalebi"
+dynamic = ["version"]
+description = "JALEBI — JWST Analysis of Line Emission with Bayesian Inference: simultaneous LTE slab fitting of molecular emission in JWST/MIRI spectra of protoplanetary disks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE", "DATA_LICENSES.md"]
+authors = [{ name = "Shridharan Baskaran", email = "shridharan.baskaran@tifr.res.in" }]
+keywords = ["astronomy", "JWST", "MIRI", "protoplanetary disks", "infrared spectroscopy", "LTE slab model",
+            "molecular emission", "MCMC", "HITRAN"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+# keep in sync with src/jalebi/_requirements.py (tests/test_packaging.py checks it)
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "astropy>=5.3",
+    "pyarrow>=14",
+    "PyYAML>=6.0",
+    "pydantic>=2.5",
+    "emcee>=3.1",
+    "corner>=2.2",
+    "matplotlib>=3.7",
+    "pybaselines>=1.1",
+    "joblib>=1.3",
+    "threadpoolctl>=3.0",
+    "h5py>=3.8",
+    "typer>=0.9",
+    "rich>=13.0",
+    "tqdm>=4.66",
+    "hitran-api>=1.2",
+]
+
+[project.optional-dependencies]
+app = ["panel>=1.4", "bokeh>=3.4"]
+fetch = ["astroquery>=0.4.7"]
+notebook = ["jupyterlab>=4.0", "ipykernel>=6.25", "ipympl>=0.9"]
+jwst = ["jwst>=1.16"]
+dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
+all = ["jalebi[app,fetch,notebook]"]
+
+[project.scripts]
+jalebi = "jalebi.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/shridharanbaskaran/jalebi"
+Documentation = "https://github.com/shridharanbaskaran/jalebi#readme"
+Issues = "https://github.com/shridharanbaskaran/jalebi/issues"
+Changelog = "https://github.com/shridharanbaskaran/jalebi/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/jalebi/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jalebi"]
+
+# the example scripts live in the repository's top-level examples/ folder; ship them inside the
+# wheel too, so `jalebi examples ./dir` works after a plain `pip install jalebi`
+[tool.hatch.build.targets.wheel.force-include]
+"examples" = "jalebi/_examples"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/jalebi", "examples", "tests", "docs", "install.py", "install.sh", "README.md", "LICENSE",
+           "DATA_LICENSES.md", "CITATION.cff", "CHANGELOG.md", "CONTRIBUTING.md", "environment.yml",
+           "requirements*.txt"]
+exclude = ["examples/results", "**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E702", "E731", "E741", "E402"]

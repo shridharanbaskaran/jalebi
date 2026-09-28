@@ -1,0 +1,3 @@
+name,path,distance_pc,rv_kms
+FZ Tau,example:FZ_Tau,130,20
+synthetic disk,example:synthetic/synthetic_miri_ch3.csv,140,0

@@ -1,0 +1,23 @@
+# JALEBI example: a radial temperature gradient for water instead of discrete slabs
+# (T(r) = T (r/R_in)^-q, N(r) = N (r/R_in)^-p over n_annuli log-spaced annuli; Romero-Mirza et al. 2024,
+# Temmink et al. 2025 style).  Each model call costs n_annuli slab evaluations.
+target:
+  name: FZ Tau
+  path: example:FZ_Tau
+  distance_pc: 130
+  rv_kms: 20
+continuum:
+  method: irsqr
+linedata:
+  releases: {H2O: hitemp}
+components:
+  - {name: H2O_grad, molecule: H2O, kind: annuli, n_annuli: 12, logN: 18.5, T: 900, q: 0.5, p: 0.0, logRin: -1.0, logR: 0.5,
+     bounds: {q: [0.0, 1.5], p: [-0.5, 2.0], T: [300, 1500]}}
+  - {name: CO2,   molecule: CO2,   logN: 17.5, T: 500, logR: -0.6}
+  - {name: 13CO2, molecule: 13CO2, tie_to: CO2, ratio: 70, fixed: [ratio]}
+fit:
+  windows: [[13.45, 17.5], [21.0, 27.0]]
+  stages: [optimise, mcmc]
+  optimise: {maxiter: 80, popsize: 10, workers: 4}
+  mcmc: {nwalkers: 40, nsteps: 2000, processes: 4}
+output: results/FZ_Tau_annuli

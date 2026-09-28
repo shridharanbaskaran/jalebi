@@ -1,0 +1,17 @@
+# JALEBI optional extras (pip install "jalebi[app,fetch,notebook,dev]").
+# --app       interactive web app
+panel>=1.4
+bokeh>=3.4
+# --fetch     download more HITRAN line lists
+astroquery>=0.4.7
+# --notebook  Jupyter Lab and the "Python (JALEBI)" kernel
+jupyterlab>=4.0
+ipykernel>=6.25
+ipympl>=0.9
+# --dev       tests, linting, packaging
+pytest>=7.0
+ruff>=0.4
+build>=1.0
+twine>=5.0
+# --jwst      the STScI pipeline is large; install it only if you reduce MIRI data yourself:
+#   pip install "jwst>=1.16"

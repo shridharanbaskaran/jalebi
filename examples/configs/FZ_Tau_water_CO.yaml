@@ -1,0 +1,22 @@
+# JALEBI example: CO fundamental (4.9–5.3 µm) and the hot water lines at 5–7.5 µm of FZ Tau.
+target:
+  name: FZ Tau
+  path: example:FZ_Tau
+  distance_pc: 130
+  rv_kms: 20
+continuum:
+  method: irsqr
+  refine_iterations: 1
+linedata:
+  releases: {H2O: hitemp, CO: hitemp}
+components:
+  - {name: H2O_hot,  molecule: H2O, logN: 18.0, T: 800, logR: -0.6}
+  - {name: H2O_warm, molecule: H2O, logN: 17.5, T: 400, logR: -0.2}
+  - {name: CO,       molecule: CO,  logN: 17.5, T: 1200, logR: -0.7, bounds: {T: [300, 3000]}}
+fit:
+  windows: [[4.95, 5.30], [6.0, 7.5]]
+  ordering: [[H2O_hot, H2O_warm]]
+  grid: {logN: [15, 20, 21], T: [200, 1400, 13]}
+  optimise: {maxiter: 60, popsize: 10, workers: 4}
+  mcmc: {nwalkers: 32, nsteps: 2000, processes: 4}
+output: results/FZ_Tau_water_CO

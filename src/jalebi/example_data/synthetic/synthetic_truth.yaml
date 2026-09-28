@@ -1,0 +1,33 @@
+components:
+- name: H2O
+  molecule: H2O
+  logN: 18.0
+  T: 550.0
+  logR: -0.3
+  linelist_release: hitran
+- name: CO2
+  molecule: CO2
+  logN: 17.5
+  T: 450.0
+  logR: -0.7
+- name: 13CO2
+  molecule: 13CO2
+  tie_to: CO2
+  ratio: 70.0
+- name: C2H2
+  molecule: C2H2
+  logN: 16.8
+  T: 650.0
+  logR: -0.9
+- name: HCN
+  molecule: HCN
+  logN: 16.6
+  T: 750.0
+  logR: -0.8
+distance_pc: 140.0
+snr: 150.0
+seed: 42
+bands:
+- 3A
+- 3B
+- 3C

@@ -1,0 +1,39 @@
+# JALEBI example: simultaneous fit of the 13.45–17.5 µm organics + water region of FZ Tau
+# (JWST GO 1549, MIRI-MRS x1d files bundled with the package; Pontoppidan et al. 2024).
+#   jalebi prep FZ_Tau_quick.yaml                      # continuum + masks -> results/FZ_Tau/prep.png
+#   jalebi fit  FZ_Tau_quick.yaml --stages grid,optimise
+#   jalebi fit  FZ_Tau_quick.yaml --processes 8 --nsteps 5000
+target:
+  name: FZ Tau
+  path: example:FZ_Tau          # "example:" = bundled data; replace by a folder of your Level3_ch*_x1d.fits files
+  distance_pc: 130
+  rv_kms: 20                    # heliocentric radial velocity removed before fitting
+  spike_filter: true
+continuum:
+  method: irsqr                 # irsqr | median_sg | asls | convex_hull | rolling_min | spline | banzatti | none
+  quantile: 0.1
+  knot_spacing: 25
+  refine_iterations: 0
+masks:
+  default_lines: true           # H I, H2, [Ne II], [Ne III], [Fe II], ... are not LTE slab emission
+  oh_prompt: true
+linedata:
+  releases: {H2O: hitemp}       # hot water needs HITEMP (complete at high E_up)
+components:
+  - {name: H2O_hot,  molecule: H2O,   logN: 18.5, T: 850, logR: -0.6}
+  - {name: H2O_warm, molecule: H2O,   logN: 18.0, T: 450, logR: -0.1, bounds: {logR: [-1.5, 1.0]}}
+  - {name: CO2,      molecule: CO2,   logN: 17.5, T: 500, logR: -0.6}
+  - {name: 13CO2,    molecule: 13CO2, tie_to: CO2, ratio: 70, fixed: [ratio]}
+  # weak organics: without priors they drift to unphysical corners (a cold, hugely thick slab or a huge thin
+  # one) that fit the few Q-branch pixels equally well.  Warm gas (> 250 K), log N < 19 and R < 1 au are
+  # the physically motivated ranges for the inner disk.
+  - {name: C2H2,     molecule: C2H2,  logN: 16.5, T: 500, logR: -0.8, bounds: {T: [250, 1200], logN: [14, 19], logR: [-2.0, 0.0]}}
+  - {name: HCN,      molecule: HCN,   logN: 16.5, T: 600, logR: -0.8, bounds: {T: [250, 1200], logN: [14, 19], logR: [-2.0, 0.0]}}
+fit:
+  windows: [[13.45, 17.5]]
+  ordering: [[H2O_hot, H2O_warm]]   # prior: T(H2O_hot) > T(H2O_warm) removes the label-switching degeneracy
+  oversample: 4
+  grid: {logN: [15, 20, 11], T: [200, 1200, 11]}
+  optimise: {method: de, maxiter: 80, popsize: 10, workers: 4}
+  mcmc: {nwalkers: 48, nsteps: 2000, processes: 4, checkpoint: true}
+output: results/FZ_Tau

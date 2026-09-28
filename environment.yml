@@ -1,0 +1,34 @@
+# Conda environment for JALEBI (conda-forge only, so no Anaconda "defaults" terms-of-service prompt).
+#   conda env create -f environment.yml
+#   conda activate jalebi
+# or let the interactive installer do it:  python install.py
+name: jalebi
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy>=1.24
+  - scipy>=1.11
+  - pandas>=2.0
+  - astropy>=5.3
+  - pyarrow>=14
+  - pyyaml>=6.0
+  - pydantic>=2.5
+  - emcee>=3.1
+  - corner>=2.2
+  - matplotlib>=3.7
+  - joblib>=1.3
+  - threadpoolctl>=3.0
+  - h5py>=3.8
+  - typer>=0.9
+  - rich>=13.0
+  - tqdm>=4.66
+  - panel>=1.4
+  - bokeh>=3.4
+  - astroquery>=0.4.7
+  - pip:
+      - pybaselines>=1.1
+      - hitran-api>=1.2
+      - -e ".[app,fetch]"

@@ -1,0 +1,5 @@
+# keep binary example data and line lists out of text diffs
+*.parquet binary
+*.npz binary
+*.fits binary
+*.png binary
