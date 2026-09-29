@@ -113,7 +113,7 @@ def test_continuum_methods_run():
     f = cont + lines + 0.01 * rng.standard_normal(len(w))
     s = Spectrum(w, f, np.full(len(w), 0.01), np.where(w < 15.5, "3B", "3C"))
     for meth in METHODS:
-        if meth == "none":
+        if meth in ("none", "given"):
             continue
         st = ContinuumSettings(method=meth, anchors=list(np.linspace(13.1, 16.9, 12)))
         c = estimate_continuum(s, st)

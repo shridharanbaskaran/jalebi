@@ -123,10 +123,11 @@ def run_grid_stage(run: RunResult, progress=None):
             bar.close()
         run.grids[name] = gr
         b = gr.best
-        run.say(f"  best log N={b['logN']:.2f} T={b['T']:.0f} K log R={b['logR']:.2f} chi2_red={b['chi2_red']:.2f}"
-                + (" (at grid edge)" if b["at_edge"] else ""))
+        absorber = comp.kind == "absorption"
+        run.say(f"  best log N={b['logN']:.2f} T={b['T']:.0f} K" + ("" if absorber else f" log R={b['logR']:.2f}")
+                + f" chi2_red={b['chi2_red']:.2f}" + (" (at grid edge)" if b["at_edge"] else ""))
         P, log_s = prob.params_from_theta(theta)
-        P[name].update({"logN": b["logN"], "T": b["T"], "logR": b["logR"]})
+        P[name].update({"logN": b["logN"], "T": b["T"]} if absorber else {"logN": b["logN"], "T": b["T"], "logR": b["logR"]})
         if "logNA" in P[name]:
             from .fit import logNA_from
             P[name]["logNA"] = logNA_from(b["logN"], b["logR"])
@@ -231,7 +232,7 @@ def detect_and_apply(cfg: ProjectConfig, spec: Spectrum):
     d = cfg.fit.detect
     det = detect_molecules(spec, candidates=d.candidates or None, threshold=d.threshold,
                            releases=cfg.linedata.releases, oversample=d.oversample,
-                           R_model=cfg.R_model, R_scale=cfg.R_scale)
+                           R_model=cfg.R_model, R_scale=cfg.R_scale, mode=d.mode)
     if not det.components:
         raise ValueError("auto-detect found no molecule above the threshold; nothing to fit")
     return apply_detection(cfg, det, replace_windows=d.replace_windows, keep_undetected=d.keep_undetected), det

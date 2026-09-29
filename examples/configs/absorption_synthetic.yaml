@@ -1,0 +1,48 @@
+# Example 11 — absorption + emission fit on a synthetic embedded-protostar spectrum
+# (bundled as example:synthetic/absorption_synthetic.csv; examples/11_absorption_fit.py remakes it).
+#
+# The absorbing screen follows  F = F_c (1 - f_c (1 - e^-tau))  (Li, Boogert & Tielens 2024):
+#   kind: absorption   -> parameters log N, T, v (always free), f_c (covering fraction), Δv
+#   covers: continuum  -> the screen sits in front of the continuum only
+#   covers: all        -> it also absorbs the emission components (two-slab geometry)
+# The continuum here is the one stored in the CSV ('continuum' / 'baseline' column), kept by
+# continuum.method: given.  For real absorption-dominated spectra either give a continuum this way
+# or use irsqr with quantile ~0.9 (upper envelope); the default lower-envelope fit follows the
+# absorption troughs and hides them.
+target:
+  name: synthetic_absorber
+  path: example:synthetic/absorption_synthetic.csv
+  distance_pc: 400.0
+continuum:
+  method: given
+components:
+  - name: CO2_hot
+    molecule: CO2
+    logN: 17.5
+    T: 600.0
+    logR: -0.3
+  - name: CO2_abs
+    molecule: CO2
+    kind: absorption
+    logN: 18.0
+    T: 150.0
+    rv: -20.0
+    fc: 0.5
+    covers: all
+    bounds:
+      T: [30.0, 600.0]
+      rv: [-120.0, 60.0]
+fit:
+  windows: [[14.6, 15.4]]
+  fit_rv: false
+  stages: [grid, optimise, mcmc]
+  grid:
+    logN: [15.0, 19.5, 19]
+    T: [40.0, 900.0, 18]
+  optimise:
+    maxiter: 120
+    popsize: 12
+  mcmc:
+    nsteps: 800
+    processes: 4
+output: results/{target}

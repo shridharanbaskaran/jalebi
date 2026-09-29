@@ -49,8 +49,10 @@ def plot_fit(problem, theta, windows=None, per_component=True, title="", figsize
             ax.fill_between(w, -problem.sigma[i], problem.sigma[i], color="0.85", step="mid", label=lab("±1σ noise"))
             if per_component:
                 for key, f in units.items():
-                    mol = next((c.molecule for c in problem.components if c.name == key or c.group == key), key)
-                    ax.plot(w, f[i], lw=0.8, alpha=0.9, color=_colour(mol), label=lab(f"{key} (τmax={tmax.get(key, np.nan):.1f})"))
+                    lead = next((c for c in problem.components if c.name == key or c.group == key), None)
+                    mol = lead.molecule if lead is not None else key
+                    ls = "--" if lead is not None and lead.kind == "absorption" else "-"
+                    ax.plot(w, f[i], lw=0.8, alpha=0.9, color=_colour(mol), ls=ls, label=lab(f"{key} (τmax={tmax.get(key, np.nan):.1f})"))
             ax.plot(w, total[i], color="crimson", lw=1.0, label=lab("total model"))
             r = (problem.y[i] - total[i]) / problem.sigma[i]
             axr.step(w, r, where="mid", color="k", lw=0.6)
@@ -154,7 +156,7 @@ def full_spectrum_model(spec, problem, theta, oversample: int = 3):
     wmin, wmax = float(np.nanmin(spec.wave)), float(np.nanmax(spec.wave))
     m = build_model(problem.components, spec.wave, spec.distance_pc, [(wmin, wmax)],
                     linelists=None, releases=None, oversample=oversample,
-                    R_model=problem.model.R_model, R_scale=problem.model.R_scale)
+                    R_model=problem.model.R_model, R_scale=problem.model.R_scale, continuum=spec.continuum)
     total, units, _ = m.evaluate(P, per_unit=True)
     return total, units
 

@@ -1,0 +1,17 @@
+# truth of example_data/synthetic/absorption_synthetic.csv (made by examples/11_absorption_fit.py, seed 0, S/N 300)
+distance_pc: 400.0
+continuum: 0.8 * (wave / 15)**2 Jy   # stored in the 'continuum' column
+components:
+- name: CO2_hot
+  molecule: CO2
+  logN: 17.5
+  T: 600.0
+  logR: -0.3
+- name: CO2_abs
+  molecule: CO2
+  kind: absorption
+  covers: all
+  logN: 18.3
+  T: 120.0
+  rv: -40.0
+  fc: 0.6

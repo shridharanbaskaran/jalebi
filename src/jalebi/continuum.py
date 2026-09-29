@@ -106,7 +106,7 @@ class ContinuumSettings:
         return d
 
 
-METHODS = ["irsqr", "median_sg", "asls", "convex_hull", "rolling_min", "spline", "banzatti", "none"]
+METHODS = ["irsqr", "median_sg", "asls", "convex_hull", "rolling_min", "spline", "banzatti", "none", "given"]
 
 
 # ------------------------------------------------------------------------------------
@@ -310,6 +310,11 @@ def estimate_continuum(spec: Spectrum, settings: ContinuumSettings, gas_model: n
     """
     if settings.method == "none":
         return np.zeros(len(spec.wave))
+    if settings.method == "given":
+        if spec.continuum is None or not np.any(np.isfinite(spec.continuum) & (spec.continuum != 0)):
+            raise ValueError("continuum method 'given' needs a continuum loaded with the spectrum "
+                             "(a 'continuum' or 'baseline' column in the CSV)")
+        return np.asarray(spec.continuum, float).copy()
     est = ESTIMATORS[settings.method] if gas_model is None else cont_central
     cont = np.full(len(spec.wave), np.nan)
     flux_all = spec.flux - (gas_model if gas_model is not None else 0.0)

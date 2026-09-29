@@ -66,10 +66,10 @@ def make_synthetic_spectrum(components: list[dict] | None = None, bands=DEFAULT_
     W, F, E, B, L, Cc = [], [], [], [], [], []
     for band in bands:
         wave = band_pixels(band)
-        m = build_model(comps, wave, distance_pc, [(float(wave[0]), float(wave[-1]))], linelists=linelists,
-                        oversample=oversample)
-        line = m.evaluate()
         cont = continuum_model(wave, **(continuum or {}))
+        m = build_model(comps, wave, distance_pc, [(float(wave[0]), float(wave[-1]))], linelists=linelists,
+                        oversample=oversample, continuum=cont)
+        line = m.evaluate()           # emission, and for absorption components F_c (Tr - 1)
         sigma = np.full(len(wave), float(np.median(cont)) / snr)
         W.append(wave); L.append(line); Cc.append(cont); E.append(sigma)
         F.append(cont + line + rng.normal(0.0, sigma))

@@ -158,8 +158,13 @@ def model(molecule: str = "H2O",
           R: float = typer.Option(0.5, "--R", "--r", help="emitting radius [au]"),
           distance: float = 140.0,
           wmin: float = 13.0, wmax: float = 17.0, out: str = "model.csv", dv: float = 4.7, oversample: int = 6,
-          pixel_step: Optional[float] = None):
-    """Quick single-slab model spectrum (Jy) on a MIRI-like pixel grid."""
+          pixel_step: Optional[float] = None,
+          kind: str = typer.Option("slab", help="slab | absorption (a screen of covering fraction --fc in front of a flat continuum)"),
+          fc: float = typer.Option(1.0, help="absorption: covering fraction of the continuum"),
+          rv: float = typer.Option(0.0, help="radial velocity of the slab [km/s], + = redshift"),
+          continuum: float = typer.Option(1.0, help="absorption: flat continuum level [Jy]")):
+    """Quick single-slab model spectrum (Jy) on a MIRI-like pixel grid.  With --kind absorption the
+    output holds the absorbed continuum F = F_c (1 - fc (1 - e^-tau)) and the transmission."""
     import numpy as np
     import pandas as pd
     from .model import Component, build_model
@@ -171,10 +176,14 @@ def model(molecule: str = "H2O",
         wave = np.array(w)
     else:
         wave = np.arange(wmin, wmax, pixel_step)
-    comp = Component("c", molecule, logN=logN, T=T, logR=np.log10(R), fwhm=dv)
-    m = build_model([comp], wave, distance, [(wmin, wmax)], oversample=oversample)
+    comp = Component("c", molecule, logN=logN, T=T, logR=np.log10(R), fwhm=dv, rv=rv, kind=kind, fc=fc)
+    cont = np.full(len(wave), continuum) if kind == "absorption" else None
+    m = build_model([comp], wave, distance, [(wmin, wmax)], oversample=oversample, continuum=cont)
     f = m.evaluate()
-    pd.DataFrame({"wave": wave, "flux": f}).to_csv(out, index=False)
+    if kind == "absorption":
+        pd.DataFrame({"wave": wave, "flux": cont + f, "continuum": cont, "transmission": 1.0 + f / cont}).to_csv(out, index=False)
+    else:
+        pd.DataFrame({"wave": wave, "flux": f}).to_csv(out, index=False)
     rprint(f"wrote {out}: {len(wave)} pixels, tau_max = {m.tau_flags()['c']:.2f}")
 
 
@@ -227,11 +236,15 @@ def prep(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HE
 def detect(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
            name: Optional[str] = typer.Option(None, help=_NAME_HELP), threshold: Optional[float] = None,
            write: Optional[str] = typer.Option(None, help="write the updated config (components + windows) to this YAML"),
-           keep_undetected: bool = False):
-    """Find which molecules the spectrum contains and suggest the components to fit.
+           keep_undetected: bool = False,
+           mode: Optional[str] = typer.Option(None, help="emission | absorption | both (default: fit.detect.mode, both)")):
+    """Find which molecules the spectrum contains, in emission and/or absorption, and suggest the
+    components to fit.
 
-    Templates of every molecule with a cached line list are fitted simultaneously by NNLS; a molecule is
-    detected when removing it raises chi2 by more than the BIC penalty (ΔBIC > threshold, default 10)."""
+    Templates of every molecule with a cached line list (emitting slabs and absorbing screens) are fitted
+    simultaneously by NNLS; a candidate is detected when removing it raises chi2 by more than the BIC
+    penalty (ΔBIC > threshold, default 10).  Absorption needs the unabsorbed continuum (upper envelope or
+    `continuum.method: given`)."""
     from .config import ProjectConfig
     from .detect import apply_detection, detect_molecules
     from .pipeline import prepare
@@ -239,16 +252,19 @@ def detect(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_
     _apply_target(cfg, target, name)
     if threshold is not None:
         cfg.fit.detect.threshold = threshold
+    if mode is not None:
+        cfg.fit.detect.mode = mode
     spec = prepare(cfg)
     d = cfg.fit.detect
     det = detect_molecules(spec, candidates=d.candidates or None, threshold=d.threshold, releases=cfg.linedata.releases,
-                           oversample=d.oversample, R_model=cfg.R_model, R_scale=cfg.R_scale,
+                           oversample=d.oversample, R_model=cfg.R_model, R_scale=cfg.R_scale, mode=d.mode,
                            progress=lambda msg, f: rprint(f"  [dim]{msg}[/dim]"))
-    t = Table(title=f"{spec.name}: molecule detection ({det.n_pixels} pixels, threshold ΔBIC > {d.threshold:g})")
-    for c in ("candidate", "T [K]", "log R", "Δχ²", "ΔBIC", "detected", "windows"):
+    t = Table(title=f"{spec.name}: molecule detection ({det.n_pixels} pixels, threshold ΔBIC > {d.threshold:g}, mode {d.mode})")
+    for c in ("candidate", "T [K]", "log R / f_c", "Δχ²", "ΔBIC", "detected", "windows"):
         t.add_column(c)
     for r in det.table.itertuples():
-        t.add_row(r.candidate, f"{r.T:.0f}", f"{r.logR:.2f}", f"{r.delta_chi2:.0f}", f"{r.delta_BIC:+.0f}",
+        t.add_row(r.candidate, f"{r.T:.0f}", f"f_c {r.fc:.2f}" if r.kind == "absorption" else f"{r.logR:.2f}",
+                  f"{r.delta_chi2:.0f}", f"{r.delta_BIC:+.0f}",
                   "[green]yes[/green]" if r.detected else "[dim]no[/dim]", r.windows)
     rprint(t)
     rprint("suggested components: " + ", ".join(f"{c.name}({c.T:.0f} K)" for c in det.components) +

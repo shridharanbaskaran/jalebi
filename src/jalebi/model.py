@@ -9,6 +9,15 @@ velocity v:
 
 Components in the same *opacity group* sum their tau before the exponential (shared T and
 Omega).  Everything that does not depend on the parameters (Phi, K, B_nu grid) is built once.
+
+Absorption components (kind="absorption") are foreground screens with a covering fraction f_c:
+
+    Tr_a(x)   = 1 - f_c (1 - exp(-tau_a(x - v/c)))
+    F(pix)    = K [ F_cont(x) * (Tr_a - 1) ]           (continuum-subtracted contribution)
+
+i.e. the observed spectrum is F_c * (1 - f_c (1 - e^-tau)) (Li, Boogert & Tielens 2024; the
+`spec_abs` of the group's slabby.py).  Several absorbers multiply their transmissions; with
+covers="all" an absorber also attenuates the emission components behind it.
 """
 from __future__ import annotations
 
@@ -23,9 +32,17 @@ from .instrument import build_lsf_operator, resolving_power
 from .linedata import LineList
 from .molecules import get_molecule
 
-PARAM_NAMES = ("logN", "T", "logR", "rv", "fwhm")
+PARAM_NAMES = ("logN", "T", "logR", "rv", "fwhm", "fc")
 PARAM_LABELS = {"logN": "log N [cm⁻²]", "T": "T [K]", "logR": "log R [au]", "rv": "v [km/s]",
-                "fwhm": "Δv [km/s]", "logNA": "log(N·A) [cm⁻² au²]", "ratio": "ratio", "q": "q", "p": "p"}
+                "fwhm": "Δv [km/s]", "logNA": "log(N·A) [cm⁻² au²]", "ratio": "ratio", "q": "q", "p": "p",
+                "fc": "f_c (covering)"}
+KINDS = ("slab", "annuli", "absorption")
+
+
+def thermal_fwhm_kms(T: float, mass_amu: float) -> float:
+    """FWHM of the thermal (Doppler) line profile, 2 sqrt(2 ln 2) sqrt(kT / m), in km/s."""
+    m = mass_amu * 1.66053906660e-27
+    return float(2.0 * np.sqrt(2.0 * np.log(2.0)) * np.sqrt(KB * T / m) / 1e3)
 
 
 # --------------------------------------------------------------------------
@@ -154,7 +171,8 @@ class OpacityBasis:
 class Component:
     """One slab (or annular) emission component.
 
-    kind: "slab" (N, T, R) or "annuli" (power-law T(r), N(r) between R_in and R_out)
+    kind: "slab" (N, T, R), "annuli" (power-law T(r), N(r) between R_in and R_out) or
+          "absorption" (a foreground screen: N, T, v, covering fraction fc; no emitting area)
     group: components with the same group name sum their opacity (shared T and area)
     tie_to: name of a parent component; this one then shares T, logR, rv, fwhm with it and
             logN = parent.logN - log10(ratio)
@@ -178,11 +196,22 @@ class Component:
     linelist_release: str | None = None   # "hitran", "hitemp", ...; None = model default for the molecule
     eup_max: float | None = None   # optional line selection
     linelist_path: str | None = None
+    # absorption screens only
+    fc: float = 1.0                # covering fraction of the continuum source (0-1)
+    covers: str = "continuum"      # "continuum": screen in front of the continuum only;
+                                   # "all": it also absorbs every emission component (two-slab geometry)
+    fwhm_thermal: bool = False     # add the thermal width at T in quadrature to fwhm (any kind)
+
+    @property
+    def is_absorber(self) -> bool:
+        return self.kind == "absorption"
 
     def params(self) -> dict:
         d = {"logN": self.logN, "T": self.T, "logR": self.logR, "rv": self.rv, "fwhm": self.fwhm}
         if self.kind == "annuli":
             d.update({"q": self.q, "p": self.p, "logRin": self.logRin})
+        if self.kind == "absorption":
+            d["fc"] = self.fc
         if self.tie_to:
             d["ratio"] = self.ratio if self.ratio is not None else get_molecule(self.molecule).default_ratio or 70.0
         return d
@@ -209,13 +238,16 @@ class SlabModel:
     windows    : wavelength windows to model (fine grid built only there); default: pixel range
     oversample : fine-grid points per minimum line FWHM
     R_model, R_scale : resolving power model and multiplicative scale
+    continuum  : continuum flux (Jy) on `wave_pix`; needed by absorption components (the screen
+                 multiplies it).  None = no continuum (absorbers then contribute nothing).
     """
 
     def __init__(self, components: list[Component], linelists: dict[str, LineList], wave_pix: np.ndarray,
                  distance_pc: float = 140.0, windows: list[tuple[float, float]] | None = None,
                  oversample: int = 6, R_model: str = "argyriou2023", R_scale: float = 1.0,
                  R_constant: float | None = None, pixel_edges_x: tuple | None = None, tau_min_line: float = 1e-4,
-                 logN_max: float = 21.0, releases: dict[str, str] | None = None):
+                 logN_max: float = 21.0, releases: dict[str, str] | None = None,
+                 continuum: np.ndarray | None = None):
         self.components = components
         # line lists keyed by "MOL:release" (or "MOL@path"); a bare "MOL" key is accepted as a fallback
         self.linelists = linelists
@@ -244,6 +276,25 @@ class SlabModel:
         lam = self.grid.wave * 1e-6
         self._planck_c1 = 2.0 * H * C / lam**3
         self._planck_c2 = H * C / (lam * KB)
+        self.set_continuum(continuum)
+
+    def set_continuum(self, continuum: np.ndarray | None):
+        """Continuum (Jy) on the pixels -> interpolated onto the fine grid (used by absorbers)."""
+        self.continuum_pix = None
+        self._cont_fine = None
+        if continuum is None:
+            return
+        cont = np.asarray(continuum, float)
+        if cont.shape != self.wave_pix.shape:
+            raise ValueError("continuum must have the shape of wave_pix")
+        ok = np.isfinite(cont) & np.isfinite(self.wave_pix)
+        if ok.sum() < 2:
+            return
+        order = np.argsort(self.wave_pix[ok])
+        w, f = self.wave_pix[ok][order], cont[ok][order]
+        # sub-band overlaps give repeated wavelengths: keep them, np.interp copes with ties
+        self.continuum_pix = cont
+        self._cont_fine = np.interp(self.grid.wave, w, f)
 
     # ---- helpers ------------------------------------------------------------
     def release_of(self, c: Component) -> str:
@@ -272,8 +323,17 @@ class SlabModel:
             ll = self.linelists.get(key0) or self.linelists[key0.split(":")[0].split("@")[0]]
         key = (key0, round(float(fwhm), 3))
         if key not in self._bases:
+            if len(self._bases) > 64:            # thermal widths change with T: keep the cache bounded
+                self._bases.clear()
             self._bases[key] = OpacityBasis(ll, self.grid, fwhm_kms=fwhm)
         return self._bases[key]
+
+    def line_fwhm(self, c: Component, p: dict) -> float:
+        """Line FWHM used for a component: p['fwhm'], plus the thermal width at T when fwhm_thermal."""
+        fw = float(p["fwhm"])
+        if c.fwhm_thermal:
+            fw = float(np.hypot(fw, thermal_fwhm_kms(p["T"], get_molecule(c.molecule).mass_amu)))
+        return fw
 
     def planck(self, T: float) -> np.ndarray:
         key = round(float(T), 2)
@@ -308,27 +368,100 @@ class SlabModel:
 
     # ---- intensities per emitting unit ----------------------------------------
     def _slab_tau(self, c: Component, p: dict) -> np.ndarray:
-        return self.basis(c, p["fwhm"]).tau(10.0 ** p["logN"], p["T"])
+        return self.basis(c, self.line_fwhm(c, p)).tau(10.0 ** p["logN"], p["T"])
+
+    # ---- absorption screens ------------------------------------------------------------
+    def absorbers(self) -> list[Component]:
+        return [c for c in self.components if c.enabled and c.kind == "absorption"]
+
+    def transmission(self, c: Component, p: dict) -> tuple[np.ndarray, float]:
+        """Tr(x) = 1 - fc (1 - exp(-tau)) of one absorbing screen on the fine grid (shifted by its
+        rv) and its peak optical depth."""
+        tau = self._slab_tau(c, p)
+        tmax = float(tau.max()) if tau.size else 0.0
+        tau = self._shift(tau, p["rv"])
+        fc = float(np.clip(p.get("fc", 1.0), 0.0, 1.0))
+        return 1.0 + fc * np.expm1(-tau), tmax
+
+    def total_transmission(self, params: dict[str, dict] | None = None, covers: str | None = None) -> np.ndarray:
+        """Product of the transmissions of every absorber (optionally only those with a given
+        `covers`), on the fine grid."""
+        P = self.resolve_params(params)
+        tr = np.ones(self.grid.n)
+        for c in self.absorbers():
+            if covers is None or c.covers == covers:
+                tr *= self.transmission(c, P[c.name])[0]
+        return tr
+
+    def _screens(self, P: dict[str, dict], units: dict[str, list[Component]]) -> list[tuple[str, np.ndarray, float, float, str]]:
+        """Per absorbing unit: (key, tau on the fine grid (shifted), fc, tau_max, covers).  Members of
+        a group add their opacity and share T, fwhm, rv and fc with the leader."""
+        out = []
+        for key, members in units.items():
+            lead = members[0]
+            if lead.kind != "absorption":
+                continue
+            p0 = P[lead.name]
+            tau = np.zeros(self.grid.n)
+            for c in members:
+                p = P[c.name]
+                tau += self._slab_tau(c, {**p, "T": p0["T"], "fwhm": p0["fwhm"]})
+            tmax = float(tau.max()) if tau.size else 0.0
+            tau = self._shift(tau, p0["rv"])
+            fc = float(np.clip(p0.get("fc", 1.0), 0.0, 1.0))
+            out.append((key, tau, fc, tmax, lead.covers))
+        return out
+
+    def _units(self) -> dict[str, list[Component]]:
+        units: dict[str, list[Component]] = {}
+        for c in self.components:
+            if c.enabled:
+                units.setdefault(c.group if c.group else c.name, []).append(c)
+        return units
+
+    def screen_columns(self, params: dict[str, dict] | None = None) -> dict[str, np.ndarray]:
+        """Per absorbing unit, the pixel flux K[F_c (e^-tau - 1)] for fc = 1, each screen alone (no
+        product with the others): the model is linear in fc for one screen, so these are the columns of a
+        linear solve for the covering fractions (used by the detection)."""
+        P = self.resolve_params(params)
+        cont = self._cont_fine
+        out = {}
+        for key, tau, _, _, _ in self._screens(P, self._units()):
+            out[key] = np.zeros(len(self.wave_pix)) if cont is None else (self.K @ (cont * np.expm1(-tau)))
+        return out
 
     def unit_fluxes(self, params: dict[str, dict] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, float]]:
         """Per emitting unit: pixel fluxes (Jy) for Omega of a 1-au-radius disk, for each
-        independent unit (component or opacity group).  Returns (unit_flux, unit_tau_max, unit_logR)."""
+        independent unit (component or opacity group).  Returns (unit_flux, unit_tau_max, unit_logR).
+
+        Absorption screens are units too: their flux is the (negative) continuum-subtracted
+        contribution K[F_cont (Tr - 1)] in Jy, already complete (their logR is returned as 0 so that
+        the area scaling 10^(2 logR) is 1).  Screens with covers="all" also multiply the emission
+        units.  When several screens are present the k-th one acts on what the first k-1 let through,
+        so that the unit fluxes add up to F_cont (prod Tr - 1)."""
         P = self.resolve_params(params)
-        comps = [c for c in self.components if c.enabled]
-        units: dict[str, list[Component]] = {}
-        for c in comps:
-            key = c.group if c.group else c.name
-            units.setdefault(key, []).append(c)
+        units = self._units()
         flux, taumax, logR = {}, {}, {}
+        screens = [(key, 1.0 + fc * np.expm1(-tau), tmax, cov) for key, tau, fc, tmax, cov in self._screens(P, units)]
+        tr_all = None
+        all_key = ()
+        if any(cov == "all" for _, _, _, cov in screens):
+            tr_all = np.ones(self.grid.n)
+            for key, tr, _, cov in screens:
+                if cov == "all":
+                    tr_all = tr_all * tr
+            all_key = tuple((key, tuple(sorted(P[units[key][0].name].items()))) for key, _, _, cov in screens if cov == "all")
         for key, members in units.items():
             lead = members[0]
+            if lead.kind == "absorption":
+                continue
             p0 = P[lead.name]
             ck = None
             if self.unit_cache is not None:
                 # the 1-au flux does not depend on logR for slabs (only the annuli R_out does)
                 skip = () if lead.kind == "annuli" else ("logR",)
-                ck = (key, lead.kind, lead.n_annuli,
-                      tuple((c.name, self.linelist_key(c), tuple(sorted((k, v) for k, v in P[c.name].items() if k not in skip)))
+                ck = (key, lead.kind, lead.n_annuli, all_key,
+                      tuple((c.name, self.linelist_key(c), c.fwhm_thermal, tuple(sorted((k, v) for k, v in P[c.name].items() if k not in skip)))
                             for c in members))
                 hit = self.unit_cache.get(ck)
                 if hit is not None:
@@ -347,6 +480,8 @@ class SlabModel:
                 tmax = float(tau.max()) if tau.size else 0.0
                 I = self.planck(p0["T"]) * (-np.expm1(-tau))
             I = self._shift(I, p0["rv"])
+            if tr_all is not None:
+                I = I * tr_all
             flux[key] = (self.K @ I) * self._omega_unit / JY     # Jy for R = 1 au
             taumax[key] = tmax
             logR[key] = p0["logR"]
@@ -354,6 +489,17 @@ class SlabModel:
                 if len(self.unit_cache) > 256:
                     self.unit_cache.clear()
                 self.unit_cache[ck] = (flux[key], tmax)
+        if screens:
+            cont = self._cont_fine
+            through = np.ones(self.grid.n)
+            for key, tr, tmax, _ in screens:
+                if cont is None:
+                    flux[key] = np.zeros(len(self.wave_pix))
+                else:
+                    flux[key] = (self.K @ (cont * through * (tr - 1.0)))
+                    through = through * tr
+                taumax[key] = tmax
+                logR[key] = 0.0
         return flux, taumax, logR
 
     def _annuli_intensity(self, c: Component, p: dict) -> np.ndarray:
@@ -420,8 +566,21 @@ class SlabModel:
         The model is linear in the areas A_u = R_u^2 of slab units, so they are solved exactly.
         Tied isotopologues share their parent's area (their flux is added to the parent's column), and
         radial-gradient (annuli) units are held at their current logR, because there R sets the outer
-        radius of the power law and the flux is not linear in R^2.  Returns ({unit: logR}, chi2)."""
-        uf_all, _, logR = self.unit_fluxes(params)
+        radius of the power law and the flux is not linear in R^2; absorption screens have no area and
+        keep their covering fraction.  Returns ({unit: logR}, chi2)."""
+        logR, _, chi2 = self.solve_linear(data, sigma, params, mask, fixed, solve_fc=False)
+        return logR, chi2
+
+    def solve_linear(self, data: np.ndarray, sigma: np.ndarray, params: dict[str, dict] | None = None,
+                     mask: np.ndarray | None = None, fixed: set[str] | None = None, solve_fc: bool = False
+                     ) -> tuple[dict[str, float], dict[str, float], float]:
+        """NNLS over every linear parameter: the areas of the slab units and, with `solve_fc`, the
+        covering fractions of the absorption screens (each screen's column is its flux alone at fc = 1,
+        so overlapping screens are treated independently: exact for one screen, an approximation for
+        several), with 0 <= fc <= 1.
+        Returns ({unit: logR}, {screen unit: fc}, chi2)."""
+        P = self.resolve_params(params)
+        uf_all, _, logR = self.unit_fluxes(P)
         tm = self.tied_units()
         uf = self.fold_tied(uf_all)
         keys = list(uf)
@@ -429,25 +588,42 @@ class SlabModel:
         m &= np.isfinite(data) & np.isfinite(sigma) & (sigma > 0)
         fixed = set(fixed or set())
         fixed |= {k for k in keys if (lead := self._unit_lead(k)) is not None and lead.kind == "annuli"}
+        screens = {k for k in keys if (lead := self._unit_lead(k)) is not None and lead.kind == "absorption"}
+        fc_out = {k: float(np.clip(P[self._unit_lead(k).name].get("fc", 1.0), 0.0, 1.0)) for k in screens}
+        if not solve_fc:
+            fixed |= screens
         fixed |= {tm[k] for k in fixed if k in tm}          # a fixed isotopologue fixes its parent's area too
         free = [k for k in keys if k not in fixed]
+        cols = dict(uf)
+        if solve_fc and (screens - fixed):
+            cols.update(self.screen_columns(P))            # fc = 1, independent columns
         y = data[m].copy()
         for k in keys:
             if k in fixed:
                 y -= uf[k][m] * 10.0 ** (2.0 * logR[k])
-        A = np.column_stack([uf[k][m] / sigma[m] for k in free]) if free else np.zeros((m.sum(), 0))
+        A = np.column_stack([cols[k][m] / sigma[m] for k in free]) if free else np.zeros((m.sum(), 0))
         out = dict(logR)
         if free:
-            coef, rnorm = nnls(A, y / sigma[m])
+            if any(k in screens for k in free):
+                # covering fractions are bounded by 1: bounded-variable least squares
+                from scipy.optimize import lsq_linear
+                hi = np.array([1.0 if k in screens else np.inf for k in free])
+                r = lsq_linear(A, y / sigma[m], bounds=(np.zeros(len(free)), hi), method="bvls")
+                coef, rnorm = r.x, float(np.sqrt(2.0 * r.cost))
+            else:
+                coef, rnorm = nnls(A, y / sigma[m])
             for k, cf in zip(free, coef):
-                out[k] = 0.5 * np.log10(max(cf, 1e-12))
+                if k in screens:
+                    fc_out[k] = float(cf)
+                else:
+                    out[k] = 0.5 * np.log10(max(cf, 1e-12))
             chi2 = rnorm**2
         else:
             chi2 = float(np.sum((y / sigma[m]) ** 2))
         for ku, kp in tm.items():
             if kp in out:
                 out[ku] = out[kp]
-        return out, chi2
+        return out, fc_out, chi2
 
     def tau_flags(self, params=None) -> dict[str, float]:
         _, tmax, _ = self.unit_fluxes(params)
@@ -465,7 +641,8 @@ def build_model(components: list[Component], wave_pix, distance_pc, windows=None
     restricts them to the windows and prunes weak lines.
 
     Each component may use its own release (e.g. a hot H2O component on HITEMP and a cold one on
-    HITRAN); `releases` gives the per-molecule default for components that do not set one."""
+    HITRAN); `releases` gives the per-molecule default for components that do not set one.
+    Pass `continuum=` (Jy on wave_pix) when the model has absorption components."""
     from .linedata import load_linelist
     linelists = dict(linelists or {})
     releases = dict(releases or {})

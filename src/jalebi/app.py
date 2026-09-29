@@ -428,17 +428,23 @@ class ComponentCard:
         self.group = pn.widgets.TextInput(name="opacity group", value=cfg.group or "", placeholder="shared τ", **W)
         self.tie_to = pn.widgets.TextInput(name="tie to", value=cfg.tie_to or "", placeholder="parent", **W)
         self.ratio = pn.widgets.FloatInput(name="ratio (parent/this, for ties)", value=cfg.ratio or get_molecule(cfg.molecule).default_ratio or 70.0, **W)
-        self.kind = pn.widgets.Select(name="kind", options=["slab", "annuli"], value=cfg.kind, **W)
+        self.kind = pn.widgets.Select(name="kind", options=["slab", "annuli", "absorption"], value=cfg.kind, **W)
+        is_abs = cfg.kind == "absorption"
+        self.fc = pn.widgets.EditableFloatSlider(name="f_c (covering fraction)", start=0.0, end=1.0, step=0.01, value=cfg.fc, format="0.00", visible=is_abs, **W)
+        self.covers = pn.widgets.Select(name="absorbs", options={"continuum only": "continuum", "continuum + emission": "all"}, value=cfg.covers, visible=is_abs, **W)
+        self.fwhm_thermal = pn.widgets.Checkbox(name="add thermal width at T to Δv", value=cfg.fwhm_thermal, **W)
+        self.logR.visible = not is_abs
         self.q = pn.widgets.EditableFloatSlider(name="q (T∝r⁻ᑫ)", start=0.0, end=1.5, step=0.02, value=cfg.q, visible=cfg.kind == "annuli", **W)
         self.p = pn.widgets.EditableFloatSlider(name="p (N∝r⁻ᵖ)", start=-1.0, end=3.0, step=0.05, value=cfg.p, visible=cfg.kind == "annuli", **W)
         self.logRin = pn.widgets.EditableFloatSlider(name="log R_in [au]", start=-3.0, end=1.0, step=0.02, value=cfg.logRin, visible=cfg.kind == "annuli", **W)
-        self.fixed = pn.widgets.MultiChoice(name="fixed in fit", options=["logN", "T", "logR", "rv", "fwhm", "ratio"], value=list(cfg.fixed), **W)
+        self.fixed = pn.widgets.MultiChoice(name="fixed in fit", options=["logN", "T", "logR", "rv", "fwhm", "ratio", "fc"], value=list(cfg.fixed), **W)
         self.head = _html("", sizing_mode="stretch_width")
         self._tau_txt = None
         # live parameters: coalesced through the app scheduler (one evaluation per tick)
-        for w in (self.logN, self.T, self.logR, self.rv, self.fwhm, self.q, self.p, self.logRin, self.ratio):
+        for w in (self.logN, self.T, self.logR, self.rv, self.fwhm, self.q, self.p, self.logRin, self.ratio, self.fc):
             w.param.watch(lambda e: app._schedule("param"), "value")
-        for w in (self.molecule, self.release, self.enabled, self.group, self.tie_to, self.kind, self.name):
+        for w in (self.molecule, self.release, self.enabled, self.group, self.tie_to, self.kind, self.name,
+                  self.covers, self.fwhm_thermal):
             w.param.watch(lambda e: app._schedule("structure"), "value")
         self.molecule.param.watch(self._molecule_changed, "value")
         self.kind.param.watch(self._kind_changed, "value")
@@ -447,13 +453,13 @@ class ComponentCard:
             self.rv, self.fwhm,
             pn.Row(self.group, self.tie_to, sizing_mode="stretch_width"),
             pn.Row(self.kind, self.ratio, sizing_mode="stretch_width"),
-            self.q, self.p, self.logRin, self.fixed,
-            header=_html('<span class="sf-subtitle">velocity · geometry · ties · fixed</span>'),
+            self.q, self.p, self.logRin, self.covers, self.fwhm_thermal, self.fixed,
+            header=_html('<span class="sf-subtitle">velocity · geometry · absorption · ties · fixed</span>'),
             collapsed=True, css_classes=["sf-sub"], sizing_mode="stretch_width", margin=(4, 0, 2, 0))
         self.panel = pn.Card(
             pn.Row(self.name, self.enabled, self.remove, sizing_mode="stretch_width"),
             pn.Row(self.molecule, self.release, sizing_mode="stretch_width"),
-            self.logN, self.T, self.logR, self.advanced,
+            self.logN, self.T, self.logR, self.fc, self.advanced,
             header=self.head, collapsible=True, css_classes=["sf-comp"], sizing_mode="stretch_width",
             margin=(0, 0, 10, 0), styles={"border-left": f"3px solid {get_molecule(cfg.molecule).colour}"})
         self.refresh_head()
@@ -490,6 +496,10 @@ class ComponentCard:
     def _kind_changed(self, e):
         for w in (self.q, self.p, self.logRin):
             w.visible = self.kind.value == "annuli"
+        is_abs = self.kind.value == "absorption"
+        self.fc.visible = is_abs
+        self.covers.visible = is_abs
+        self.logR.visible = not is_abs
 
     def to_config(self) -> ComponentConfig:
         return ComponentConfig(name=self.name.value.strip() or "comp", molecule=self.molecule.value, logN=self.logN.value,
@@ -497,10 +507,11 @@ class ComponentCard:
                                kind=self.kind.value, group=self.group.value.strip() or None,
                                tie_to=self.tie_to.value.strip() or None, ratio=self.ratio.value, q=self.q.value,
                                p=self.p.value, logRin=self.logRin.value, enabled=self.enabled.value, fixed=list(self.fixed.value),
+                               fc=self.fc.value, covers=self.covers.value, fwhm_thermal=self.fwhm_thermal.value,
                                linelist_release=None if self.release.value == "auto" else self.release.value)
 
     def set_values(self, d: dict):
-        for k in ("logN", "T", "logR", "rv", "fwhm", "q", "p", "logRin"):
+        for k in ("logN", "T", "logR", "rv", "fwhm", "q", "p", "logRin", "fc"):
             if k in d:
                 getattr(self, k).value = float(np.clip(d[k], getattr(self, k).start, getattr(self, k).end))
         if "ratio" in d:
@@ -1200,6 +1211,13 @@ class JalebiApp:
         self.cont_fig.title.text = f"Continuum — {cfg.continuum.method}"
         self.cfg.continuum = cfg.continuum; self.cfg.masks = cfg.masks
         if self.disp_model is not None:
+            # absorption screens multiply the continuum: give the display model the new one
+            try:
+                self.disp_model.set_continuum(spec.continuum[self.disp_sel])
+                if self.disp_model.unit_cache is not None:
+                    self.disp_model.unit_cache.clear()
+            except Exception:
+                pass
             self.update_model_plot(refresh_data=True)
 
     # ------------------------------------------------------------------ Model tab
@@ -1351,7 +1369,8 @@ class JalebiApp:
                 card.refresh_head()
             self.grid_comp.options = [c.name.value for c in self.cards]
             self.disp_model = build_model(comps, self.spec.wave[sel], self.spec.distance_pc, wins, oversample=4,
-                                          R_model=self.cfg.R_model, R_scale=self.cfg.R_scale)
+                                          R_model=self.cfg.R_model, R_scale=self.cfg.R_scale,
+                                          continuum=self.spec.continuum[sel] if self.spec.continuum is not None else None)
             self.disp_model.unit_cache = {}
             for card, comp in zip(self.cards, comps):
                 try:
@@ -1497,7 +1516,7 @@ class JalebiApp:
                 from .detect import detect_molecules
                 d = cfg.fit.detect
                 st["result"] = detect_molecules(spec, candidates=d.candidates or None, threshold=float(self.detect_thr.value),
-                                                releases=cfg.linedata.releases, oversample=d.oversample,
+                                                releases=cfg.linedata.releases, oversample=d.oversample, mode=d.mode,
                                                 R_model=cfg.R_model, R_scale=cfg.R_scale,
                                                 progress=lambda m, f: st.update(msg=m, frac=f))
             except Exception:
@@ -1525,7 +1544,8 @@ class JalebiApp:
         for r in t.itertuples():
             tone = "teal" if r.detected else "dim"
             rows.append({"candidate": f'<span class="sf-chip {tone}">{"✓" if r.detected else "·"} {r.candidate}</span>',
-                         "T [K]": f"{r.T:.0f}", "log N": f"{r.logN:.1f}", "log R": f"{r.logR:.2f}",
+                         "T [K]": f"{r.T:.0f}", "log N": f"{r.logN:.1f}",
+                         "log R / f_c": (f"f_c {r.fc:.2f}" if getattr(r, "kind", "slab") == "absorption" else f"{r.logR:.2f}"),
                          "Δχ²": f"{r.delta_chi2:.0f}", "ΔBIC": f"{r.delta_BIC:+.0f}", "χ²_red (local)": f"{r.chi2_red_local:.2f}",
                          "pixels": r.n_pixels, "windows [µm]": r.windows})
         self.detect_table.object = _df_html(pd.DataFrame(rows))

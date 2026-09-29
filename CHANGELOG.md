@@ -3,6 +3,47 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — unreleased — LTE gas absorption
+
+### Added
+- **Absorption screens** (`kind: absorption`): a foreground slab seen against the continuum,
+  $F = F_c\,[1 - f_c\,(1 - e^{-\tau})]$ (Li, Boogert & Tielens 2024; the `spec_abs` of the group's
+  `slabby.py`). Same opacity, fine grid, line lists and LSF as the emission; free parameters log N, T, v
+  (always free), the covering fraction `fc`, and Δv with `fit_fwhm`. Several screens multiply; `covers: all`
+  also attenuates the emission components (the `two_slabs_spec` geometry). The model stays linear in the
+  emitting areas, so NNLS, the (log N, T) grid, DE and emcee work unchanged. See README § The physics 6 and
+  `docs/ABSORPTION.md`.
+- **Detection in absorption**: `detect_molecules(mode="both"|"emission"|"absorption")`,
+  `fit.detect.mode` (default `both`), `jalebi detect --mode`. One screen template per candidate joins
+  the linear solve with the covering fraction as a bounded (0–1) coefficient
+  (`SlabModel.solve_linear(solve_fc=True)`, BVLS; `SlabModel.screen_columns`); candidates `<mol>_abs` are
+  judged like emission candidates (4-parameter BIC penalty) but only on pixels below the continuum, in
+  three passes (emission alone; all templates with the screens judged; all emission with the detected
+  screens), and the screen temperature is picked afterwards among 50–500 K. Detected screens are
+  suggested as `kind: absorption` components. The detection table has `kind` and `fc` columns (CLI table
+  and app show `log R / f_c`). FZ Tau: no false screens, emission unchanged; the bundled synthetic
+  absorber: the CO₂ screen and the CO₂ emission behind it.
+- `Component.fwhm_thermal`: add the thermal width at T in quadrature to `fwhm` (any component kind).
+- `SlabModel(continuum=...)` / `build_model(continuum=...)` and `SlabModel.set_continuum`; the fit
+  problem, the display model of the app and the full-spectrum plot pass the continuum through.
+- Continuum method `given`: keep the continuum loaded with the spectrum. `load_csv` reads a `continuum`,
+  `baseline`, `cont` or `base_fluxes` column as the continuum.
+- `jalebi model --kind absorption --fc --rv --continuum`: writes the absorbed continuum and the transmission.
+- Web app: `kind: absorption` in the component card, with an `f_c` slider, an *absorbs* selector
+  (continuum only / continuum + emission) and the thermal-width checkbox; log R is hidden for a screen;
+  the display model follows continuum changes.
+- `examples/11_absorption_fit.py` + `configs/absorption_synthetic.yaml`: a CO₂ screen (v = −40 km/s,
+  f_c = 0.6) in front of hot CO₂ emission, recovered within 1σ by the normal pipeline.
+- `tests/test_absorption.py` (13 tests): transmission formula, f_c scaling, velocity direction, screens
+  multiplying, `covers: all`, exact area solve with a screen, thermal width, free parameters and an
+  injection–recovery with DE, config validation, CSV baseline + `given`, synthetic spectra, CLI.
+
+### Changed
+- `FitProblem.area_units()` no longer lists screens; `all_units()` lists every independent unit and is what
+  `component_significance` and the grid use. `ABSORPTION_BOUNDS` (T 20–1500 K, v ±200 km/s, log N 13–22)
+  are the default bounds of a screen; per-component `bounds:` still override them.
+- `plots.plot_fit` draws absorption units dashed.
+
 ## [0.10.1] — 2026-09-29 — line maps and velocity maps from IFU cubes
 
 ### Added

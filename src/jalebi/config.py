@@ -39,6 +39,9 @@ class TargetConfig(BaseModel):
 
 class ContinuumConfig(BaseModel):
     method: str = "irsqr"               # irsqr | median_sg | asls | convex_hull | rolling_min | spline | banzatti | none
+                                        # | given (keep the continuum loaded with the spectrum, e.g. a CSV
+                                        #   'continuum'/'baseline' column).  For absorption-dominated
+                                        #   spectra use irsqr with quantile ~0.9 (upper envelope) or given.
     protect: bool = True
     protected: dict[str, list[float]] = Field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_PROTECTED.items()})
     smooth: int = 0
@@ -75,7 +78,7 @@ class ComponentConfig(BaseModel):
     logR: float = -0.5
     rv: float = 0.0
     fwhm: float = 4.7
-    kind: str = "slab"
+    kind: str = "slab"                  # slab | annuli | absorption
     group: str | None = None
     tie_to: str | None = None
     ratio: float | None = None
@@ -83,6 +86,9 @@ class ComponentConfig(BaseModel):
     p: float = 1.0
     logRin: float = -1.5
     n_annuli: int = 20
+    fc: float = 1.0                     # absorption: covering fraction of the continuum (0-1)
+    covers: str = "continuum"           # absorption: continuum | all (also absorbs the emission components)
+    fwhm_thermal: bool = False          # add the thermal width at T in quadrature to fwhm
     enabled: bool = True
     linelist_release: str | None = None      # None = project default (linedata.releases[molecule], else "hitran")
     eup_max: float | None = None
@@ -128,6 +134,7 @@ class DetectConfig(BaseModel):
     replace_windows: bool = True               # set fit.windows from the detected molecules
     keep_undetected: bool = False              # keep configured components whose molecule was not tested
     oversample: int = 2
+    mode: str = "both"                         # emission | absorption | both: test emitting slabs and/or absorbing screens
 
 
 class FitConfig(BaseModel):
@@ -184,6 +191,14 @@ class ProjectConfig(BaseModel):
         names = [c.name for c in v]
         if len(names) != len(set(names)):
             raise ValueError(f"component names must be unique: {names}")
+        from .model import KINDS
+        for c in v:
+            if c.kind not in KINDS:
+                raise ValueError(f"component {c.name}: kind must be one of {KINDS}, got {c.kind!r}")
+            if c.covers not in ("continuum", "all"):
+                raise ValueError(f"component {c.name}: covers must be 'continuum' or 'all'")
+            if not 0.0 <= c.fc <= 1.0:
+                raise ValueError(f"component {c.name}: fc must be between 0 and 1")
         return v
 
     # ---- io -------------------------------------------------------------------------------

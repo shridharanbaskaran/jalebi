@@ -52,7 +52,7 @@ posterior, so you see the uncertainties **and** the degeneracies between paramet
 
 1. [Installation](#installation)
 2. [Five-minute tour](#five-minute-tour)
-3. [The physics](#the-physics): slabs, opacity, radiative transfer, the instrument, many components
+3. [The physics](#the-physics): slabs, opacity, radiative transfer, the instrument, many components, absorption screens
 4. [Degeneracies: what a slab fit can and cannot tell you](#degeneracies-what-a-slab-fit-can-and-cannot-tell-you)
 5. [Data preparation](#data-preparation): input, continuum, masks, noise
 6. [Fitting and uncertainties](#fitting-and-uncertainties): likelihood, priors, the three stages, diagnostics
@@ -127,7 +127,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.10.1  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.11.0  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...
@@ -340,9 +340,50 @@ Water usually needs two or three temperature components (hot, warm and cold: e.g
 2025). Each component can use its own line list: HITEMP for hot water (complete at high $E_u$), HITRAN
 for cold water (accurate low-$E_u$ lines at 17–27 µm). See `examples/configs/FZ_Tau_water_hot_cold.yaml`.
 
-### 6. Derived quantities
+### 6. Absorption screens (gas seen against the continuum)
 
-For every untied component JALEBI reports the emitting radius $R$ (au), the area-weighted column
+Embedded protostars and edge-on disks show the same bands in *absorption*: cold foreground gas against
+the warm continuum (Lahuis & van Dishoeck 2000; Li, Boogert & Tielens 2024). A component with
+`kind: absorption` is such a screen. Its optical depth $\tau_a(x)$ is computed exactly as for an emitting
+slab from $(\log N, T, \Delta v)$, the whole screen is shifted by its velocity $v$ (negative = blueshifted,
+e.g. an outflow), and instead of an emitting area it has a **covering fraction** $f_c$ of the continuum
+source:
+
+$$
+F_\nu = F_c\,\bigl[1 - f_c\,(1 - e^{-\tau_a})\bigr]
+\qquad\Longrightarrow\qquad
+F^{\text{model}}_i - F_{c,i} = \sum_j K_{ij}\,F_c(x_j)\,\bigl[\mathrm{Tr}_a(x_j) - 1\bigr],
+\quad \mathrm{Tr}_a = 1 - f_c(1 - e^{-\tau_a}).
+$$
+
+This is the `spec_abs` model of the group's `slabby.py`, on the same fine grid, LSF and line lists as the
+emission (the continuum $F_c$ is the one from the data-preparation step, interpolated onto the fine grid).
+Things to know:
+
+- **Free parameters**: $\log N$, $T$, $v$ and $f_c$ (the velocity is always free for a screen; `fwhm` with
+  `fit_fwhm`). There is no area: the depth of a saturated line is set by $f_c$, its wings by $N$ and $\Delta v$,
+  and the line ratios by $T$. Default bounds are wider than for emission: $T$ 20–1500 K, $v$ ±200 km/s.
+- **Several screens** multiply their transmissions. The per-unit curves are attributed sequentially (the
+  second screen acts on what the first let through) so that they still add up to the total.
+- **`covers: continuum`** (default) puts the screen in front of the continuum only; the emission
+  components are side by side with it. **`covers: all`** puts it in front of everything: the emitting
+  slabs are attenuated by the same $\mathrm{Tr}_a$ before the LSF (the `two_slabs_spec` geometry of the
+  group's code, where the flux is $(F_c + F_\text{em})\,e^{-\tau}$). The model stays linear in the emitting
+  areas either way, so the NNLS area solve, the grid and the optimiser work unchanged.
+- **Thermal width**: `fwhm_thermal: true` adds the thermal FWHM at $T$, $2\sqrt{2\ln 2}\sqrt{kT/m}$, in
+  quadrature to `fwhm` (0.5 km/s for H₂O at 100 K, so in practice the turbulent `fwhm` dominates). The
+  old code used $\sqrt{2kT/m}$ *as* the FWHM, i.e. a 1.7× narrower profile; the equivalent widths agree.
+- **The continuum matters**: for an absorption-dominated spectrum the default lower-envelope continuum
+  follows the troughs and hides them. Either load the continuum with the spectrum (a `continuum` or
+  `baseline` column in a CSV, kept with `continuum.method: given`) or use `irsqr` with `quantile: 0.9`
+  (an upper envelope).
+- `jalebi model --kind absorption --fc 0.6 --rv -30` writes an absorbed flat continuum and the
+  transmission; `examples/11_absorption_fit.py` fits a synthetic CO₂ screen in front of hot CO₂ emission
+  and recovers $(\log N, T, v, f_c)$ within 1σ. Full description and validation: [`docs/ABSORPTION.md`](docs/ABSORPTION.md).
+
+### 7. Derived quantities
+
+For every untied emitting component JALEBI reports the emitting radius $R$ (au), the area-weighted column
 
 $$
 \log_{10}(N\!\cdot\!A) = \log_{10} N + \log_{10}\pi + 2\log_{10}R \qquad [\mathrm{cm^{-2}\,au^2}],
@@ -544,9 +585,26 @@ molecules* tab decide from the data which components to fit:
 5. **Isotopologues** count only when their parent is detected, and are suggested as tied components.
    Starting values come from the best template, and the suggested windows are the union of the detected
    molecules' windows. A hot > warm > cold ordering prior is added.
+6. **Absorption** (`fit.detect.mode: both`, the default; `emission` / `absorption` restrict it): every
+   candidate also gets a *screen* template — `kind: absorption` at a fixed (log N, T), covering fraction
+   as the linear coefficient, bounded 0–1 (BVLS) — judged as `<mol>_abs` with a 4-parameter BIC penalty
+   and **only on pixels below the continuum**: a screen must explain real troughs, not the mismatch of
+   the emission templates between emission lines. One screen per candidate enters the solve (the model
+   is linear in f_c for one screen; two of the same molecule would double-count saturated lines); its
+   temperature is then chosen among a few (50–500 K) by refitting each alone to the residual. An
+   emitting slab and a screen of the same molecule are nearly anti-collinear, so `both` runs three
+   passes: emission alone; everything together with only the screens judged; and, when screens are found,
+   all emission candidates together with the detected screens for the final verdict on the emission (a
+   band hidden under absorption is only found there — the CO₂ emission behind the screen in the example
+   below). Detected screens become `kind: absorption` components with `fc` from the solve (v = 0 to
+   start: the fit finds the shift). The continuum must be the unabsorbed one (see § The physics 6): with
+   the default lower-envelope continuum absorption is invisible.
 
 On the bundled FZ Tau spectrum this finds CO, hot, warm and cold water, CO₂ and C₂H₂, with HCN just below
-the threshold (examples/04).
+the threshold (examples/04) — and no absorber (the emission results are identical to `mode: emission`). On
+the bundled synthetic absorber (`example:synthetic/absorption_synthetic.csv`) it finds the CO₂ screen
+(150 K, f_c 0.64 for a truth of 120 K, 0.6; ΔBIC +356) and the hot CO₂ emission behind it (ΔBIC +102),
+nothing else.
 
 ---
 
@@ -644,7 +702,8 @@ target:
     apcorr: mrs                 # mrs | gaussian | none | x1d
 continuum:
   method: irsqr                 # irsqr | median_sg | asls | convex_hull | rolling_min | spline | banzatti | none
-  quantile: 0.1                 # irsqr
+                                # | given (keep the continuum loaded with the spectrum: CSV 'continuum'/'baseline' column)
+  quantile: 0.1                 # irsqr (0.9 = upper envelope, for absorption-dominated spectra)
   knot_spacing: 25              # irsqr, pixels
   median_window: 101            # median_sg
   median_percentile: 25.0
@@ -678,7 +737,10 @@ components:
     logR: -0.6
     rv: 0.0                     # km/s (free with fit.fit_rv)
     fwhm: 4.7                   # intrinsic line FWHM, km/s (free with fit.fit_fwhm)
-    kind: slab                  # slab | annuli
+    kind: slab                  # slab | annuli | absorption (a screen: F = F_c [1 - fc (1 - e^-tau)])
+    fc: 1.0                     # absorption: covering fraction of the continuum (free, 0-1)
+    covers: continuum           # absorption: continuum | all (also absorbs the emission components)
+    fwhm_thermal: false         # add the thermal width at T in quadrature to fwhm
     group: null                 # components with the same group share T and area and add opacity
     tie_to: null                # parent component (isotopologues)
     ratio: null                 # parent/child column ratio for tie_to (default per molecule, e.g. 70)
@@ -879,8 +941,9 @@ HITEMP water fast without changing the spectrum. Sources and credits for all bun
 | `08_cube_maps.py` | HV Tau C cubes: continuum + point-source removal, moment and velocity maps of five lines, the H₂ stack, channel maps and a PV cut along the jet | 30 s |
 | `09_cube_region_fit.py` | region spectra (jet lobes, H₂ wind, halo) over all sub-bands, line fluxes per region, `--fit` for a slab fit of a region | 15 s |
 | `10_cube_maps_recipe.py` | the old `cube_maps.py` functions and the same recipe through the jalebi API, numbers compared; the ratio figure, a masked map with an au box, channel slices | 35 s |
+| `11_absorption_fit.py` | a cold CO₂ absorption screen (v = −40 km/s, f_c = 0.6) in front of a continuum and hot CO₂ emission: synthetic spectrum → grid → DE → emcee, truth recovered within 1σ | 1–3 min |
 | `notebooks/jalebi_quickstart.ipynb` | all of the above in one notebook | 5 min |
-| `configs/` | `synthetic.yaml`, `FZ_Tau_quick.yaml`, `FZ_Tau_water_hot_cold.yaml`, `FZ_Tau_water_CO.yaml`, `FZ_Tau_autodetect.yaml`, `FZ_Tau_annuli.yaml`, `targets.csv`, `HV_Tau_C_cube.yaml` (for `jalebi cube run`) | |
+| `configs/` | `synthetic.yaml`, `FZ_Tau_quick.yaml`, `FZ_Tau_water_hot_cold.yaml`, `FZ_Tau_water_CO.yaml`, `FZ_Tau_autodetect.yaml`, `FZ_Tau_annuli.yaml`, `absorption_synthetic.yaml`, `targets.csv`, `HV_Tau_C_cube.yaml` (for `jalebi cube run`) | |
 
 *on 2 cores; scale with `--processes`.
 
@@ -1076,9 +1139,11 @@ matplotlib, pybaselines, pydantic, typer, rich, Panel and Bokeh, and the HITRAN 
 - Jones, O. C. et al. 2023, MNRAS 523, 2519 — MRS resolving power
 - Kaeufer, T. et al. 2024, A&A — *Bayesian analysis of the molecular emission and dust continuum of protoplanetary disks* (DuCKLinG)
 - Kochanov, R. V. et al. 2016, JQSRT 177, 15 — HAPI
+- Lahuis, F. & van Dishoeck, E. F. 2000, A&A 355, 699 — ISO absorption bands of C₂H₂, HCN and CO₂ toward massive protostars (slab absorption model)
 - Law, D. R. et al. 2023, AJ 166, 45 — MRS cubes and PSF
 - Lawson, C. L. & Hanson, R. J. 1974, *Solving Least Squares Problems* (NNLS)
 - Li, G. et al. 2015, ApJS 216, 15 — CO line list
+- Li, J., Boogert, A. C. A. & Tielens, A. G. G. M. 2024 — gas-phase absorption toward embedded protostars with JWST: $F = F_c\,[1 - f_c(1 - e^{-\tau})]$
 - Pontoppidan, K. M. et al. 2024, ApJ 963, 158 — *High-contrast JWST-MIRI spectroscopy of planet-forming disks for the JDISC Survey*
 - Rothman, L. S. et al. 2010, JQSRT 111, 2139 — HITEMP
 - Salyk, C. et al. 2011, ApJ 731, 130

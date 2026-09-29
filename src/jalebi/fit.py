@@ -8,6 +8,7 @@ Stages
 Parameterisation
   per component: logN [cm^-2], T [K], logR [au] (or logNA = log10(N * A[au^2]) when
   area_param="logNA"), optional rv [km/s] and fwhm [km/s]; tied components: ratio.
+  absorption screens: logN, T, rv, fc (covering fraction) and optional fwhm; no area.
   global: log_s (noise scale), optional.
 Priors: uniform within bounds, optional Gaussian, ordering constraints T_a > T_b.
 """
@@ -53,7 +54,10 @@ class Param:
 
 DEFAULT_BOUNDS = {"logN": (13.0, 21.0), "T": (100.0, 1500.0), "logR": (-2.5, 1.5), "logNA": (12.0, 22.0),
                   "rv": (-30.0, 30.0), "fwhm": (2.0, 30.0), "ratio": (10.0, 300.0), "q": (0.0, 1.5),
-                  "p": (-1.0, 3.0), "logRin": (-2.5, 0.5), "log_s": (-1.0, 1.0)}
+                  "p": (-1.0, 3.0), "logRin": (-2.5, 0.5), "log_s": (-1.0, 1.0), "fc": (0.0, 1.0)}
+# absorbing screens: colder gas, larger velocities (outflows), higher columns
+ABSORPTION_BOUNDS = {"logN": (13.0, 22.0), "T": (20.0, 1500.0), "rv": (-200.0, 200.0), "fwhm": (1.0, 60.0),
+                     "fc": (0.0, 1.0)}
 
 
 def logNA_from(logN, logR):
@@ -103,8 +107,13 @@ class FitProblem:
             for (a, b), ww in zip(windows, [window_weights.get(i, 1.0) for i in range(len(windows))]):
                 w[(self.wave >= a) & (self.wave <= b)] = ww
         self.weights = w
+        cont = spec.continuum[used] if spec.continuum is not None else None
         self.model = build_model(components, self.wave, spec.distance_pc, windows, linelists=linelists,
-                                 releases=releases, oversample=oversample, **(model_kwargs or {}))
+                                 releases=releases, oversample=oversample, continuum=cont, **(model_kwargs or {}))
+        if self.model.absorbers() and (cont is None or not np.any(np.isfinite(cont) & (cont != 0))):
+            import warnings
+            warnings.warn("absorption components need a continuum (spec.continuum is empty): they will "
+                          "contribute nothing.  Fit a continuum first, or load one with the spectrum.")
         self.free = list(free)
         if fit_noise_scale and not any(p.name == "log_s" for p in self.free):
             self.free.append(Param("global", "log_s", *DEFAULT_BOUNDS["log_s"], init=0.0))
@@ -204,7 +213,7 @@ class FitProblem:
         chi2_full = self.chi2(theta)
         n = len(self.y)
         rows = []
-        for unit, lead in self.area_units().items():
+        for unit, lead in self.all_units().items():
             members = [c.name for c in self.components if c.enabled and (c.group == unit or c.name == unit or c.tie_to in (lead, unit))]
             P2 = {k: dict(v) for k, v in P.items()}
             for m in members:
@@ -218,11 +227,20 @@ class FitProblem:
         return pd.DataFrame(rows)
 
     # ---- areas by NNLS (profiling out the linear parameters) ---------------------------
-    def area_units(self) -> dict[str, str]:
-        """unit key (component or group) -> name of the leading component."""
+    def all_units(self) -> dict[str, str]:
+        """Every independent unit (emitting or absorbing) -> leading component name."""
         units = {}
         for c in self.components:
             if c.enabled and not c.tie_to:
+                units.setdefault(c.group or c.name, c.name)
+        return units
+
+    def area_units(self) -> dict[str, str]:
+        """unit key (component or group) -> name of the leading component (absorption screens
+        have no area and are left out)."""
+        units = {}
+        for c in self.components:
+            if c.enabled and not c.tie_to and c.kind != "absorption":
                 key = c.group or c.name
                 units.setdefault(key, c.name)
         return units
@@ -235,9 +253,10 @@ class FitProblem:
                 if "logNA" in P[lead]:
                     P[lead]["logNA"] = logNA_from(P[lead]["logN"], logR[key])
         # push the leader's logR to group members
+        au = self.area_units()
         for c in self.components:
-            if c.group and c.name != self.area_units().get(c.group):
-                P[c.name]["logR"] = P[self.area_units()[c.group]]["logR"]
+            if c.group and au.get(c.group) and c.name != au[c.group]:
+                P[c.name]["logR"] = P[au[c.group]]["logR"]
         return P, chi2
 
     def area_free_mask(self) -> np.ndarray:
@@ -245,7 +264,7 @@ class FitProblem:
         optimiser).  The logR of an annuli component is its outer radius, not a linear scale, so it stays
         an ordinary parameter."""
         kind = {c.name: c.kind for c in self.components}
-        return np.array([p.name in ("logR", "logNA") and kind.get(p.comp) != "annuli" for p in self.free])
+        return np.array([p.name in ("logR", "logNA") and kind.get(p.comp) not in ("annuli", "absorption") for p in self.free])
 
     # ---- stage 1: grid --------------------------------------------------------------------
     def grid(self, comp: str, logN=None, T=None, windows=None, n_jobs: int = 1, base_theta=None,
@@ -256,12 +275,12 @@ class FitProblem:
         T = np.linspace(150.0, 1200.0, 22) if T is None else np.asarray(T)
         P0, _ = self.params_from_theta(self.theta0() if base_theta is None else base_theta)
         sel = np.ones(len(self.wave), bool) if windows is None else in_ranges(self.wave, windows)
-        units = self.area_units()
+        units = self.all_units()
         cobj = next(c for c in self.components if c.name == comp)
         my_unit = cobj.group or comp
         others = set(units) - {my_unit}
 
-        annuli = cobj.kind == "annuli"
+        annuli = cobj.kind in ("annuli", "absorption")     # no linear area to solve for
 
         def one(iN, iT):
             P = {k: dict(v) for k, v in P0.items()}
@@ -274,7 +293,7 @@ class FitProblem:
                     y -= uf[k] * 10.0 ** (2.0 * lR[k])
             a = uf[my_unit][sel] / self.sigma[sel]
             b = y[sel] / self.sigma[sel]
-            if annuli:                                # outer radius is not a linear scale: keep it
+            if annuli:                                # outer radius (or a screen): no linear scale
                 coef = 10.0 ** (2.0 * lR[my_unit])
             else:
                 coef = max(float(a @ b) / max(float(a @ a), 1e-300), 0.0)     # 1-D NNLS
@@ -590,6 +609,8 @@ class MCMCResult:
         out = {}
         comps = {c.name: c for c in self.problem.components}
         for cname in comps:
+            if comps[cname].kind == "absorption":
+                continue
             idx = {p.name: i for i, p in enumerate(self.problem.free) if p.comp == cname}
             base = self.problem._base[cname]
             logN = flat[:, idx["logN"]] if "logN" in idx else np.full(len(flat), base["logN"])
@@ -652,16 +673,33 @@ class MCMCResult:
 def default_free_params(components: list[Component], area_param: str = "logR", fit_rv: bool = False,
                         fit_fwhm: bool = False, bounds: dict | None = None) -> list[Param]:
     """logN, T and an area parameter for every enabled, untied component; ratio for tied ones;
-    one logR per opacity group."""
+    one logR per opacity group.  Absorption screens get logN, T, rv and fc (their velocity is
+    always free: it is the point of an absorption fit), plus fwhm with fit_fwhm."""
     bounds = {**DEFAULT_BOUNDS, **(bounds or {})}
     free = []
     seen_groups = set()
     for c in components:
         if not c.enabled:
             continue
-        b = lambda n: bounds.get(f"{c.name}.{n}", bounds[n])
+        if c.kind == "absorption":
+            ab = {**bounds, **ABSORPTION_BOUNDS}
+            b = lambda n: bounds.get(f"{c.name}.{n}", ab[n])
+        else:
+            b = lambda n: bounds.get(f"{c.name}.{n}", bounds[n])
         if c.tie_to:
             free.append(Param(c.name, "ratio", *b("ratio"), init=c.ratio))
+            continue
+        if c.kind == "absorption":
+            lead_of_group = c.group and c.group not in seen_groups
+            free.append(Param(c.name, "logN", *b("logN"), init=c.logN))
+            if not c.group or lead_of_group:
+                free.append(Param(c.name, "T", *b("T"), init=c.T))
+                free.append(Param(c.name, "rv", *b("rv"), init=c.rv))
+                free.append(Param(c.name, "fc", *b("fc"), init=c.fc))
+                if fit_fwhm:
+                    free.append(Param(c.name, "fwhm", *b("fwhm"), init=c.fwhm))
+            if c.group:
+                seen_groups.add(c.group)
             continue
         free.append(Param(c.name, "logN", *b("logN"), init=c.logN))
         if c.kind == "annuli":

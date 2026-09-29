@@ -360,7 +360,8 @@ def cube_positions(folder_or_file: str) -> dict:
 def load_csv(path: str, name: str | None = None, distance_pc: float = 140.0, wave_col=None, flux_col=None,
              err_col=None) -> Spectrum:
     """Load a CSV / whitespace table.  Recognises the column names used in your notebooks
-    (`wavelength`, `flux`, `Flux_err`, `flux_lines`), iSLAT (`wave`, `flux`, `err`) and JDISCS."""
+    (`wavelength`, `flux`, `Flux_err`, `flux_lines`), iSLAT (`wave`, `flux`, `err`) and JDISCS.
+    A `continuum` / `baseline` column is loaded as the continuum (kept by continuum method "given")."""
     meta = {}
     with open(path) as fh:
         first = fh.readline()
@@ -385,7 +386,8 @@ def load_csv(path: str, name: str | None = None, distance_pc: float = 140.0, wav
     wave = df[wc].to_numpy(float); flux = df[fc].to_numpy(float)
     err = df[ec].to_numpy(float) if ec else np.full_like(flux, np.nan)
     band = df["band"].astype(str).to_numpy() if "band" in df else band_of(wave)
-    cont = df["continuum"].to_numpy(float) if "continuum" in df else None
+    cc = pick(["continuum", "baseline", "cont", "base_fluxes"], None)
+    cont = df[cc].to_numpy(float) if cc else None
     mask = df["mask"].to_numpy(bool) if "mask" in df else None
     s = Spectrum(wave, flux, err, np.asarray(band, dtype=str), name or meta.get("name") or os.path.splitext(os.path.basename(path))[0],
                  float(meta.get("distance_pc", distance_pc)), float(meta.get("rv_kms", 0.0)),

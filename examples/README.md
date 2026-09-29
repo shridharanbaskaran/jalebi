@@ -19,6 +19,7 @@ jalebi examples ./my_examples && cd my_examples
 | `08_cube_maps.py` | line and velocity maps of the bundled HV Tau C cubes: point-source removal, five lines, the H₂ stack, channel maps, a PV cut along the jet | 30 s |
 | `09_cube_region_fit.py` | region spectra of HV Tau C (jet lobes, H₂, halo) over all sub-bands, line fluxes per region; `--cube DIR --fit` slab-fits a region of full cubes | 15 s |
 | `10_cube_maps_recipe.py` | the old `cube_maps.py` functions (`make_moment0`, `make_ratio_plot`, `plot_moment0_map`, `add_au_box`, channel slices) and the same recipe through the jalebi API, with the numbers compared | 35 s |
+| `11_absorption_fit.py` | LTE gas absorption: a cold CO₂ screen (v = −40 km/s, f_c = 0.6, `covers: all`) in front of a continuum and hot CO₂ emission; synthetic spectrum → grid → DE → emcee, truth recovered within 1σ | 1–3 min |
 | `notebooks/jalebi_quickstart.ipynb` | the tour in a notebook | 5 min |
 
 All results go to `results/` next to the scripts.
@@ -28,6 +29,7 @@ All results go to `results/` next to the scripts.
 | Config | Target and model |
 | --- | --- |
 | `configs/synthetic.yaml` | the synthetic spectrum: H₂O, CO₂ + ¹³CO₂ (tied), C₂H₂, HCN |
+| `configs/absorption_synthetic.yaml` | example 11: a CO₂ absorption screen + hot CO₂ emission, continuum `given` from the CSV (`docs/ABSORPTION.md`) |
 | `configs/FZ_Tau_quick.yaml` | FZ Tau 13.45–17.5 µm: hot + warm H₂O (HITEMP), CO₂ + ¹³CO₂, C₂H₂, HCN |
 | `configs/FZ_Tau_water_hot_cold.yaml` | three water temperatures (hot and warm on HITEMP, cold on HITRAN), 13.45–17.5 + 21–27 µm |
 | `configs/FZ_Tau_water_CO.yaml` | CO fundamental and hot water at 4.95–7.5 µm |
