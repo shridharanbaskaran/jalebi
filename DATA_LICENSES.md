@@ -36,6 +36,20 @@ Space Telescope Science Institute, which is operated by the Association of Unive
 in Astronomy, Inc., under NASA contract NAS 5-03127 for JWST. These observations are associated with
 program #1549."*
 
+## HV Tau C MIRI-MRS cube cutouts (`src/jalebi/example_data/HV_Tau_C_cube/`)
+
+Five spectral cutouts (±1600 km/s around [Fe II] 5.34, H₂ S(3), S(2), S(1) and [Ne II] 12.81 µm, full field
+of view) of the Level-3 `s3d` cubes of HV Tau C from JWST program 1282 (MIRI European Consortium GTO,
+*MIRI EC Protoplanetary and Debris Disks Survey* (MINDS), PI T. Henning), observation 9, observed
+2023-09-27; `jwst` 1.18.0, CRDS context `jwst_1364.pmap`. The data are public in MAST. SCI and ERR are
+unchanged; the cutouts were made with `jalebi.cube.write_cutouts`.
+
+Suggested acknowledgement: *"This work is based on observations made with the NASA/ESA/CSA James Webb
+Space Telescope. The data were obtained from the Mikulski Archive for Space Telescopes at the Space
+Telescope Science Institute, which is operated by the Association of Universities for Research in
+Astronomy, Inc., under NASA contract NAS 5-03127 for JWST. These observations are associated with
+program #1282."*
+
 ## Synthetic spectrum (`src/jalebi/example_data/synthetic/`)
 
 JALEBI generated this spectrum (`jalebi.synthetic`) from the bundled line lists. It is released with

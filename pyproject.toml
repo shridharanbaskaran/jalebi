@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "jalebi"
 dynamic = ["version"]
-description = "JALEBI — JWST Analysis of Line Emission with Bayesian Inference: simultaneous LTE slab fitting of molecular emission in JWST/MIRI spectra of protoplanetary disks"
+description = "JALEBI — JWST Analysis of Line Emission with Bayesian Inference: simultaneous LTE slab fitting of molecular emission in JWST/MIRI spectra of protoplanetary disks, and line/velocity maps of IFU cubes"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
 license-files = ["LICENSE", "DATA_LICENSES.md"]
 authors = [{ name = "Shridharan Baskaran", email = "shridharan.baskaran@tifr.res.in" }]
 keywords = ["astronomy", "JWST", "MIRI", "protoplanetary disks", "infrared spectroscopy", "LTE slab model",
-            "molecular emission", "MCMC", "HITRAN"]
+            "molecular emission", "MCMC", "HITRAN", "IFU", "line maps", "jets", "disk winds"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",

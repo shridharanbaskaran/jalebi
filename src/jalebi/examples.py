@@ -28,7 +28,7 @@ def list_examples() -> list[str]:
             continue
         out.append(p.name)
         if p.is_dir():
-            out += [f"{p.name}/{q.name}" for q in sorted(p.iterdir()) if q.is_file() and not q.name.endswith(".fits")]
+            out += [f"{p.name}/{q.name}" for q in sorted(p.iterdir()) if q.is_file() and not q.name.endswith((".fits", ".fits.gz"))]
     return out
 
 

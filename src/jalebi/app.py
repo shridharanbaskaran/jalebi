@@ -5,8 +5,9 @@ or, in a notebook:
     from jalebi.app import make_app; make_app(data_root=...).servable()
 
 Layout ("observatory" dark theme): a header with live status chips, a slim session sidebar
-(config YAML in/out, cached line lists) and six workspaces — Data · Continuum · Model · Fit ·
-Results · Batch.  The Continuum, Model and Fit workspaces use an *inspector* layout: plots on
+(config YAML in/out, cached line lists) and seven workspaces — Data · Continuum · Model · Fit ·
+Results · Batch · Cube (line and velocity maps of IFU cubes, jalebi.cube; a region spectrum drawn
+there can be sent to the slab fit).  The Continuum, Model and Fit workspaces use an *inspector* layout: plots on
 the left, a sticky, independently scrolling control column on the right, so the component
 sliders are always at hand while the spectrum stays in view.
 
@@ -511,7 +512,10 @@ class ComponentCard:
 # ----------------------------------------------------------------------------------------------
 
 class JalebiApp:
-    def __init__(self, data_root: str | None = None, config_path: str | None = None):
+    TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch", "Cube"]
+
+    def __init__(self, data_root: str | None = None, config_path: str | None = None, start_tab: str = "data",
+                 cube_path: str | None = None):
         self.cfg = ProjectConfig.load(config_path) if config_path else ProjectConfig()
         self._spec: Spectrum | None = None
         self._spec_version = 0
@@ -546,13 +550,18 @@ class JalebiApp:
         self._build_fit_tab()
         self._build_results_tab()
         self._build_batch_tab()
+        from .cube.app import CubeWorkspace
+        self.cube_ws = CubeWorkspace(self, cube_path)
         for c in (self.cfg.components or []):
             self.add_component(c, rebuild=False)
         if not self.cfg.components:
             self.add_component(ComponentConfig(name="H2O_hot", molecule="H2O", logN=18.0, T=700.0, logR=-0.6), rebuild=False)
         self.tabs = pn.Tabs(("Data", self.data_tab), ("Continuum", self.cont_tab), ("Model", self.model_tab),
                             ("Fit", self.fit_tab), ("Results", self.results_tab), ("Batch", self.batch_tab),
-                            sizing_mode="stretch_width", dynamic=False)
+                            ("Cube", self.cube_ws.panel), sizing_mode="stretch_width", dynamic=False)
+        low = [t.lower() for t in self.TAB_NAMES]
+        if start_tab and start_tab.lower() in low:
+            self.tabs.active = low.index(start_tab.lower())
         self.template = pn.template.FastListTemplate(
             title="JALEBI", header=[self.header], sidebar=[self.sidebar], main=[self.tabs],
             theme="dark", theme_toggle=False, main_layout=None, sidebar_width=290,
@@ -571,7 +580,9 @@ class JalebiApp:
         return obj
 
     def _all_figs(self):
-        return [f for f in (getattr(self, n, None) for n in ("data_fig", "cont_fig", "sub_fig", "model_fig", "resid_fig", "lnp_fig", "cube_fig")) if f is not None]
+        figs = [f for f in (getattr(self, n, None) for n in ("data_fig", "cont_fig", "sub_fig", "model_fig", "resid_fig", "lnp_fig", "cube_fig")) if f is not None]
+        ws = getattr(self, "cube_ws", None)
+        return figs + (ws.figures() if ws is not None else [])
 
     @_bokeh_safe
     def set_plot_theme(self, name: str):
@@ -942,6 +953,28 @@ class JalebiApp:
             pn.state.notifications.error(f"load failed: {e}"); return
         self.cfg.target.extraction = ex
         self._show_cube()
+        self._set_spectrum(spec, path, t0)
+
+    @_bokeh_safe
+    def use_spectrum(self, spec: Spectrum, label: str | None = None, switch_to: str | None = "Continuum"):
+        """Make a Spectrum built elsewhere the current target (e.g. a region spectrum from the Cube
+        workspace).  It is also written to ~/.jalebi/uploads/<name>.csv, so an exported config points at
+        a real file and the fit can be repeated from the terminal."""
+        import re
+        folder = os.path.join(os.path.expanduser("~"), ".jalebi", "uploads")
+        os.makedirs(folder, exist_ok=True)
+        fname = re.sub(r"[^A-Za-z0-9_.+-]+", "_", label or spec.name).strip("_") + ".csv"
+        path = os.path.join(folder, fname)
+        try:
+            spec.save(path)
+        except Exception:
+            path = label or spec.name
+        self.distance.value = spec.distance_pc
+        if switch_to and switch_to in self.TAB_NAMES and hasattr(self, "tabs"):
+            self.tabs.active = self.TAB_NAMES.index(switch_to)      # switch first: the continuum + model take a moment
+        self._set_spectrum(spec, path, time.time())
+
+    def _set_spectrum(self, spec: Spectrum, path: str, t0: float):
         spec = spec.to_rest_frame(self.rv.value)
         if self.spike.value:
             spec = spike_filter(spec)
@@ -954,8 +987,13 @@ class JalebiApp:
             self.data_src[b].data = dict(w=spec.wave[i], f=spec.flux[i])
         self.data_fig.title.text = f"{spec.name} — {len(spec.wave)} pixels, {len(spec.bands)} sub-bands"
         exinfo = spec.meta.get("extraction")
-        exline = (f"s3d aperture {exinfo['aperture_fwhm_scale']}×FWHM, apcorr {exinfo['apcorr']}<br>RA/Dec {exinfo['center_radec'][0]:.5f}, {exinfo['center_radec'][1]:.5f}"
-                  if isinstance(exinfo, dict) and exinfo.get("center_radec") else "x1d pipeline extraction")
+        if isinstance(exinfo, dict) and exinfo.get("source") == "s3d-region":
+            exline = f"cube region <span class=\"sf-mono\">{exinfo.get('ds9', '')}</span>"
+        elif isinstance(exinfo, dict) and exinfo.get("center_radec"):
+            exline = (f"s3d aperture {exinfo['aperture_fwhm_scale']}×FWHM, apcorr {exinfo['apcorr']}<br>"
+                      f"RA/Dec {exinfo['center_radec'][0]:.5f}, {exinfo['center_radec'][1]:.5f}")
+        else:
+            exline = "x1d pipeline extraction"
         self.status.object = (f'<div class="sf-title" style="font-size:17px">{spec.name}</div>'
                               f'<div class="sf-kv"><b>{len(spec.wave)}</b> pixels · <b>{len(spec.bands)}</b> sub-bands<br>'
                               f'd = <b>{spec.distance_pc:g}</b> pc · RV <b>{spec.rv_kms:g}</b> km/s<br>'
@@ -1973,8 +2011,8 @@ class JalebiApp:
         return self.template
 
 
-def make_app(data_root: str | None = None, config_path: str | None = None):
-    return JalebiApp(data_root=data_root, config_path=config_path).servable()
+def make_app(data_root: str | None = None, config_path: str | None = None, start_tab: str = "data", cube_path: str | None = None):
+    return JalebiApp(data_root=data_root, config_path=config_path, start_tab=start_tab, cube_path=cube_path).servable()
 
 
 if __name__.startswith("bokeh"):

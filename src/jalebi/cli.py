@@ -16,6 +16,10 @@
   jalebi serve --port 5006                                  start the web app
   jalebi detect config.yaml --write config_detected.yaml    find the molecules present, write components
   jalebi batch config.yaml targets.csv --auto-detect        per-target molecule detection in batch runs
+  jalebi cube demo                                          line/velocity maps of the bundled HV Tau C cubes
+  jalebi cube maps DIR -l "[Fe II] 5.34" -l "H2 S(1)"       moment, extended-emission and velocity maps of s3d cubes
+  jalebi cube region DIR --circle "dx dy r" --offsets --fit config.yaml   region spectrum -> slab fit
+  jalebi serve --tab cube                                   web app opened on the Cube workspace
 """
 from __future__ import annotations
 
@@ -38,6 +42,8 @@ app = typer.Typer(add_completion=False, no_args_is_help=False, rich_markup_mode=
                        "Simultaneous LTE slab fitting of molecular emission in JWST/MIRI disk spectra.")
 linedata_app = typer.Typer(help="Line-list cache management.")
 app.add_typer(linedata_app, name="linedata")
+from .cube.cli import cube_app  # noqa: E402  (light: typer + rich only; the cube code loads on use)
+app.add_typer(cube_app, name="cube")
 
 _DATA_DIR_HELP = ("line-list cache folder. Precedence: this option, then linedata.data_dir of --config, then $JALEBI_DATA, "
                   "then ~/.jalebi/linedata (the bundled lists are always searched too). Use the same folder the app is started with.")
@@ -442,7 +448,9 @@ def about():
 @app.command()
 def serve(port: int = 5006, data_root: Optional[str] = None, config: Optional[str] = None, show: bool = False,
           address: str = "localhost", allow_websocket_origin: Optional[str] = None,
-          data_dir: Optional[str] = typer.Option(None, "--data-dir", help=_DATA_DIR_HELP)):
+          data_dir: Optional[str] = typer.Option(None, "--data-dir", help=_DATA_DIR_HELP),
+          tab: str = typer.Option("data", help="workspace to open: data | continuum | model | fit | results | batch | cube"),
+          cube_path: Optional[str] = typer.Option(None, "--cube", help="cube folder for the Cube workspace (default: bundled HV Tau C)")):
     """Start the interactive web app (Panel)."""
     _use_cache(data_dir, config)
     import panel as pn
@@ -451,7 +459,7 @@ def serve(port: int = 5006, data_root: Optional[str] = None, config: Optional[st
     if allow_websocket_origin:
         kwargs["websocket_origin"] = allow_websocket_origin.split(",")
     rprint(f"[bold]JALEBI web app[/bold] on http://{address}:{port}  (Ctrl+C to stop)")
-    pn.serve(lambda: make_app(data_root=data_root, config_path=config), title="JALEBI", **kwargs)
+    pn.serve(lambda: make_app(data_root=data_root, config_path=config, start_tab=tab, cube_path=cube_path), title="JALEBI", **kwargs)
 
 
 def main():

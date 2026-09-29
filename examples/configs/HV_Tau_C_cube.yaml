@@ -1,0 +1,155 @@
+# JALEBI cube example: HV Tau C (MINDS, JWST PID 1282), bundled MIRI-MRS cutouts around five lines.
+#   jalebi cube run HV_Tau_C_cube.yaml            # maps, H2 stack, channel maps, PV cut, region spectra
+#   jalebi cube run HV_Tau_C_cube.yaml -j 4       # lines in parallel
+# For your own target: set path to a folder of Level3_ch*_s3d.fits files, and the lines you want.
+# Regions with fit: true are slab-fitted with fit_config (needs full cubes, not the cutouts).
+cube:
+  path: example:HV_Tau_C_cube
+  name: HV Tau C
+  distance_pc: 140.0
+  rv_kms: 0.0
+  band_offsets_kms: {}
+  center: auto
+  lines:
+  - '[Fe II] 5.34'
+  - H2 S(3)
+  - H2 S(2)
+  - '[Ne II] 12.81'
+  - H2 S(1)
+  stacks:
+    H2:
+    - H2 S(1)
+    - H2 S(2)
+    - H2 S(3)
+  window_kms: 1500.0
+  smooth_fwhm_pix: 0.0
+  noise: max
+  continuum:
+    method: poly
+    order: 1
+    inner_kms: null
+    outer_kms: 1200.0
+    clip_sigma: 3.0
+    lam: 1000.0
+    quantile: 0.05
+    p: 0.02
+  psf:
+    enabled: true
+    scale: core
+    core_radius_fwhm: 0.5
+    psf_radius_fwhm: 8.0
+    template: continuum
+    template_background: true
+    auto_sources: true
+    auto_threshold: 0.1
+    extra_sources: []
+  moments:
+    line_kms: null
+    snr_min: 3.0
+    channel_clip: 0.0
+  kinematics:
+    enabled: true
+    source: null
+    snr_min: 5.0
+    n_mc: 100
+    center_shift_kms: 200.0
+    sigma_range:
+    - 0.8
+    - 2.5
+    zero_point: star
+  channels:
+    enabled: true
+    vmin: -200.0
+    vmax: 200.0
+    dv_kms: null
+    source: extended
+    lines:
+    - '[Fe II] 5.34'
+    - H2 S(1)
+  pv:
+    enabled: true
+    pa_deg: 25.0
+    length_arcsec: 5.0
+    width_arcsec: null
+    vmax_kms: 600.0
+    source: extended
+    lines:
+    - '[Fe II] 5.34'
+    - '[Ne II] 12.81'
+  regions:
+  - name: jet_north
+    ds9: null
+    shape: circle
+    ra: null
+    dec: null
+    offset:
+    - 0.42
+    - 0.91
+    r: 0.35
+    r_in: null
+    r_out: null
+    a: null
+    b: null
+    pa: 0.0
+    vertices: null
+    offset_vertices: null
+    fit: false
+  - name: jet_south
+    ds9: null
+    shape: circle
+    ra: null
+    dec: null
+    offset:
+    - -0.42
+    - -0.91
+    r: 0.35
+    r_in: null
+    r_out: null
+    a: null
+    b: null
+    pa: 0.0
+    vertices: null
+    offset_vertices: null
+    fit: false
+  - name: h2_east
+    ds9: null
+    shape: ellipse
+    ra: null
+    dec: null
+    offset:
+    - 1.93
+    - -0.52
+    r: null
+    r_in: null
+    r_out: null
+    a: 1.0
+    b: 0.6
+    pa: 105.0
+    vertices: null
+    offset_vertices: null
+    fit: false
+  - name: h2_west
+    ds9: null
+    shape: ellipse
+    ra: null
+    dec: null
+    offset:
+    - -1.93
+    - 0.52
+    r: null
+    r_in: null
+    r_out: null
+    a: 1.0
+    b: 0.6
+    pa: 105.0
+    vertices: null
+    offset_vertices: null
+    fit: false
+  fit_config: null
+  plot_extent_arcsec: 3.5
+  pa_deg: 25.0
+  formats:
+  - fits
+  - png
+  output: results/{target}/cube
+  n_jobs: 1

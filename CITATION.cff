@@ -1,14 +1,14 @@
 cff-version: 1.2.0
 message: "If you use JALEBI in your research, please cite it as below, together with HITRAN/HITEMP, emcee and the methods you used (see the README references)."
 title: "JALEBI: JWST Analysis of Line Emission with Bayesian Inference"
-abstract: "Simultaneous LTE slab fitting of the molecular emission in JWST/MIRI-MRS spectra of protoplanetary disks, with continuum estimation, automatic molecule detection, parallel MCMC and an interactive web app."
+abstract: "Simultaneous LTE slab fitting of the molecular emission in JWST/MIRI-MRS spectra of protoplanetary disks, with continuum estimation, automatic molecule detection, parallel MCMC and an interactive web app; line maps, velocity maps, channel maps, PV cuts and region spectra of IFU cubes."
 type: software
 authors:
   - family-names: Baskaran
     given-names: Shridharan
     email: shridharan.baskaran@tifr.res.in
     affiliation: "Tata Institute of Fundamental Research"
-version: 0.9.1
+version: 0.9.2
 date-released: 2026-09-29
 license: BSD-3-Clause
 repository-code: "https://github.com/shridharanbaskaran/jalebi"
@@ -20,3 +20,4 @@ keywords:
   - LTE slab models
   - infrared spectroscopy
   - MCMC
+  - IFU line maps

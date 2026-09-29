@@ -5,9 +5,10 @@ JWST/MIRI-MRS spectra of protoplanetary (Class II) disks.
 
 Layers
 ------
-core      : constants, molecules, linedata, partition, instrument, model
+core      : constants, molecules, linedata, partition, instrument, model, lines (line catalogue, Gaussian fits)
 data      : data (ingest), continuum (baselines, masks, noise)
 fitting   : fit (likelihood, priors, grid, optimiser, emcee), detect, plots
+cubes     : cube (line maps, velocity maps, channel maps, PV cuts, region spectra of IFU cubes)
 interfaces: config (YAML), pipeline, cli (Typer), app (Panel web app)
 helpers   : synthetic (spectra with known answers), doctor (installation checks), examples
 
@@ -19,9 +20,11 @@ Quick start
 >>> import jalebi
 >>> spec, truth = jalebi.synthetic.make_synthetic_spectrum()      # a spectrum with known answers
 >>> jalebi.example_path("FZ_Tau")                                  # bundled MIRI x1d files
+>>> from jalebi import cube                                        # line and velocity maps of s3d cubes
+>>> m = cube.line_maps(cube.prepare_line(cube.CubeSet("example:HV_Tau_C_cube"), "[Fe II] 5.34"))
 """
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 __all__ = ["__version__", "MOLECULES", "get_molecule", "LineList", "load_linelist", "example_path",
            "ProjectConfig", "Component", "build_model", "Spectrum", "load_spectrum", "run_pipeline"]
 
@@ -48,7 +51,7 @@ def __getattr__(name):
     if name == "run_pipeline":
         from .pipeline import run_pipeline
         return run_pipeline
-    if name in ("synthetic", "doctor", "pipeline", "fit", "detect", "plots", "continuum", "data", "model", "config"):
+    if name in ("synthetic", "doctor", "pipeline", "fit", "detect", "plots", "continuum", "data", "model", "config", "cube", "lines"):
         import importlib
         return importlib.import_module(f".{name}", __name__)
     raise AttributeError(f"module 'jalebi' has no attribute {name!r}")

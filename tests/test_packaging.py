@@ -69,3 +69,4 @@ def test_bundled_files_present():
     assert len(list((pkg / "example_data" / "FZ_Tau").glob("*x1d.fits"))) == 12
     assert (pkg / "example_data" / "synthetic" / "synthetic_miri_ch3.csv").exists()
     assert len(list((pkg / "data_files").glob("*.csv"))) >= 7
+    assert len(list((pkg / "example_data" / "HV_Tau_C_cube").glob("*s3d*.fits.gz"))) == 5

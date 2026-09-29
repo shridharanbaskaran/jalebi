@@ -110,6 +110,9 @@ To upload by hand instead: `python -m build && twine upload dist/*`. Test first 
 
 ## 8. Later releases
 
-1. Bump `__version__` in `src/jalebi/__init__.py` and `version:` in `CITATION.cff`, then add a CHANGELOG entry.
-2. `git commit -am "Release 0.9.1" && git tag v0.9.1 && git push --tags`.
-3. Publish the release on GitHub. PyPI and Zenodo update themselves.
+See [`VERSION_CONTROL.md`](VERSION_CONTROL.md): one folder, work on branches, versions as tags
+(`v0.9.1`, `v0.9.2`, ...), a GitHub release per tag (PyPI and Zenodo update themselves). In short:
+
+1. Bump `__version__` in `src/jalebi/__init__.py` and `version:`/`date-released:` in `CITATION.cff`, then add a CHANGELOG entry.
+2. `git add -A && git commit -m "Release X.Y.Z" && git tag -a vX.Y.Z -m "JALEBI X.Y.Z" && git push && git push origin vX.Y.Z`.
+3. Publish the release on GitHub.

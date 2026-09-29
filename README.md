@@ -7,6 +7,7 @@
 <p align="center">
 Simultaneous LTE slab fitting of the molecular emission in JWST/MIRI spectra of protoplanetary disks:<br>
 continuum → molecule detection → joint fit of many molecules → MCMC posteriors and degeneracies,<br>
+plus line maps and velocity maps of IFU cubes (jets, winds, H₂) with region-by-region slab fits,<br>
 from the terminal, from Python, or in an interactive web app.
 </p>
 
@@ -15,6 +16,7 @@ from the terminal, from Python, or in an interactive web app.
   <a href="#five-minute-tour">Tour</a> ·
   <a href="#the-physics">Physics</a> ·
   <a href="#fitting-and-uncertainties">Fitting</a> ·
+  <a href="#line-maps-and-velocity-maps-from-ifu-cubes">Cube maps</a> ·
   <a href="#configuration-reference">Config</a> ·
   <a href="#command-line-reference">CLI</a> ·
   <a href="#examples">Examples</a> ·
@@ -38,8 +40,9 @@ posterior, so you see the uncertainties **and** the degeneracies between paramet
 | **Molecules** | H₂O, CO₂, ¹³CO₂, CO, ¹³CO, C₂H₂, ¹³CCH₂, HCN, H¹³CN, OH, CH₄, NH₃, C₂H₄, C₂H₆, C₄H₂, HC₃N, H₂ bundled (27 MB); anything in HITRAN downloadable; custom `.par` lists importable (e.g. C₆H₆) |
 | **Fitting** | grid over (log N, T) → differential evolution → `emcee`, with emitting areas solved exactly by non-negative least squares; parallel over CPU cores |
 | **Diagnostics** | autocorrelation time, split-R̂, acceptance; corner plots, correlation matrix, traces, posterior predictive; τ_max flags; ΔBIC detection test; automatic molecule detection |
+| **Cubes** (`jalebi.cube`) | per-spaxel continuum, point-source removal with the continuum as PSF, moment maps, Gaussian-centroid velocity maps with Monte Carlo errors, line stacking, channel maps, PV cuts, regions → spectrum → slab fit; FITS with WCS (CARTA/DS9) + PNG |
 | **Interfaces** | `jalebi` CLI, Panel web app (`jalebi serve`), Python API, batch mode for surveys |
-| **Batteries** | FZ Tau MIRI spectrum and a synthetic spectrum with known answers, 7 example scripts, a notebook, `jalebi doctor`, `jalebi demo` |
+| **Batteries** | FZ Tau MIRI spectrum, HV Tau C cube cutouts and a synthetic spectrum with known answers, 10 example scripts, a notebook, `jalebi doctor`, `jalebi demo`, `jalebi cube demo` |
 
 <p align="center"><img src="docs/images/banner.png" alt="the jalebi command" width="760"></p>
 
@@ -54,14 +57,15 @@ posterior, so you see the uncertainties **and** the degeneracies between paramet
 5. [Data preparation](#data-preparation): input, continuum, masks, noise
 6. [Fitting and uncertainties](#fitting-and-uncertainties): likelihood, priors, the three stages, diagnostics
 7. [Which molecules? Automatic detection](#which-molecules-automatic-detection)
-8. [Configuration reference](#configuration-reference)
-9. [Command-line reference](#command-line-reference)
-10. [The web app](#the-web-app)
-11. [Python API](#python-api)
-12. [Parallelisation and speed](#parallelisation-and-speed)
-13. [Line lists](#line-lists)
-14. [Examples](#examples) · [Output files](#output-files) · [Validation](#validation)
-15. [Project layout](#project-layout) · [Citing](#citing-jalebi) · [License](#license) · [References](#references)
+8. [Line maps and velocity maps from IFU cubes](#line-maps-and-velocity-maps-from-ifu-cubes) (`jalebi.cube`)
+9. [Configuration reference](#configuration-reference)
+10. [Command-line reference](#command-line-reference)
+11. [The web app](#the-web-app)
+12. [Python API](#python-api)
+13. [Parallelisation and speed](#parallelisation-and-speed)
+14. [Line lists](#line-lists)
+15. [Examples](#examples) · [Output files](#output-files) · [Validation](#validation)
+16. [Project layout](#project-layout) · [Versions and releases](docs/VERSION_CONTROL.md) · [Citing](#citing-jalebi) · [License](#license) · [References](#references)
 
 ---
 
@@ -123,7 +127,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.9.1  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.9.2  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...
@@ -546,6 +550,77 @@ the threshold (examples/04).
 
 ---
 
+## Line maps and velocity maps from IFU cubes
+
+Most Class II disks are unresolved in the continuum, so the maps that matter show **extended line
+emission** — jets, winds, H₂, [Ne II], [Fe II], CO — after the point source is removed. `jalebi.cube`
+makes them from JWST `s3d` cubes, and a region drawn on any map becomes a spectrum for the normal slab fit.
+Full description, pitfalls and validation: [`docs/CUBE.md`](docs/CUBE.md).
+
+```bash
+jalebi cube demo                                          # the bundled HV Tau C cutouts, ~30 s
+jalebi cube info  /path/to/target                         # cubes, bands, source, lines covered
+jalebi cube maps  /path/to/target -l "[Fe II] 5.34" -l "H2 S(1)" --zero-point star --distance 140
+jalebi cube stack /path/to/target -l "H2 S(1)" -l "H2 S(2)" -l "H2 S(3)" --name H2
+jalebi cube pv    /path/to/target -l "[Fe II] 5.34" --pa 25 --length 5
+jalebi cube region /path/to/target --circle "0.42 0.91 0.35" --offsets --out jet_north.csv --fit config.yaml
+jalebi cube ratio /path/to/target -l "[Fe II] 5.34" -l "[Ne II] 12.81" --rms-region "12 8 3" --sigma 5,5 --recipe cube_maps
+jalebi cube moment0 /path/to/target -l 5.3402=FeII --component full   # the old cube_maps.py make_moment0
+jalebi cube init cube.yaml --example hv_tau_c && jalebi cube run cube.yaml     # everything from one YAML
+jalebi serve --tab cube --cube /path/to/target            # the web app's Cube workspace
+```
+
+```python
+import jalebi
+from jalebi import cube
+cs = cube.CubeSet("example:HV_Tau_C_cube")                  # a folder of *_s3d.fits (all sub-bands)
+lc = cube.prepare_line(cs, "[Fe II] 5.34")                  # slab, per-spaxel continuum, point-source removal
+m  = cube.line_maps(lc, zero_point="star")                  # moments + Gaussian centroids with MC errors
+m["vcen"], m["vcen_err"], m["mom0_ext"], m.summary          # 2-D arrays on the cube's spaxel grid
+m.write("maps/", distance_pc=140, pa_deg=25)                # FITS (celestial WCS) + PNG + CSV + JSON
+st = cube.line_maps(cube.stack_lines(cs, ["H2 S(1)", "H2 S(2)", "H2 S(3)"]))
+spec = cube.region_spectrum(cs, cube.offset_region("circle", lc.center_radec, 0.42, 0.91, 0.35))
+run = jalebi.run_pipeline(cfg, spec=spec)                   # the LTE slab fit of that region
+```
+
+1. **Per-spaxel local continuum**: a low-order polynomial over the line-free channels either side of the
+   line, every spaxel at once, with sigma clipping.
+2. **Point-source removal**: the continuum image next to the line is the PSF at that wavelength; scaled in
+   the PSF core and subtracted plane by plane, it follows the PSF's change across a sub-band. Companions
+   (HV Tau AB next to HV Tau C) are removed too; what is left is the extended emission.
+3. **Moments 0/1/2** with S/N masks, and a **Gaussian centroid per spaxel with Monte Carlo errors** for
+   the velocity maps. The MRS resolves 85–200 km/s, so velocities come from centroid shifts (a few km/s at
+   S/N ≳ 20), not from line widths. **Stacking** several lines of one species (H₂ S(1)–S(3)) raises the S/N.
+4. **Channel maps** and **position–velocity cuts** along any PA (jet axis).
+5. **Region spectra**: circle, ellipse, annulus or polygon (DS9 regions in and out) → spectrum over all
+   sub-bands → the slab fit, so region-by-region LTE fits come for free.
+
+6. **Line-ratio maps** (line 2 reprojected onto line 1, masked at σ × noise) and masks from an empty-sky
+   circle or a Background2D background.
+
+**Coming from `cube_maps.py`?** `from jalebi.cube.cube_maps import make_moment0, make_ratio_plot,
+plot_moment0_map, add_au_box, ...` keeps the old functions, arguments and file names, and reproduces
+the old maps (aspls continuum over ±0.1 µm, 9 / 5 / 2+2-channel windows) to float32 precision; the same
+recipe is `--recipe cube_maps` in the terminal, one button in the web app, and `--example cube_maps` as a
+config. The old files hold ∫I_ν dλ in MJy sr⁻¹ **m** (10⁻⁶ × MJy sr⁻¹ µm),
+so their ratios are line-flux ratios × (λ₁/λ₂)²; see [`docs/CUBE.md` §6](docs/CUBE.md#6-coming-from-cube_mapspy).
+
+Handled pitfalls: cube-building resampling artefacts at the spaxel scale (per-spaxel continuum and an
+empirical noise floor), sub-band-to-sub-band wavelength offsets of a few km/s (`band_offsets_kms`,
+`zero_point: star`, stacks aligned on the source), and a PSF that changes across one sub-band (the
+template is the continuum at each plane's wavelength). The maps open in CARTA and DS9.
+
+<p align="center"><img src="docs/images/hv_tau_c_feii.png" alt="HV Tau C [Fe II] 5.34 maps" width="900"></p>
+<p align="center"><em>HV Tau C (MINDS, JWST PID 1282), [Fe II] 5.34 µm from the bundled cutouts: continuum, line, extended
+emission after point-source removal, centroid velocity relative to the source (north lobe redshifted, south lobe
+blueshifted) with its Monte Carlo error, and the integrated spectra. The dashed line is the jet axis (PA 25°).</em></p>
+
+<p align="center"><img src="docs/images/hv_tau_c_h2_stack.png" alt="HV Tau C H2 stack" width="900"></p>
+<p align="center"><em>The H₂ S(1)+S(2)+S(3) stack of HV Tau C: emission elongated along PA ≈ 105°, and a velocity gradient
+along the jet axis close to the source.</em></p>
+
+---
+
 ## Configuration reference
 
 One YAML file drives the CLI, the Python API and the web app, which exports and imports it. Every key
@@ -654,7 +729,14 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
 | `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
-| `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show]` | the web app |
+| `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show] [--tab cube] [--cube DIR]` | the web app (optionally opened on a workspace) |
+| `jalebi cube info PATH` · `jalebi cube lines [PATH]` | cubes, bands, source position; the line catalogue (and what PATH covers) |
+| `jalebi cube maps PATH -l LINE … [--zero-point star] [--no-psf] [--n-mc N] [--rv] [--distance] [--out DIR]` | moment, extended-emission and centroid-velocity maps (FITS + PNG) |
+| `jalebi cube stack PATH -l LINE -l LINE … [--name H2]` | stack lines of one species in velocity space and map it |
+| `jalebi cube channels PATH -l LINE [--vmin --vmax --dv]` · `jalebi cube pv PATH -l LINE --pa PA [--length --width]` | channel maps; position–velocity cut |
+| `jalebi cube region PATH --circle/--ellipse/--annulus/--polygon "…" [--offsets] \| --ds9 FILE [--fit CONFIG]` | region spectrum over all sub-bands → CSV (→ slab fit) |
+| `jalebi cube init FILE --example hv_tau_c\|synthetic\|blank` · `jalebi cube run FILE [-j N]` | cube config: everything in one YAML |
+| `jalebi cube cutout PATH -l LINE … [--gzip]` · `jalebi cube synth DIR` · `jalebi cube demo` | small cubes around lines; synthetic cubes with known answers; the HV Tau C demo |
 | `jalebi model --molecule H2O --logN 18 --T 600 --R 0.5 --wmin 13 --wmax 17` | a quick model spectrum to CSV |
 | `jalebi synth OUT.csv [--snr 150] [--bands 3A,3B,3C] [--seed 0]` | a synthetic MRS spectrum with known parameters |
 | `jalebi linedata list` / `fetch MOL… [--release hitran --wmin --wmax --force]` / `import MOL FILE --release TAG` | manage line lists |
@@ -667,7 +749,7 @@ R_constant: null                # a constant resolving power instead of R_model
 
 ## The web app
 
-`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh) with six workspaces. Every
+`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh) with seven workspaces. Every
 setting maps onto the same YAML config, which the sidebar imports and exports.
 
 <p align="center"><img src="docs/images/app_continuum.png" alt="the web app, Continuum tab, FZ Tau" width="900"></p>
@@ -680,6 +762,12 @@ setting maps onto the same YAML config, which the sidebar imports and exports.
 | **Fit** | run grid → optimiser → MCMC in the background with live progress; stop at any time |
 | **Results** | best-fit and posterior tables, corner plot, correlation matrix, traces, posterior predictive, ΔBIC, τ flags |
 | **Batch** | run a folder of targets with the current config |
+| **Cube** | open a folder of `s3d` cubes (default: the bundled HV Tau C), pick a line or an H₂ stack, *Make maps*; switch between continuum, moment 0, extended, velocity, velocity error, moments 1/2, S/N and single channels; click a spaxel for its spectrum and Gaussian fit; set a circle/ellipse/annulus or draw a polygon → *Extract region spectrum* → *Send to slab fit* (loads it as the target of Continuum/Model/Fit); PV cuts; write FITS + PNG; the equivalent `jalebi cube …` command and Python code, and the cube config YAML |
+
+<p align="center"><img src="docs/images/app_cube.png" alt="the web app, Cube tab, HV Tau C" width="900"></p>
+<p align="center"><em>The Cube workspace on the bundled HV Tau C cubes: the [Fe II] 5.34 µm velocity map (relative to the source),
+a clicked spaxel of the southern jet lobe with its Gaussian fit (−30 ± 3 km/s), and a circular region on the northern lobe
+ready to be extracted and sent to the slab fit.</em></p>
 
 Remote machines: `jalebi serve --address 0.0.0.0 --allow-websocket-origin host:5006`, or use an SSH tunnel
 (`ssh -L 5006:localhost:5006 server`).
@@ -788,8 +876,11 @@ HITEMP water fast without changing the spectrum. Sources and credits for all bun
 | `05_fit_fz_tau.py` | simultaneous fit of FZ Tau 13.45–17.5 µm (hot + warm H₂O, CO₂ + ¹³CO₂, C₂H₂, HCN), `--mcmc` for posteriors | 3–10 min |
 | `06_batch.sh` | several targets with one config → `population.csv` | 5 min |
 | `07_line_lists.py` | bundled lists, partition functions, releases, fetching | 5 s |
+| `08_cube_maps.py` | HV Tau C cubes: continuum + point-source removal, moment and velocity maps of five lines, the H₂ stack, channel maps and a PV cut along the jet | 30 s |
+| `09_cube_region_fit.py` | region spectra (jet lobes, H₂ wind, halo) over all sub-bands, line fluxes per region, `--fit` for a slab fit of a region | 15 s |
+| `10_cube_maps_recipe.py` | the old `cube_maps.py` functions and the same recipe through the jalebi API, numbers compared; the ratio figure, a masked map with an au box, channel slices | 35 s |
 | `notebooks/jalebi_quickstart.ipynb` | all of the above in one notebook | 5 min |
-| `configs/` | `synthetic.yaml`, `FZ_Tau_quick.yaml`, `FZ_Tau_water_hot_cold.yaml`, `FZ_Tau_water_CO.yaml`, `FZ_Tau_autodetect.yaml`, `FZ_Tau_annuli.yaml`, `targets.csv` | |
+| `configs/` | `synthetic.yaml`, `FZ_Tau_quick.yaml`, `FZ_Tau_water_hot_cold.yaml`, `FZ_Tau_water_CO.yaml`, `FZ_Tau_autodetect.yaml`, `FZ_Tau_annuli.yaml`, `targets.csv`, `HV_Tau_C_cube.yaml` (for `jalebi cube run`) | |
 
 *on 2 cores; scale with `--processes`.
 
@@ -830,6 +921,12 @@ sub-folder per target.
 | `log.txt` | the run log |
 | `population.csv` | batch mode, in the parent folder (`results/`): one row per target with every summary column, convergence and ΔBIC |
 
+`jalebi cube` runs write to `results/{target}/cube/` by default (the same one-folder-per-source rule as the
+fits), one sub-folder per line (`<line>/`: FITS maps with WCS, `*_all_maps.fits`,
+integrated spectra, `*_summary.json`, `*_maps.png`, channel maps and PV cuts), `regions/` (DS9 file, region
+spectra as CSV, overview figure), `line_summary.csv` and `cube_config_used.yaml`; see
+[`docs/CUBE.md`](docs/CUBE.md) §4.
+
 ---
 
 ## Validation
@@ -845,7 +942,11 @@ The test suite (`pytest -q`, about 20 s, offline) checks:
 - the user-cache precedence rules;
 - detection of injected species;
 - optimiser recovery of a synthetic CO₂ slab (T within 40 K, log N within 0.25 dex, log R within 0.1 dex);
-- MCMC summaries, the CLI and `jalebi doctor`.
+- MCMC summaries, the CLI and `jalebi doctor`;
+- `jalebi.cube` on synthetic cubes with known answers (point source + Keplerian ring + jet, PSF convolved
+  plane by plane): point-source and extended fluxes, calibrated Monte Carlo velocity errors (pull σ ≈ 1),
+  ring rotation, an injected sub-band offset, resampling wiggles, stacking, channel maps, PV cuts, regions,
+  FITS WCS, and the HV Tau C jet; the numbers are in [`docs/CUBE.md`](docs/CUBE.md#3-validation).
 
 GitHub Actions run the suite on Linux and macOS with Python 3.10–3.14, and also build and install the
 wheel in a clean environment.
@@ -910,15 +1011,18 @@ jalebi/
 │   ├── config.py       validated YAML
 │   ├── cli.py          the `jalebi` command
 │   ├── app.py          the web app
+│   ├── lines.py        line catalogue (H2, fine-structure, H I), batched Gaussian fits, one-line fits
+│   ├── cube/           line maps from IFU cubes: io, continuum, psf, maps, channels, regions, plots,
+│   │                   config, pipeline, synthetic, cli (`jalebi cube`), app (the Cube workspace)
 │   ├── synthetic.py    synthetic spectra with known answers
 │   ├── doctor.py       installation checks
 │   ├── examples.py     bundled data paths, `example:` prefix, copying the examples
 │   ├── linedata/       bundled line lists (Parquet, 27 MB)
-│   ├── example_data/   FZ Tau x1d files, synthetic spectrum + truth + config
+│   ├── example_data/   FZ Tau x1d files, HV Tau C cube cutouts, synthetic spectrum + truth + config
 │   └── data_files/     continuum windows and water line tables (Banzatti+2025)
-├── examples/           scripts 01–07, configs/, notebooks/
+├── examples/           scripts 01–09, configs/, notebooks/
 ├── tests/              pytest suite
-├── docs/               images, GitHub guide
+├── docs/               images, CUBE.md (cube maps), VERSION_CONTROL.md (releases), GitHub guide
 └── .github/            CI, PyPI publishing, issue templates
 ```
 

@@ -91,10 +91,23 @@ def check_examples() -> dict:
     fz = DATA_DIR / "FZ_Tau"
     n_x1d = len(list(fz.glob("*x1d.fits"))) if fz.exists() else 0
     syn = DATA_DIR / "synthetic" / "synthetic_miri_ch3.csv"
+    hv = DATA_DIR / "HV_Tau_C_cube"
+    n_cubes = len(list(hv.glob("*s3d*.fits*"))) if hv.exists() else 0
     src = examples_source()
     return {"data_dir": str(DATA_DIR), "FZ_Tau_x1d_files": n_x1d, "synthetic": syn.exists(),
-            "scripts": str(src) if src else None,
-            "status": OK if (n_x1d == 12 and syn.exists()) else WARN}
+            "HV_Tau_C_cubes": n_cubes, "scripts": str(src) if src else None,
+            "status": OK if (n_x1d == 12 and syn.exists() and n_cubes == 5) else WARN}
+
+
+def check_cube() -> dict:
+    """Line maps of the bundled HV Tau C [Ne II] cube (continuum, PSF removal, moments, velocities)."""
+    t0 = time.time()
+    from .cube import CubeSet, line_maps, prepare_line
+    lm = line_maps(prepare_line(CubeSet("example:HV_Tau_C_cube"), "[Ne II] 12.81"), n_mc=20)
+    s = lm.summary
+    ok = s["n_spaxels_velocity"] > 50 and (s["extended_flux_W_m2"] or 0) > 0
+    return {"status": OK if ok else WARN, "seconds": round(time.time() - t0, 2), "velocity_spaxels": s["n_spaxels_velocity"],
+            "point_source_W_m2": s["point_source_line_flux_W_m2"], "extended_W_m2": s["extended_flux_W_m2"]}
 
 
 def check_parallel() -> dict:
@@ -140,7 +153,7 @@ def collect(quick: bool = False) -> dict:
         core_ok = all(r["status"] == OK for r in rep["imports"])
     if not quick and core_ok:
         for key, fn in (("linelists", check_linelists), ("examples", check_examples), ("parallel", check_parallel),
-                        ("benchmark", benchmark)):
+                        ("benchmark", benchmark), ("cube", check_cube)):
             try:
                 rep[key] = fn()
             except Exception as e:
@@ -200,7 +213,8 @@ def _plain(rep: dict):
     if "examples" in rep:
         E = rep["examples"]
         print("\nExample data")
-        line(E.get("status", FAIL), f"FZ Tau x1d files: {E.get('FZ_Tau_x1d_files')}/12, synthetic spectrum: "
+        line(E.get("status", FAIL), f"FZ Tau x1d files: {E.get('FZ_Tau_x1d_files')}/12, HV Tau C cube cutouts: "
+                                    f"{E.get('HV_Tau_C_cubes', 0)}/5, synthetic spectrum: "
                                     f"{'yes' if E.get('synthetic') else 'no'}, scripts: {E.get('scripts') or 'repository only'}")
     if "parallel" in rep:
         P = rep["parallel"]
@@ -215,9 +229,17 @@ def _plain(rep: dict):
         else:
             line(B["status"], f"{B['ms_per_model']} ms per model (HITEMP H2O + CO2, {B['pixels']} pixels, {B['fine_grid']} fine-grid points; "
                               f"built in {B['build_s']} s)")
+    if "cube" in rep:
+        Q = rep["cube"]
+        print("\nCube maps (jalebi.cube)")
+        if "error" in Q:
+            line(FAIL, Q["error"])
+        else:
+            line(Q["status"], f"HV Tau C [Ne II]: {Q['velocity_spaxels']} velocity spaxels, point source {Q['point_source_W_m2']:.2e}, "
+                              f"extended {Q['extended_W_m2']:.2e} W m-2 ({Q['seconds']} s)")
     print()
     if rep["ready"]:
-        print(f"  {col.get(OK, '')}Your jalebi is ready.{end}  Try:  jalebi demo   ·   jalebi serve   ·   jalebi examples ./my_examples\n")
+        print(f"  {col.get(OK, '')}Your jalebi is ready.{end}  Try:  jalebi demo   ·   jalebi cube demo   ·   jalebi serve   ·   jalebi examples ./my_examples\n")
     else:
         print(f"  {col.get(FAIL, '')}Not ready yet.{end}")
         if rep.get("fix"):

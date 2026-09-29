@@ -3,3 +3,4 @@
 *.npz binary
 *.fits binary
 *.png binary
+*.gz binary

@@ -1,0 +1,112 @@
+# The recipe of the old cube_maps.py as a cube config (docs/CUBE.md §6): a +-0.1 um slab, an aspls
+# continuum per spaxel, moment 0 over the 9 channels around the line, no DQ mask, no point-source removal,
+# mom0_masked from the (12, 8, 3) RMS circle, the [Fe II] / [Ne II] ratio in the old units and the native
+# channels of [Fe II] as single FITS files; plus what jalebi adds (errors, S/N, velocity maps).
+#   jalebi cube run examples/configs/HV_Tau_C_cube_maps.yaml
+cube:
+  path: example:HV_Tau_C_cube
+  name: HV Tau C
+  distance_pc: 140.0
+  rv_kms: 0.0
+  band_offsets_kms: {}
+  center: auto
+  lines:
+  - '[Fe II] 5.34'
+  - '[Ne II] 12.81'
+  - H2 S(1)
+  stacks: {}
+  window_kms: 1500.0
+  window_um: 0.1
+  band: nominal
+  dq_mask: false
+  smooth_fwhm_pix: 0.0
+  noise: max
+  continuum:
+    method: aspls
+    order: 1
+    inner_kms: null
+    outer_kms: 1200.0
+    clip_sigma: 3.0
+    lam: 5000000.0
+    quantile: 0.05
+    p: 0.02
+    nan_policy: propagate
+  psf:
+    enabled: false
+    scale: core
+    core_radius_fwhm: 0.5
+    psf_radius_fwhm: 8.0
+    template: continuum
+    template_background: true
+    auto_sources: true
+    auto_threshold: 0.1
+    extra_sources: []
+  moments:
+    line_kms: null
+    component: full
+    half_full: 4
+    half_slow: 2
+    snr_min: 3.0
+    channel_clip: 0.0
+    rms_region:
+    - 12.0
+    - 8.0
+    - 3.0
+    rms_sigma: 3.0
+    rms_mode: rms
+  kinematics:
+    enabled: true
+    source: null
+    snr_min: 5.0
+    n_mc: 100
+    center_shift_kms: 200.0
+    sigma_range:
+    - 0.8
+    - 2.5
+    zero_point: none
+  channels:
+    enabled: true
+    vmin: -300.0
+    vmax: 300.0
+    dv_kms: null
+    source: line
+    lines:
+    - '[Fe II] 5.34'
+    slices: true
+    slices_component: full
+  pv:
+    enabled: false
+    pa_deg: 0.0
+    length_arcsec: 4.0
+    width_arcsec: null
+    vmax_kms: 600.0
+    source: extended
+    lines: []
+  regions: []
+  ratios:
+  - lines:
+    - '[Fe II] 5.34'
+    - '[Ne II] 12.81'
+    name: null
+    sigma_thresh:
+    - 5.0
+    - 5.0
+    rms_region:
+    - 12.0
+    - 8.0
+    - 3.0
+    rms_mode: rms
+    key: mom0
+    unit: MJy/sr m
+    percentile:
+    - 80.0
+    - 80.0
+    - 80.0
+  fit_config: null
+  plot_extent_arcsec: null
+  pa_deg: 25.0
+  formats:
+  - fits
+  - png
+  output: results/{target}/cube
+  n_jobs: 1
