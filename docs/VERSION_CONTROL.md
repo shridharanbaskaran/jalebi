@@ -3,7 +3,7 @@
 JALEBI lives in **one** git repository (`LTE_fitting/jalebi/`, remote `origin` =
 `https://github.com/shridharanbaskaran/jalebi`). Versions are **tags** in that repository, not copies of
 the folder, and work in progress lives on **branches**. This page is the routine for every release,
-written out for 0.9.2 (the `jalebi.cube` release, on top of 0.9.1 = `fc48114`, tag `v0.9.1`).
+written out for 0.10.1 (the `jalebi.cube` release, on top of 0.9.1 = `fc48114`, tag `v0.9.1`).
 
 ## The model in one paragraph
 
@@ -21,20 +21,20 @@ remote. Two things to fix:
 
 ```bash
 cd ~/Desktop/Work/LTE_fitting/jalebi
-git status                     # should list the 0.9.2 changes, nothing else
+git status                     # should list the 0.10.1 changes, nothing else
 git log --oneline -3           # fc48114 0.9.1: one results folder per source · c7b7c1f JALEBI 0.9.0
 
 # the virtual environment inside was built for the old path: re-point the editable install
 source .venv-jalebi/bin/activate          # or: conda activate jalebi
 python -m pip install -e ".[app,dev]"     # (or: python install.py --env current --extras app,dev)
-python -c "import jalebi; print(jalebi.__version__, jalebi.__file__)"   # 0.9.2 .../LTE_fitting/jalebi/src/jalebi/...
+python -c "import jalebi; print(jalebi.__version__, jalebi.__file__)"   # 0.10.1 .../LTE_fitting/jalebi/src/jalebi/...
 ```
 
 Then **retire `jalebi_v0.9.0/`**: rename it (`mv jalebi_v0.9.0 jalebi_v0.9.0_archive`) or delete it, and
 never commit or push from it. It holds its own copy of `.git`; pushing from two folders is how histories
 diverge. The tag `v0.9.0` (below) is the permanent record of that version.
 
-## Releasing 0.9.2
+## Releasing 0.10.1
 
 ```bash
 cd ~/Desktop/Work/LTE_fitting/jalebi
@@ -50,7 +50,7 @@ jalebi doctor && jalebi cube demo           # the HV Tau C maps land in jalebi_c
 # 3. commit
 git add -A
 git status                                  # review: no results/, no .venv, no large files
-git commit -m "0.9.2: jalebi.cube — line maps, velocity maps, channel maps, PV cuts, region spectra"
+git commit -m "0.10.1: jalebi.cube — line maps, velocity maps, channel maps, PV cuts, region spectra"
 
 # 4. push the branch and let CI run
 git push -u origin feature/cube-maps
@@ -61,12 +61,12 @@ git push -u origin feature/cube-maps
 # 5. tag the release on main
 git switch main && git pull
 git tag -a v0.9.0 c7b7c1f -m "JALEBI 0.9.0"            # once: tag the first release retroactively
-git tag -a v0.9.2 -m "JALEBI 0.9.2: jalebi.cube"
-git push origin v0.9.0 v0.9.1 v0.9.2                    # v0.9.1 exists locally; this makes sure it is on GitHub
+git tag -a v0.10.1 -m "JALEBI 0.10.1: jalebi.cube"
+git push origin v0.9.0 v0.9.1 v0.10.1                    # v0.9.1 exists locally; this makes sure it is on GitHub
 
 # 6. publish the release (triggers PyPI upload via publish.yml, and Zenodo if connected)
-gh release create v0.9.2 --title "JALEBI 0.9.2" --notes "$(awk '/^## \[0.9.2\]/{f=1;next} /^## \[0.9.1\]/{f=0} f' CHANGELOG.md)"
-#    or in the browser: Releases → Draft a new release → choose tag v0.9.2 → paste the CHANGELOG section
+gh release create v0.10.1 --title "JALEBI 0.10.1" --notes "$(awk '/^## \[0.10.1\]/{f=1;next} /^## \[0.9.1\]/{f=0} f' CHANGELOG.md)"
+#    or in the browser: Releases → Draft a new release → choose tag v0.10.1 → paste the CHANGELOG section
 ```
 
 Authentication: `gh auth login` once (HTTPS + browser), or a personal access token as the password when
@@ -80,9 +80,11 @@ git asks. `git push` over SSH works too if the remote is `git@github.com:shridha
 3. Merge into `main`, then `git tag -a vX.Y.Z -m "JALEBI X.Y.Z"` and `git push origin vX.Y.Z`.
 4. Publish the GitHub release for the tag.
 
-Version numbers follow [Semantic Versioning](https://semver.org): `X.Y.Z` = major.minor.patch. Strictly,
-a release that adds a feature (like `jalebi.cube`) bumps the minor number (0.10.0) and a bug-fix-only
-release bumps the patch (0.9.1 was one). Before 1.0 many projects are relaxed about this; pick one rule and keep it.
+Version numbers follow [Semantic Versioning](https://semver.org): `X.Y.Z` = major.minor.patch. A release
+that adds a feature bumps the minor number (`jalebi.cube` made 0.9 → 0.10) and a bug-fix-only release
+bumps the patch (0.9.1 was one). The version lives in `src/jalebi/__init__.py` (`__version__`, which
+`jalebi --version`, pip and the wheel name read) and `CITATION.cff`; a commit message or a tag does not
+change it, so bump those two files before you tag. Before 1.0 many projects are relaxed about this; pick one rule and keep it.
 
 ## Everyday commands
 
@@ -92,7 +94,7 @@ release bumps the patch (0.9.1 was one). Before 1.0 many projects are relaxed ab
 | undo edits to one file (uncommitted) | `git restore path/to/file` |
 | look at an old version | `git switch --detach v0.9.0` (back: `git switch main`) |
 | two versions side by side | `git worktree add ../jalebi-0.9.0 v0.9.0` — a second folder sharing the same repository |
-| a bug fix on an old release | `git switch -c fix/x v0.9.2` → fix → tag `v0.9.3` |
+| a bug fix on an old release | `git switch -c fix/x v0.10.1` → fix → tag `v0.10.2` |
 | see the branches and tags | `git branch -a`, `git tag -l` |
 | throw away a local branch | `git branch -d feature/x` (after merging) |
 

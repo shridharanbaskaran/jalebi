@@ -127,7 +127,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.9.2  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.10.1  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...

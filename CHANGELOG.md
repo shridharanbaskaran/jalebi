@@ -3,7 +3,7 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
-## [0.9.2] — 2026-09-29 — line maps and velocity maps from IFU cubes
+## [0.10.1] — 2026-09-29 — line maps and velocity maps from IFU cubes
 
 ### Added
 - **`jalebi.cube`**: line maps and velocity maps from JWST `s3d` cubes, for the extended line emission

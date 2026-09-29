@@ -24,7 +24,7 @@ Quick start
 >>> m = cube.line_maps(cube.prepare_line(cube.CubeSet("example:HV_Tau_C_cube"), "[Fe II] 5.34"))
 """
 
-__version__ = "0.9.2"
+__version__ = "0.10.1"
 __all__ = ["__version__", "MOLECULES", "get_molecule", "LineList", "load_linelist", "example_path",
            "ProjectConfig", "Component", "build_model", "Spectrum", "load_spectrum", "run_pipeline"]
 
