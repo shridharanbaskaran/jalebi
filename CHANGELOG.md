@@ -3,6 +3,26 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-09-29
+
+### Fixed
+- Results now go to one folder per source. The default output is `results/{target}`, and `{target}` is
+  replaced by the source name (`V* FZ Tau` → `results/FZ_Tau`). Before, the web app and configs made
+  with `jalebi init --example blank` wrote every source straight into `results/`.
+  - An `output: results` left over from 0.9.0 is treated the same way.
+  - Any other path without `{target}` is used as written.
+- `jalebi batch` and the app's Batch tab put each target in its own folder and `population.csv` in the
+  common parent (`results/`).
+- When `target.name` is not set, the name comes from the FITS `TARGNAME`, or else the file name without
+  its extension.
+
+### Added
+- `--name` for `jalebi prep`, `detect` and `fit`. With `--target` and no `--name`, the name is taken from
+  the data, so another source's results never land in the config's original folder.
+- The terminal and the web app print the output folder when a run starts, and the app shows it under
+  the output box.
+- The example configs use `results/{target}` (or `results/{target}/<model>`, e.g. `water_hot_cold`).
+
 ## [0.9.0] — 2026-09-28 — first public release
 
 JALEBI grew out of the in-house `slabfit` code, which was renamed and packaged for distribution.

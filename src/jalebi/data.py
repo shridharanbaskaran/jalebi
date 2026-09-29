@@ -387,7 +387,7 @@ def load_csv(path: str, name: str | None = None, distance_pc: float = 140.0, wav
     band = df["band"].astype(str).to_numpy() if "band" in df else band_of(wave)
     cont = df["continuum"].to_numpy(float) if "continuum" in df else None
     mask = df["mask"].to_numpy(bool) if "mask" in df else None
-    s = Spectrum(wave, flux, err, np.asarray(band, dtype=str), name or meta.get("name") or os.path.basename(path),
+    s = Spectrum(wave, flux, err, np.asarray(band, dtype=str), name or meta.get("name") or os.path.splitext(os.path.basename(path))[0],
                  float(meta.get("distance_pc", distance_pc)), float(meta.get("rv_kms", 0.0)),
                  meta.get("rest_frame", "False") == "True", cont, mask, meta)
     if not ec:
@@ -410,7 +410,8 @@ def load_spectrum(path: str, source: str = "x1d", extraction: dict | None = None
         return load_x1d_folder(path, **kw)
     if path.endswith(".fits"):
         w, f, e, b, meta = read_x1d(path)
-        return Spectrum(w, f, e, np.full(len(w), b, dtype=str), kw.get("name") or os.path.basename(path),
+        return Spectrum(w, f, e, np.full(len(w), b, dtype=str),
+                        kw.get("name") or meta.get("TARGNAME") or os.path.splitext(os.path.basename(path))[0],
                         kw.get("distance_pc", 140.0), meta=meta)
     return load_csv(path, **kw)
 

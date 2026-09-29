@@ -36,4 +36,4 @@ fit:
   grid: {logN: [15, 20, 11], T: [200, 1200, 11]}
   optimise: {method: de, maxiter: 80, popsize: 10, workers: 4}
   mcmc: {nwalkers: 48, nsteps: 2000, processes: 4, checkpoint: true}
-output: results/FZ_Tau
+output: results/{target}          # one folder per source ({target} = target.name): results/FZ_Tau

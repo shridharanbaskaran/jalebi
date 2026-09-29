@@ -172,16 +172,35 @@ def model(molecule: str = "H2O",
     rprint(f"wrote {out}: {len(wave)} pixels, tau_max = {m.tau_flags()['c']:.2f}")
 
 
+_TARGET_HELP = "spectrum to use instead of target.path (folder of x1d files, FITS or CSV)"
+_NAME_HELP = ("source name for the results folder; default target.name, or with --target the FITS TARGNAME / "
+              "folder name")
+_OUT_HELP = "output folder; '{target}' is replaced by the source name (default: the config's output, results/{target})"
+
+
+def _apply_target(cfg, target: Optional[str], name: Optional[str]):
+    """--target / --name overrides.  A new --target without --name takes its name from the data, so its
+    results do not land in the folder of the config's original source."""
+    if target:
+        cfg.target.path = target
+        cfg.target.name = name or "target"
+    elif name:
+        cfg.target.name = name
+
+
 @app.command()
-def prep(config: str, target: Optional[str] = None, out: Optional[str] = None, plot: bool = True):
+def prep(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+         name: Optional[str] = typer.Option(None, help=_NAME_HELP),
+         out: Optional[str] = typer.Option(None, help=_OUT_HELP), plot: bool = True):
     """Ingest, rest-frame, spike-filter, continuum, masks; write prep.csv (+ prep.png)."""
     from .config import ProjectConfig
     from .pipeline import prepare
     cfg = ProjectConfig.load(config)
-    if target:
-        cfg.target.path = target
+    _apply_target(cfg, target, name)
+    if out:
+        cfg.output = out
     spec = prepare(cfg)
-    outdir = out or cfg.output
+    outdir = cfg.output_dir(spec.name)
     os.makedirs(outdir, exist_ok=True)
     spec.save(os.path.join(outdir, "prep.csv"))
     rprint(f"{spec.name}: {len(spec.wave)} pixels, {(~spec.mask).sum()} masked, continuum={cfg.continuum.method}")
@@ -199,7 +218,8 @@ def prep(config: str, target: Optional[str] = None, out: Optional[str] = None, p
 
 
 @app.command()
-def detect(config: str, target: Optional[str] = None, threshold: Optional[float] = None,
+def detect(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+           name: Optional[str] = typer.Option(None, help=_NAME_HELP), threshold: Optional[float] = None,
            write: Optional[str] = typer.Option(None, help="write the updated config (components + windows) to this YAML"),
            keep_undetected: bool = False):
     """Find which molecules the spectrum contains and suggest the components to fit.
@@ -210,8 +230,7 @@ def detect(config: str, target: Optional[str] = None, threshold: Optional[float]
     from .detect import apply_detection, detect_molecules
     from .pipeline import prepare
     cfg = ProjectConfig.load(config)
-    if target:
-        cfg.target.path = target
+    _apply_target(cfg, target, name)
     if threshold is not None:
         cfg.fit.detect.threshold = threshold
     spec = prepare(cfg)
@@ -235,15 +254,16 @@ def detect(config: str, target: Optional[str] = None, threshold: Optional[float]
 
 
 @app.command()
-def fit(config: str, target: Optional[str] = None, stages: Optional[str] = None, out: Optional[str] = None,
+def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+        name: Optional[str] = typer.Option(None, help=_NAME_HELP), stages: Optional[str] = None,
+        out: Optional[str] = typer.Option(None, help=_OUT_HELP),
         processes: Optional[int] = None, nsteps: Optional[int] = None,
         auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first and fit only those")):
     """Run the fit stages from a config file."""
     from .config import ProjectConfig
     from .pipeline import run_pipeline
     cfg = ProjectConfig.load(config)
-    if target:
-        cfg.target.path = target
+    _apply_target(cfg, target, name)
     if out:
         cfg.output = out
     if auto_detect:
@@ -262,7 +282,7 @@ def fit(config: str, target: Optional[str] = None, stages: Optional[str] = None,
         for _, r in summ.iterrows():
             t.add_row(r["parameter"], f"{r['median']:.3f}", f"{r['minus']:.3f}", f"{r['plus']:.3f}", "!" if r["at_edge"] else "")
         rprint(t)
-    rprint(f"results in {cfg.output}")
+    rprint(f"results in [green]{run.outdir}[/green]")
 
 
 @app.command()
@@ -280,31 +300,27 @@ def batch(config: str, targets: str, workers: int = 4, stages: Optional[str] = N
     st = stages.split(",") if stages else None
 
     def one(row):
-        from .pipeline import run_pipeline, catalogue_row
-        c = cfg.model_copy(deep=True)
-        c.target.name = str(row["name"]); c.target.path = str(row["path"])
-        if "distance_pc" in row and pd.notna(row["distance_pc"]):
-            c.target.distance_pc = float(row["distance_pc"])
-        if "rv_kms" in row and pd.notna(row["rv_kms"]):
-            c.target.rv_kms = float(row["rv_kms"])
-        c.output = os.path.join(cfg.output, str(row["name"]).replace(" ", "_"))
+        from .pipeline import run_pipeline, catalogue_row, target_config
+        c = target_config(cfg, row)                # own target + own folder, e.g. results/DR_Tau
         c.fit.mcmc.processes = 1; c.fit.optimise.workers = 1
-        done = os.path.join(c.output, "summary.csv")
-        if only_failed and os.path.exists(done):
+        outdir = c.output_dir()
+        if only_failed and os.path.exists(os.path.join(outdir, "summary.csv")):
             return None
         try:
             run = run_pipeline(c, stages=st)
             return catalogue_row(run)
         except Exception as e:
-            os.makedirs(c.output, exist_ok=True)
-            with open(os.path.join(c.output, "FAILED.txt"), "w") as fh:
+            os.makedirs(outdir, exist_ok=True)
+            with open(os.path.join(outdir, "FAILED.txt"), "w") as fh:
                 fh.write(repr(e))
             return {"target": row["name"], "error": repr(e)}
 
     rows = Parallel(n_jobs=workers)(delayed(one)(r) for _, r in tab.iterrows())
     rows = [r for r in rows if r]
-    pd.DataFrame(rows).to_csv(os.path.join(cfg.output, catalogue), index=False)
-    rprint(f"catalogue: {os.path.join(cfg.output, catalogue)} ({len(rows)} rows)")
+    root = cfg.output_root() if cfg.per_target_output() else cfg.output
+    os.makedirs(root, exist_ok=True)
+    pd.DataFrame(rows).to_csv(os.path.join(root, catalogue), index=False)
+    rprint(f"catalogue: {os.path.join(root, catalogue)} ({len(rows)} rows); one folder per target in {root}/")
 
 
 @app.command()

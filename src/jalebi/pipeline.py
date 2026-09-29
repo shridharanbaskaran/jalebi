@@ -32,7 +32,9 @@ def prepare(cfg: ProjectConfig, spec: Spectrum | None = None, gas_model: np.ndar
         ex = cfg.target.extraction
         ext = {"ra": ex.ra, "dec": ex.dec, "aperture_fwhm_scale": ex.aperture_fwhm_scale, "aperture_arcsec": ex.aperture_arcsec,
                "annulus_arcsec": tuple(ex.annulus_arcsec) if ex.annulus_arcsec else None, "apcorr": ex.apcorr}
-        spec = load_spectrum(cfg.target.path, source=ex.source, extraction=ext, name=cfg.target.name,
+        # an unset target name (the default "target") lets the loader use the FITS TARGNAME / file name
+        name = cfg.target.name if cfg.target.name and cfg.target.name != "target" else None
+        spec = load_spectrum(cfg.target.path, source=ex.source, extraction=ext, name=name,
                              distance_pc=cfg.target.distance_pc)
         spec = spec.to_rest_frame(cfg.target.rv_kms)
         if cfg.target.spike_filter:
@@ -84,6 +86,7 @@ class RunResult:
     theta: np.ndarray | None = None
     log: list[str] = field(default_factory=list)
     detection: object = None            # DetectionResult when fit.auto_detect was on
+    outdir: str | None = None           # folder the results were written to (output with {target} filled in)
 
     def say(self, msg):
         self.log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -239,16 +242,19 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
     """Run the configured stages.  Continuum refinement (model-aware) re-runs prep with the
     optimiser's gas model subtracted and refits."""
     stages = stages or cfg.fit.stages
-    outdir = cfg.output
+    spec = prepare(cfg, spec)
+    outdir = cfg.output_dir(spec.name)             # e.g. results/FZ_Tau: one folder per source
     if save:
         os.makedirs(outdir, exist_ok=True)
-    spec = prepare(cfg, spec)
     detection = None
     if cfg.fit.auto_detect:
         cfg, detection = detect_and_apply(cfg, spec)
     prob = build_problem(cfg, spec)
     run = RunResult(cfg, spec, prob)
     run.detection = detection
+    run.outdir = outdir if save else None
+    if save:
+        run.say(f"results -> {outdir}")
     if detection is not None:
         run.say("auto-detect: " + ", ".join(f"{r.candidate}{'✓' if r.detected else '✗'}(ΔBIC {r.delta_BIC:+.0f})"
                                              for r in detection.table.itertuples()))
@@ -340,6 +346,23 @@ def save_results(run: RunResult, outdir: str):
                 run.say(f"  plot {fn} failed: {e}")
     with open(os.path.join(outdir, "log.txt"), "w") as fh:
         fh.write("\n".join(run.log) + "\n")
+
+
+def target_config(cfg: ProjectConfig, row) -> ProjectConfig:
+    """Copy of `cfg` for one row of a target table (name, path, distance_pc, rv_kms), with the output
+    folder of that source: `output` with '{target}' filled in, or '<output>/<name>' for a fixed output."""
+    import pandas as pd
+    c = cfg.model_copy(deep=True)
+    get = (lambda k: row.get(k)) if hasattr(row, "get") else (lambda k: getattr(row, k, None))
+    c.target.name = str(get("name")); c.target.path = str(get("path"))
+    for key, attr in (("distance_pc", "distance_pc"), ("rv_kms", "rv_kms")):
+        v = get(key)
+        if v is not None and not (isinstance(v, float) and pd.isna(v)):
+            setattr(c.target, attr, float(v))
+    if not cfg.per_target_output():
+        from .config import safe_name
+        c.output = os.path.join(cfg.output, safe_name(c.target.name))
+    return c
 
 
 def catalogue_row(run: RunResult) -> dict:

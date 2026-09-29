@@ -26,4 +26,4 @@ fit:
   grid: {logN: [15, 20, 21], T: [100, 1200, 17]}
   optimise: {maxiter: 150, popsize: 12, workers: 4}
   mcmc: {nwalkers: 64, nsteps: 3000, processes: 4}
-output: results/FZ_Tau_water_hot_cold
+output: results/{target}/water_hot_cold      # -> results/FZ_Tau/water_hot_cold

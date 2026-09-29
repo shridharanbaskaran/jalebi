@@ -17,4 +17,4 @@ fit:
     replace_windows: true
   optimise: {maxiter: 60, popsize: 10, workers: 4}
   mcmc: {nwalkers: 48, nsteps: 2000, processes: 4}
-output: results/FZ_Tau_autodetect
+output: results/{target}/autodetect         # -> results/FZ_Tau/autodetect

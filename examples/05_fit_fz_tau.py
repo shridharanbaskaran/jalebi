@@ -23,7 +23,7 @@ ap.add_argument("--nsteps", type=int, default=1500)
 args = ap.parse_args()
 
 cfg = ProjectConfig.load(HERE / "configs" / "FZ_Tau_quick.yaml")
-cfg.output = str(HERE / "results" / "FZ_Tau")
+cfg.output = str(HERE / "results" / "{target}")     # {target} -> FZ_Tau
 cfg.fit.optimise.workers = args.processes
 cfg.fit.mcmc.processes = args.processes
 cfg.fit.mcmc.nsteps = args.nsteps
@@ -39,4 +39,4 @@ for c in cfg.components:
 print("tau_max per component:", {k: round(v, 2) for k, v in run.problem.model.tau_flags(P).items()})
 if run.mcmc is not None:
     print(run.mcmc.summary()[["parameter", "median", "minus", "plus", "at_edge"]].round(3).to_string(index=False))
-print(f"\nresults in {cfg.output}")
+print(f"\nresults in {run.outdir}")

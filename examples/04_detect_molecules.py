@@ -27,7 +27,7 @@ print(det.table[["candidate", "T", "logN", "logR", "delta_chi2", "delta_BIC", "d
 
 new = apply_detection(cfg, det)
 new.fit.auto_detect = False          # the components are now explicit
-new.output = "results/FZ_Tau_detected"
+new.output = "results/{target}/detected"       # -> results/FZ_Tau/detected
 new.save(OUT / "FZ_Tau_detected.yaml")
 print("\nsuggested components:", ", ".join(f"{c.name} ({c.T:.0f} K)" for c in det.components))
 print("suggested windows:", det.windows)

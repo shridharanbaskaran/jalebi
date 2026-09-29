@@ -35,4 +35,4 @@ fit:
   grid: {logN: [15.0, 19.5, 10], T: [200, 1200, 11]}
   optimise: {method: de, maxiter: 40, popsize: 8, workers: 1}
   mcmc: {nwalkers: 32, nsteps: 300, processes: 1, checkpoint: false}
-output: results/synthetic
+output: results/{target}         # {target} = target.name -> results/synthetic_disk

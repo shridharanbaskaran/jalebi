@@ -123,7 +123,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.9.0  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.9.1  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...
@@ -633,7 +633,7 @@ fit:
   grid: {logN: [14, 20, 25], T: [150, 1200, 22], order: [], n_jobs: 1}          # [lo, hi, n]
   optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0}   # method de | nelder
   mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true}
-output: results/FZ_Tau          # default "results"
+output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023
 R_scale: 1.0
 R_constant: null                # a constant resolving power instead of R_model
@@ -650,9 +650,9 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi demo [--no-mcmc] [--nsteps N] [--processes P]` | fit the bundled synthetic disk and compare with the truth |
 | `jalebi examples DIR` | copy the example scripts, configs and notebook |
 | `jalebi init FILE --example fz_tau\|synthetic\|water_hot_cold\|blank` | write a config to start from |
-| `jalebi prep CONFIG` | ingest, rest frame, spikes, continuum, masks → `prep.csv`, `prep.png` |
+| `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
-| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--out DIR]` | run the fit |
+| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show]` | the web app |
 | `jalebi model --molecule H2O --logN 18 --T 600 --R 0.5 --wmin 13 --wmax 17` | a quick model spectrum to CSV |
@@ -805,7 +805,13 @@ HITEMP water fast without changing the spectrum. Sources and credits for all bun
 
 ## Output files
 
-A run writes everything to `output:` (e.g. `results/FZ_Tau/`):
+A run writes everything to its own folder, `output:` with `{target}` replaced by the source name. The
+default `results/{target}` gives `results/FZ_Tau/`, `results/DR_Tau/`, and so on. The name is `target.name`,
+or the FITS `TARGNAME` when no name is set; `V* FZ Tau` becomes `FZ_Tau`. The terminal and the web app
+print the folder when a run starts. To keep several models of one source apart, use for example
+`output: results/{target}/water_hot_cold`. A batch run writes `population.csv` to the common parent
+folder (`results/`). A path without `{target}` is used exactly as written; batch runs then add one
+sub-folder per target.
 
 | File | Content |
 | --- | --- |
@@ -822,7 +828,7 @@ A run writes everything to `output:` (e.g. `results/FZ_Tau/`):
 | `chain.npz`, `chain.h5` | the full chain (and its checkpoint) |
 | `detections.csv`, `detection.csv` | ΔBIC test of the fitted components; the auto-detection table |
 | `log.txt` | the run log |
-| `population.csv` | batch mode: one row per target with every summary column, convergence and ΔBIC |
+| `population.csv` | batch mode, in the parent folder (`results/`): one row per target with every summary column, convergence and ΔBIC |
 
 ---
 

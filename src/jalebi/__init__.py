@@ -21,7 +21,7 @@ Quick start
 >>> jalebi.example_path("FZ_Tau")                                  # bundled MIRI x1d files
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 __all__ = ["__version__", "MOLECULES", "get_molecule", "LineList", "load_linelist", "example_path",
            "ProjectConfig", "Component", "build_model", "Spectrum", "load_spectrum", "run_pipeline"]
 

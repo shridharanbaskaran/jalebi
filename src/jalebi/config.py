@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -152,6 +153,19 @@ class LineDataConfig(BaseModel):
     data_dir: str | None = None
 
 
+# Results go to one folder per source: "{target}" is replaced by the (file-system safe) target name.
+DEFAULT_OUTPUT = "results/{target}"
+_LEGACY_OUTPUTS = {"results", "./results", "results/"}      # old default: now also one folder per source
+_SIMBAD_PREFIX = re.compile(r"^(V\*|\*\*|\*|NAME)\s+", re.I)
+
+
+def safe_name(name: str | None) -> str:
+    """Target name -> folder name: 'V* FZ Tau' -> 'FZ_Tau', 'DR Tau (A)' -> 'DR_Tau_A'."""
+    s = _SIMBAD_PREFIX.sub("", str(name or "").strip())
+    s = re.sub(r"[^A-Za-z0-9+\-.]+", "_", s).strip("_.")
+    return s or "target"
+
+
 class ProjectConfig(BaseModel):
     target: TargetConfig = TargetConfig()
     continuum: ContinuumConfig = ContinuumConfig()
@@ -159,7 +173,7 @@ class ProjectConfig(BaseModel):
     components: list[ComponentConfig] = Field(default_factory=list)
     fit: FitConfig = FitConfig()
     linedata: LineDataConfig = LineDataConfig()
-    output: str = "results"
+    output: str = DEFAULT_OUTPUT         # "{target}" -> source name, e.g. results/FZ_Tau
     R_model: str = "argyriou2023"          # argyriou2023 | jones2023 (pontoppidan2024 = legacy alias)
     R_scale: float = 1.0
     R_constant: float | None = None        # a constant resolving power instead of R_model
@@ -189,6 +203,33 @@ class ProjectConfig(BaseModel):
     def to_yaml(self) -> str:
         return yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False, allow_unicode=True)
 
+    # ---- output folders ----------------------------------------------------------------------
+    def target_name(self, fallback: str | None = None) -> str:
+        """The source name used for folders: target.name, or `fallback` (e.g. the FITS TARGNAME) when
+        target.name was left at its default."""
+        n = (self.target.name or "").strip()
+        return n if n and n != "target" else (fallback or n or "target")
+
+    def output_dir(self, target_name: str | None = None) -> str:
+        """Folder this run writes to.  '{target}' in `output` is replaced by the source name; the old
+        default 'results' also gets one sub-folder per source; any other path is used as written."""
+        out = (self.output or DEFAULT_OUTPUT).strip()
+        if out.rstrip("/\\") in {o.rstrip("/") for o in _LEGACY_OUTPUTS}:
+            out = os.path.join(out.rstrip("/\\"), "{target}")
+        return os.path.normpath(os.path.expanduser(out.replace("{target}", safe_name(self.target_name(target_name)))))
+
+    def per_target_output(self) -> bool:
+        """True when `output` already makes one folder per source ('{target}' or the old default)."""
+        out = (self.output or "").strip()
+        return "{target}" in out or out.rstrip("/\\") in {o.rstrip("/") for o in _LEGACY_OUTPUTS}
+
+    def output_root(self) -> str:
+        """Common parent of the per-source folders (where batch runs put population.csv)."""
+        out = (self.output or DEFAULT_OUTPUT).strip()
+        if "{target}" in out:
+            out = out.split("{target}")[0]
+        return os.path.normpath(os.path.expanduser(out.rstrip("/\\") or "."))
+
     def components_list(self) -> list[Component]:
         return [c.to_component() for c in self.components]
 
@@ -216,5 +257,5 @@ EXAMPLE_CONFIG = ProjectConfig(
     ],
     fit=FitConfig(windows=[[13.5, 16.5], [16.5, 17.5]], ordering=[["H2O_hot", "H2O_warm"]],
                   mcmc=MCMCConfig(nwalkers=64, nsteps=3000, processes=8)),
-    output="results/FZ_Tau",
+    output=DEFAULT_OUTPUT,
 )

@@ -20,4 +20,4 @@ fit:
   stages: [optimise, mcmc]
   optimise: {maxiter: 80, popsize: 10, workers: 4}
   mcmc: {nwalkers: 40, nsteps: 2000, processes: 4}
-output: results/FZ_Tau_annuli
+output: results/{target}/annuli             # -> results/FZ_Tau/annuli

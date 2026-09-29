@@ -967,6 +967,8 @@ class JalebiApp:
         self.estimate_continuum()
         self.on_structure_change()
         self._refresh_header()
+        if hasattr(self, "out_resolved"):
+            self._show_outdir()
 
     @_bokeh_safe
     def _update_lineids(self):
@@ -1553,7 +1555,10 @@ class JalebiApp:
         self.m_steps = pn.widgets.IntInput(name="steps", value=m.nsteps, **W)
         self.m_proc = pn.widgets.IntInput(name="processes", value=max(m.processes, 1), **W)
         self.m_seed = pn.widgets.IntInput(name="seed", value=m.seed, **W)
-        self.out_dir = pn.widgets.TextInput(name="output folder", value=self.cfg.output, **W)
+        self.out_dir = pn.widgets.TextInput(name="output folder ({target} = source name)", value=self.cfg.output,
+                                            placeholder="results/{target}", **W)
+        self.out_resolved = _html("", **W)
+        self.out_dir.param.watch(lambda e: self._show_outdir(), "value")
         self.run_btn = pn.widgets.Button(name="▶  Run fit", button_type="primary", width=150, margin=(0, 6, 0, 0))
         self.stop_btn = pn.widgets.Button(name="■  Stop", button_type="danger", width=90, margin=(0, 0, 0, 0))
         self.run_btn.on_click(lambda e: self.start_fit())
@@ -1573,7 +1578,7 @@ class JalebiApp:
             _label("Grid", margin=(14, 0, 0, 0)), pn.Row(self.g_logN, self.g_T, **W),
             _label("Optimiser", margin=(14, 0, 0, 0)), pn.Row(self.o_method, self.o_maxiter, self.o_popsize, **W),
             _label("MCMC", margin=(14, 0, 0, 0)), pn.Row(self.m_walkers, self.m_steps, **W), pn.Row(self.m_proc, self.m_seed, **W),
-            _label("Output", margin=(14, 0, 0, 0)), self.out_dir,
+            _label("Output", margin=(14, 0, 0, 0)), self.out_dir, self.out_resolved,
             width=380, css_classes=["sf-inspector"],
             styles={"position": "sticky", "top": "0px", "max-height": "calc(100vh - 140px)", "overflow-y": "auto"})
         self.lnp_panel = _panel(pn.pane.Bokeh(self.lnp_fig, **W), visible=False)
@@ -1664,6 +1669,16 @@ class JalebiApp:
         else:
             self.estimate_continuum(); self.on_structure_change()
 
+    def _show_outdir(self):
+        """Show where the next fit will write, with {target} filled in."""
+        try:
+            c = self.cfg.model_copy()
+            c.output = self.out_dir.value or "results/{target}"
+            where = c.output_dir(self.spec.name if self.spec is not None else None)
+            self.out_resolved.object = f'<div class="sf-note">→ <span class="sf-mono">{where}</span></div>'
+        except Exception:
+            pass
+
     # --- background fit --------------------------------------------------------------------------
     def start_fit(self):
         if self.spec is None:
@@ -1697,11 +1712,12 @@ class JalebiApp:
             pr["lnp"] = (np.arange(lp.shape[0]), np.nanmean(fin, axis=1), np.nanpercentile(fin, 16, axis=1), np.nanpercentile(fin, 84, axis=1))
 
         try:
-            outdir = cfg.output
+            outdir = cfg.output_dir(spec.name if spec is not None else None)   # e.g. results/FZ_Tau
             os.makedirs(outdir, exist_ok=True)
             spec = prepare(cfg, spec)
             prob = build_problem(cfg, spec)
             run = RunResult(cfg, spec, prob)
+            run.outdir = outdir
             orig_say = run.say
             def say(msg):
                 orig_say(msg); pr["log"] = list(run.log)
@@ -1822,7 +1838,7 @@ class JalebiApp:
     def show_results(self, run: RunResult):
         from . import plots
         prob = run.problem
-        md = [f"## {run.spec.name}", f"{len(prob.y)} pixels, {prob.ndim} free parameters, output `{run.cfg.output}`"]
+        md = [f"## {run.spec.name}", f"{len(prob.y)} pixels, {prob.ndim} free parameters, output `{run.outdir or run.cfg.output}`"]
         if run.opt is not None:
             md.append(f"**Optimiser:** χ²_red = {run.opt.chi2_red:.3f}, BIC = {run.opt.bic:.1f} ({run.opt.runtime_s:.0f} s)")
         try:
@@ -1923,10 +1939,8 @@ class JalebiApp:
             for k, (_, row) in enumerate(sel.iterrows()):
                 if self._stop.is_set():
                     break
-                c = cfg.model_copy(deep=True)
-                c.target.name = str(row["name"]); c.target.path = str(row["path"])
-                c.target.distance_pc = float(row["distance_pc"]); c.target.rv_kms = float(row["rv_kms"])
-                c.output = os.path.join(cfg.output, str(row["name"]))
+                from .pipeline import target_config
+                c = target_config(cfg, row)          # own folder per target, e.g. results/DR_Tau
                 try:
                     from .pipeline import run_pipeline
                     run = run_pipeline(c, stop_event=self._stop)
@@ -1936,7 +1950,9 @@ class JalebiApp:
                 self._batch_state["msgs"].append(f"{row['name']}: {status}")
                 self._batch_state["i"] = k + 1
             if self._batch_rows:
-                pd.DataFrame(self._batch_rows).to_csv(os.path.join(cfg.output, "population.csv"), index=False)
+                root = cfg.output_root() if cfg.per_target_output() else cfg.output
+                os.makedirs(root, exist_ok=True)
+                pd.DataFrame(self._batch_rows).to_csv(os.path.join(root, "population.csv"), index=False)
             self._batch_state["done"] = True
 
         threading.Thread(target=worker, daemon=True).start()

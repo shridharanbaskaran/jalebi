@@ -11,4 +11,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 jalebi batch configs/FZ_Tau_quick.yaml configs/targets.csv --workers 2 --stages grid,optimise
-echo "population table: results/FZ_Tau/population.csv (one folder per target next to it)"
+echo "population table: results/population.csv; one folder per target next to it (results/FZ_Tau, results/synthetic_disk)"
