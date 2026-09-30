@@ -4,12 +4,17 @@
 or, in a notebook:
     from jalebi.app import make_app; make_app(data_root=...).servable()
 
-Layout ("observatory" dark theme): a header with live status chips, a slim session sidebar
-(config YAML in/out, cached line lists) and seven workspaces — Data · Continuum · Model · Fit ·
-Results · Batch · Cube (line and velocity maps of IFU cubes, jalebi.cube; a region spectrum drawn
-there can be sent to the slab fit).  The Continuum, Model and Fit workspaces use an *inspector* layout: plots on
-the left, a sticky, independently scrolling control column on the right, so the component
-sliders are always at hand while the spectrum stays in view.
+Layout ("observatory" dark theme): a header with the module switcher and live status chips, a slim
+session sidebar (config YAML in/out, cached line lists) and independent *modules* (jalebi.modules):
+
+  LTE slab fit      Data · Continuum · Model · Fit · Results · Batch
+  Cube maps         line / velocity / channel / PV maps of IFU cubes (jalebi.cube); region spectra can be
+                    sent to the LTE slab fit or to the rotation diagram
+  Rotation diagram  population diagrams of H2, CO, OH, H2O ... (jalebi.rotdiag)
+
+Modules other than the LTE fit are built the first time they are opened.  The Continuum, Model and Fit
+workspaces use an *inspector* layout: plots on the left, a sticky, independently scrolling control column on
+the right, so the component sliders are always at hand while the spectrum stays in view.
 
 Everything the user sets maps onto the same ProjectConfig used by the CLI and can be exported
 as YAML from the sidebar.
@@ -523,10 +528,10 @@ class ComponentCard:
 # ----------------------------------------------------------------------------------------------
 
 class JalebiApp:
-    TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch", "Cube"]
+    TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch"]      # the tabs of the LTE slab-fit module
 
     def __init__(self, data_root: str | None = None, config_path: str | None = None, start_tab: str = "data",
-                 cube_path: str | None = None):
+                 cube_path: str | None = None, start_module: str | None = None, rotdiag_config: str | None = None):
         self.cfg = ProjectConfig.load(config_path) if config_path else ProjectConfig()
         self._spec: Spectrum | None = None
         self._spec_version = 0
@@ -561,20 +566,23 @@ class JalebiApp:
         self._build_fit_tab()
         self._build_results_tab()
         self._build_batch_tab()
-        from .cube.app import CubeWorkspace
-        self.cube_ws = CubeWorkspace(self, cube_path)
+        self._module_options = {"cube": dict(cube_path=cube_path), "rotdiag": dict(config_path=rotdiag_config)}
+        self.workspaces: dict[str, object] = {}
         for c in (self.cfg.components or []):
             self.add_component(c, rebuild=False)
         if not self.cfg.components:
             self.add_component(ComponentConfig(name="H2O_hot", molecule="H2O", logN=18.0, T=700.0, logR=-0.6), rebuild=False)
         self.tabs = pn.Tabs(("Data", self.data_tab), ("Continuum", self.cont_tab), ("Model", self.model_tab),
                             ("Fit", self.fit_tab), ("Results", self.results_tab), ("Batch", self.batch_tab),
-                            ("Cube", self.cube_ws.panel), sizing_mode="stretch_width", dynamic=False)
+                            sizing_mode="stretch_width", dynamic=False)
         low = [t.lower() for t in self.TAB_NAMES]
-        if start_tab and start_tab.lower() in low:
+        from .modules import resolve_module
+        start = resolve_module(start_module) or resolve_module(start_tab) or "lte"
+        if start == "lte" and start_tab and start_tab.lower() in low:
             self.tabs.active = low.index(start_tab.lower())
+        self._build_modules(start)
         self.template = pn.template.FastListTemplate(
-            title="JALEBI", header=[self.header], sidebar=[self.sidebar], main=[self.tabs],
+            title="JALEBI", header=[self.module_nav, self.header], sidebar=[self.sidebar], main=[self.module_tabs],
             theme="dark", theme_toggle=False, main_layout=None, sidebar_width=290,
             background_color=PAL.bg, accent_base_color=PAL.accent, header_background=PAL.bg, header_color=PAL.text,
             neutral_color="#8e97ad", corner_radius=8, shadow=False, font=FONT, font_url=FONT_URL)
@@ -584,6 +592,73 @@ class JalebiApp:
             except Exception as e:
                 self.status.object = f'<div class="sf-kv">⚠ could not load {self.cfg.target.path}: {e}</div>'
 
+    # ------------------------------------------------------------------ modules
+    def _build_modules(self, start: str):
+        """The module switcher (header) and one hidden-header tab per module; modules other than the LTE
+        fit are built the first time they are opened."""
+        from .modules import MODULES
+        self.module_keys = list(MODULES)
+        self._module_holders = {k: pn.Column(sizing_mode="stretch_width") for k in self.module_keys}
+        self._module_holders["lte"].objects = [self.tabs]
+        self.workspaces["lte"] = self
+        self.module_tabs = pn.Tabs(*[(MODULES[k].label, self._module_holders[k]) for k in self.module_keys],
+                                   dynamic=False, sizing_mode="stretch_width",
+                                   stylesheets=[".bk-header { display: none !important; }"])
+        self.module_nav = pn.widgets.RadioButtonGroup(
+            options={f"{MODULES[k].icon}  {MODULES[k].label}": k for k in self.module_keys}, value=start,
+            button_type="default", margin=(6, 12, 6, 4), css_classes=["sf-modnav"],
+            stylesheets=[".bk-btn { font-size: 13px !important; padding: 5px 16px !important; letter-spacing: .01em; }"])
+        self.module_nav.param.watch(lambda e: self.switch_module(e.new), "value")
+        self.switch_module(start)
+
+    @property
+    def module(self) -> str:
+        return self.module_keys[self.module_tabs.active]
+
+    def workspace(self, key: str):
+        """The workspace object of a module (built on first use)."""
+        from .modules import MODULES
+        if key not in self.workspaces:
+            cls = MODULES[key].load()
+            ws = cls(self, **{k: v for k, v in self._module_options.get(key, {}).items() if v is not None})
+            self.workspaces[key] = ws
+            self._module_holders[key].objects = [ws.panel]
+            if hasattr(ws, "apply_theme"):
+                ws.apply_theme(PLOT_THEMES[self.plot_theme])
+            for f in (ws.figures() if hasattr(ws, "figures") else []):
+                _theme_fig(f, PLOT_THEMES[self.plot_theme])
+        return self.workspaces[key]
+
+    @property
+    def cube_ws(self):
+        return self.workspace("cube")
+
+    @property
+    def rotdiag_ws(self):
+        return self.workspace("rotdiag")
+
+    def switch_module(self, key: str, tab: str | None = None):
+        """Show a module (and, for the LTE fit, one of its tabs)."""
+        from .modules import resolve_module
+        key = resolve_module(key) or "lte"
+        ws = self.workspace(key)
+        self.module_tabs.active = self.module_keys.index(key)
+        if self.module_nav.value != key:
+            self.module_nav.value = key
+        if key == "lte" and tab and tab in self.TAB_NAMES:
+            self.tabs.active = self.TAB_NAMES.index(tab)
+        if ws is not self and hasattr(ws, "on_show"):
+            ws.on_show()
+        self._refresh_header()
+        return ws
+
+    def send_spectrum(self, spec: Spectrum, module: str, label: str | None = None):
+        """Hand a spectrum built in one module (e.g. a cube region) to another one."""
+        if module == "lte":
+            return self.use_spectrum(spec, label=label)
+        ws = self.switch_module(module)
+        ws.use_spectrum(spec, label=label)
+
     # ------------------------------------------------------------------ plot theme
     def _reg(self, kind: str, obj, band: str | None = None):
         """Register a glyph renderer / annotation / legend whose colours follow the plot theme."""
@@ -592,8 +667,10 @@ class JalebiApp:
 
     def _all_figs(self):
         figs = [f for f in (getattr(self, n, None) for n in ("data_fig", "cont_fig", "sub_fig", "model_fig", "resid_fig", "lnp_fig", "cube_fig")) if f is not None]
-        ws = getattr(self, "cube_ws", None)
-        return figs + (ws.figures() if ws is not None else [])
+        for k, ws in getattr(self, "workspaces", {}).items():
+            if ws is not self and hasattr(ws, "figures"):
+                figs += ws.figures()
+        return figs
 
     @_bokeh_safe
     def set_plot_theme(self, name: str):
@@ -618,6 +695,9 @@ class JalebiApp:
             _theme_legend(lg, th)
         for box in getattr(self, "_mask_boxes", []):
             box.fill_color = th["mask"]; box.fill_alpha = th["mask_alpha"]
+        for k, ws in getattr(self, "workspaces", {}).items():
+            if ws is not self and hasattr(ws, "apply_theme"):
+                ws.apply_theme(th)
 
     # ------------------------------------------------------------------ molecular feature markers
     def _add_feature_marks(self, fig, labels_at: str = "top"):
@@ -710,6 +790,10 @@ class JalebiApp:
 
     def _refresh_header(self, extra: str = ""):
         s = self.spec
+        if hasattr(self, "module_tabs") and self.module != "lte":       # the chips describe the LTE-fit target
+            self.header.object = (f'<div style="display:flex;align-items:center;gap:6px;width:100%;">'
+                                  f'<span class="sf-sub" style="margin-right:10px">{_ACRONYM_HTML}</span></div>')
+            return
         if s is None:
             body = chip("no spectrum loaded", "dim")
         else:
@@ -755,7 +839,7 @@ class JalebiApp:
                    _html('<div class="sf-note" style="margin-top:2px">Shaded bands mark the Q-branches / band heads of each molecule '
                          '(no H₂O — its lines are everywhere), so you can see which components a spectrum needs.</div>'),
                    title="Display"),
-            _panel(self.cfg_download, _html('<div class="sf-note" style="margin:8px 0 4px">Load a config YAML</div>'), self.cfg_upload, title="Configuration"),
+            _panel(self.cfg_download, _html('<div class="sf-note" style="margin:8px 0 4px">Load a config YAML</div>'), self.cfg_upload, title="LTE-fit configuration"),
             _panel(self.linelist_info, title="Line lists"),
             sizing_mode="stretch_width")
 
@@ -981,8 +1065,10 @@ class JalebiApp:
         except Exception:
             path = label or spec.name
         self.distance.value = spec.distance_pc
-        if switch_to and switch_to in self.TAB_NAMES and hasattr(self, "tabs"):
-            self.tabs.active = self.TAB_NAMES.index(switch_to)      # switch first: the continuum + model take a moment
+        if switch_to and hasattr(self, "module_tabs"):
+            self.switch_module("lte", switch_to)                    # switch first: the continuum + model take a moment
+        elif switch_to and switch_to in self.TAB_NAMES and hasattr(self, "tabs"):
+            self.tabs.active = self.TAB_NAMES.index(switch_to)
         self._set_spectrum(spec, path, time.time())
 
     def _set_spectrum(self, spec: Spectrum, path: str, t0: float):
@@ -2031,8 +2117,10 @@ class JalebiApp:
         return self.template
 
 
-def make_app(data_root: str | None = None, config_path: str | None = None, start_tab: str = "data", cube_path: str | None = None):
-    return JalebiApp(data_root=data_root, config_path=config_path, start_tab=start_tab, cube_path=cube_path).servable()
+def make_app(data_root: str | None = None, config_path: str | None = None, start_tab: str = "data", cube_path: str | None = None,
+             start_module: str | None = None, rotdiag_config: str | None = None):
+    return JalebiApp(data_root=data_root, config_path=config_path, start_tab=start_tab, cube_path=cube_path,
+                     start_module=start_module, rotdiag_config=rotdiag_config).servable()
 
 
 if __name__.startswith("bokeh"):

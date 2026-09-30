@@ -75,6 +75,12 @@ def _configs():
 
 @pytest.mark.parametrize("path", _configs(), ids=lambda p: p.name)
 def test_example_configs_validate(path):
+    if path.name.startswith("rotdiag_"):                 # rotation-diagram configs (jalebi rotdiag run)
+        from jalebi.rotdiag import RotDiagConfig
+        rc = RotDiagConfig.load(str(path))
+        src = rc.fluxes.path if rc.fluxes else rc.spectrum.path
+        assert Path(resolve_path(src)).exists()
+        return
     cfg = ProjectConfig.load(str(path))
     assert Path(resolve_path(cfg.target.path)).exists()
     for c in cfg.components:

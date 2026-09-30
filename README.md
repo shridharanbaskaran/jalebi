@@ -8,6 +8,7 @@
 Simultaneous LTE slab fitting of the molecular emission in JWST/MIRI spectra of protoplanetary disks:<br>
 continuum → molecule detection → joint fit of many molecules → MCMC posteriors and degeneracies,<br>
 plus line maps and velocity maps of IFU cubes (jets, winds, H₂) with region-by-region slab fits,<br>
+and rotation diagrams of H₂, CO, OH and H₂O (N, T, A_V, ortho/para ratio, optical depth),<br>
 from the terminal, from Python, or in an interactive web app.
 </p>
 
@@ -17,6 +18,7 @@ from the terminal, from Python, or in an interactive web app.
   <a href="#the-physics">Physics</a> ·
   <a href="#fitting-and-uncertainties">Fitting</a> ·
   <a href="#line-maps-and-velocity-maps-from-ifu-cubes">Cube maps</a> ·
+  <a href="#rotation-diagrams">Rotation diagrams</a> ·
   <a href="#configuration-reference">Config</a> ·
   <a href="#command-line-reference">CLI</a> ·
   <a href="#examples">Examples</a> ·
@@ -41,8 +43,9 @@ posterior, so you see the uncertainties **and** the degeneracies between paramet
 | **Fitting** | grid over (log N, T) → differential evolution → `emcee`, with emitting areas solved exactly by non-negative least squares; parallel over CPU cores |
 | **Diagnostics** | autocorrelation time, split-R̂, acceptance; corner plots, correlation matrix, traces, posterior predictive; τ_max flags; ΔBIC detection test; automatic molecule detection |
 | **Cubes** (`jalebi.cube`) | per-spaxel continuum, point-source removal with the continuum as PSF, moment maps, Gaussian-centroid velocity maps with Monte Carlo errors, line stacking, channel maps, PV cuts, regions → spectrum → slab fit; FITS with WCS (CARTA/DS9) + PNG |
-| **Interfaces** | `jalebi` CLI, Panel web app (`jalebi serve`), Python API, batch mode for surveys |
-| **Batteries** | FZ Tau MIRI spectrum, HV Tau C cube cutouts and a synthetic spectrum with known answers, 10 example scripts, a notebook, `jalebi doctor`, `jalebi demo`, `jalebi cube demo` |
+| **Rotation diagrams** (`jalebi.rotdiag`) | pick a molecule (H₂, CO, OH, H₂O, …): its lines are found in the spectrum, blends and contaminants flagged, fluxes measured with exact errors; one or two temperatures or a power law, A_V with a choice of extinction curves, the ortho-to-para ratio (exact spin-resolved partition sums), optical depth; least squares + MCMC in flux space, BIC model comparison, mass and column of warm gas |
+| **Interfaces** | `jalebi` CLI, Panel web app (`jalebi serve`) with three modules (LTE slab fit · Cube maps · Rotation diagram), Python API, batch mode for surveys |
+| **Batteries** | FZ Tau MIRI spectrum, HV Tau C cube cutouts, synthetic spectra with known answers (disk, absorber, H₂), 12 example scripts, a notebook, `jalebi doctor`, `jalebi demo`, `jalebi cube demo`, `jalebi rotdiag demo` |
 
 <p align="center"><img src="docs/images/banner.png" alt="the jalebi command" width="760"></p>
 
@@ -58,14 +61,15 @@ posterior, so you see the uncertainties **and** the degeneracies between paramet
 6. [Fitting and uncertainties](#fitting-and-uncertainties): likelihood, priors, the three stages, diagnostics
 7. [Which molecules? Automatic detection](#which-molecules-automatic-detection)
 8. [Line maps and velocity maps from IFU cubes](#line-maps-and-velocity-maps-from-ifu-cubes) (`jalebi.cube`)
-9. [Configuration reference](#configuration-reference)
-10. [Command-line reference](#command-line-reference)
-11. [The web app](#the-web-app)
-12. [Python API](#python-api)
-13. [Parallelisation and speed](#parallelisation-and-speed)
-14. [Line lists](#line-lists)
-15. [Examples](#examples) · [Output files](#output-files) · [Validation](#validation)
-16. [Project layout](#project-layout) · [Versions and releases](docs/VERSION_CONTROL.md) · [Citing](#citing-jalebi) · [License](#license) · [References](#references)
+9. [Rotation diagrams](#rotation-diagrams) (`jalebi.rotdiag`)
+10. [Configuration reference](#configuration-reference)
+11. [Command-line reference](#command-line-reference)
+12. [The web app](#the-web-app)
+13. [Python API](#python-api)
+14. [Parallelisation and speed](#parallelisation-and-speed)
+15. [Line lists](#line-lists)
+16. [Examples](#examples) · [Output files](#output-files) · [Validation](#validation)
+17. [Project layout](#project-layout) · [Versions and releases](docs/VERSION_CONTROL.md) · [Citing](#citing-jalebi) · [License](#license) · [References](#references)
 
 ---
 
@@ -127,7 +131,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.11.0  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.12.0  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...
@@ -625,7 +629,7 @@ jalebi cube region /path/to/target --circle "0.42 0.91 0.35" --offsets --out jet
 jalebi cube ratio /path/to/target -l "[Fe II] 5.34" -l "[Ne II] 12.81" --rms-region "12 8 3" --sigma 5,5 --recipe cube_maps
 jalebi cube moment0 /path/to/target -l 5.3402=FeII --component full   # the old cube_maps.py make_moment0
 jalebi cube init cube.yaml --example hv_tau_c && jalebi cube run cube.yaml     # everything from one YAML
-jalebi serve --tab cube --cube /path/to/target            # the web app's Cube workspace
+jalebi serve --module cube --cube /path/to/target         # the web app's Cube maps module
 ```
 
 ```python
@@ -676,6 +680,47 @@ blueshifted) with its Monte Carlo error, and the integrated spectra. The dashed 
 <p align="center"><img src="docs/images/hv_tau_c_h2_stack.png" alt="HV Tau C H2 stack" width="900"></p>
 <p align="center"><em>The H₂ S(1)+S(2)+S(3) stack of HV Tau C: emission elongated along PA ≈ 105°, and a velocity gradient
 along the jet axis close to the source.</em></p>
+
+---
+
+## Rotation diagrams
+
+<p align="center"><img src="docs/images/rotdiag_h2_models.png" alt="H2 rotation diagram: two-component and power-law fits" width="900"></p>
+
+`jalebi.rotdiag` turns a spectrum (or a table of line fluxes) into a rotation diagram and fits it. Pick a molecule;
+the module loads its line list, finds the lines inside the spectrum, measures them and fits
+ln(N_u/g_u) vs E_u. Everything — physics, options, validation — is in [`docs/ROTDIAG.md`](docs/ROTDIAG.md).
+
+```bash
+jalebi rotdiag demo                                   # bundled synthetic H2: two temperatures, A_V 10, OPR 2.3
+jalebi rotdiag lines H2 example:FZ_Tau                # the lines (blends, contaminants) that would be used
+jalebi rotdiag fit example:FZ_Tau -m H2 --model two --opr species --av-free --mcmc --compare
+jalebi rotdiag fit example:FZ_Tau -m CO --opacity --fwhm 4.7 --geometry radius --radius 0.3
+jalebi rotdiag fit --fluxes h2.csv --flux-unit "1e-17 erg s-1 cm-2" -m H2 --model two --av-free
+jalebi serve --module rotdiag                         # the Rotation diagram module of the web app
+```
+
+- **Molecules**: H₂ (the full Roueff et al. 2019 line list is now bundled, S(0) included, with exact ortho and para
+  partition sums), CO (HITEMP), ¹³CO, OH, H₂O (the isolated lines of Banzatti et al. 2025 by default), and any other
+  molecule with a line list.
+- **Lines**: inside the spectrum, ranked by their thin LTE intensity; lines closer than half a resolution element
+  are one feature (flux = the sum of its members); neighbours, other-band blends (CO v = 2–1 next to 1–0) and known
+  lines of other species are fitted simultaneously.
+- **Fluxes**: pixel-integrated Gaussians of the MRS resolution at one line velocity, with a polynomial baseline, by
+  linear least squares (exact errors); velocity and width scale (per MRS channel) from the profile likelihood; or
+  integration over windows.
+- **Models**: one temperature, two (warm + hot), or a power law dN ∝ T^−b dT (Neufeld & Yuan 2008); the
+  ortho-to-para ratio thermal, free with each spin species in LTE (exact at any T), or the ln(OPR/3) offset (JOYS);
+  A_V with the Gordon et al. (2023) curve by default, four others bundled, or yours (e.g. KP5) as a CSV; optical
+  depth by the curve of growth of a Gaussian slab; normalised to the number of molecules (unresolved disks), an
+  emitting radius, an aperture (column density) or intensity.
+- **Fit**: χ² in flux space with a 10 % flux systematic, least squares with many starts, then emcee; corner plots,
+  BIC comparison of the three models, derived column, number of molecules, warm-gas mass, A_K, LTE OPR, τ_max,
+  line luminosity.
+- **Figures** in paper style (log₁₀ and ln axes, observed and de-reddened points, components, parameter box), with the
+  power law fitted and drawn next to the two-component model (`fit: {also: [powerlaw]}`, default for H₂ in the app).
+- **Validated** on synthetic spectra (all parameters within 1.6σ), on full LTE slab spectra of jalebi's spectral
+  model (thin H₂; optically thick CO, which a thin fit overestimates by 600 K), and against pdrtpy.
 
 ---
 
@@ -791,7 +836,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
 | `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
-| `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show] [--tab cube] [--cube DIR]` | the web app (optionally opened on a workspace) |
+| `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show] [--module lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app, opened on a module (and a tab of the LTE slab fit) |
 | `jalebi cube info PATH` · `jalebi cube lines [PATH]` | cubes, bands, source position; the line catalogue (and what PATH covers) |
 | `jalebi cube maps PATH -l LINE … [--zero-point star] [--no-psf] [--n-mc N] [--rv] [--distance] [--out DIR]` | moment, extended-emission and centroid-velocity maps (FITS + PNG) |
 | `jalebi cube stack PATH -l LINE -l LINE … [--name H2]` | stack lines of one species in velocity space and map it |
@@ -799,6 +844,9 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi cube region PATH --circle/--ellipse/--annulus/--polygon "…" [--offsets] \| --ds9 FILE [--fit CONFIG]` | region spectrum over all sub-bands → CSV (→ slab fit) |
 | `jalebi cube init FILE --example hv_tau_c\|synthetic\|blank` · `jalebi cube run FILE [-j N]` | cube config: everything in one YAML |
 | `jalebi cube cutout PATH -l LINE … [--gzip]` · `jalebi cube synth DIR` · `jalebi cube demo` | small cubes around lines; synthetic cubes with known answers; the HV Tau C demo |
+| `jalebi rotdiag molecules` · `jalebi rotdiag curves` · `jalebi rotdiag lines MOL [SPECTRUM]` | rotation-diagram molecules and line lists; extinction curves; the features a diagram would use |
+| `jalebi rotdiag fit SPECTRUM -m MOL [--model single\|two\|powerlaw] [--opr thermal\|species\|offset] [--av-free] [--opacity --fwhm DV] [--geometry number\|radius\|aperture] [--mcmc] [--compare]` · `--fluxes CSV --flux-unit U` | find, measure and fit a rotation diagram (or fit a flux table) → `results/<source>/rotdiag/<MOL>/` |
+| `jalebi rotdiag init FILE --example h2\|h2_fluxes\|co\|oh\|h2o` · `jalebi rotdiag run FILE` · `jalebi rotdiag demo` | rotation-diagram config; run it; the synthetic H₂ demo |
 | `jalebi model --molecule H2O --logN 18 --T 600 --R 0.5 --wmin 13 --wmax 17` | a quick model spectrum to CSV |
 | `jalebi synth OUT.csv [--snr 150] [--bands 3A,3B,3C] [--seed 0]` | a synthetic MRS spectrum with known parameters |
 | `jalebi linedata list` / `fetch MOL… [--release hitran --wmin --wmax --force]` / `import MOL FILE --release TAG` | manage line lists |
@@ -811,8 +859,12 @@ R_constant: null                # a constant resolving power instead of R_model
 
 ## The web app
 
-`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh) with seven workspaces. Every
-setting maps onto the same YAML config, which the sidebar imports and exports.
+`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh). The switcher in the header opens one of
+three **modules**, each with its own workflow: **LTE slab fit** (the six tabs below), **Cube maps** and **Rotation
+diagram** (`jalebi serve --module cube|rotdiag` opens it directly; modules are built when first opened). A cube
+region can be sent to the LTE slab fit or to the rotation diagram. Every setting maps onto a YAML config (the LTE
+fit's in the sidebar, the cube's and the rotation diagram's in their own panels). New modules plug in through
+`jalebi.modules.register_module`.
 
 <p align="center"><img src="docs/images/app_continuum.png" alt="the web app, Continuum tab, FZ Tau" width="900"></p>
 
@@ -824,7 +876,8 @@ setting maps onto the same YAML config, which the sidebar imports and exports.
 | **Fit** | run grid → optimiser → MCMC in the background with live progress; stop at any time |
 | **Results** | best-fit and posterior tables, corner plot, correlation matrix, traces, posterior predictive, ΔBIC, τ flags |
 | **Batch** | run a folder of targets with the current config |
-| **Cube** | open a folder of `s3d` cubes (default: the bundled HV Tau C), pick a line or an H₂ stack, *Make maps*; switch between continuum, moment 0, extended, velocity, velocity error, moments 1/2, S/N and single channels; click a spaxel for its spectrum and Gaussian fit; set a circle/ellipse/annulus or draw a polygon → *Extract region spectrum* → *Send to slab fit* (loads it as the target of Continuum/Model/Fit); PV cuts; write FITS + PNG; the equivalent `jalebi cube …` command and Python code, and the cube config YAML |
+| *module* **Cube maps** | open a folder of `s3d` cubes (default: the bundled HV Tau C), pick a line or an H₂ stack, *Make maps*; switch between continuum, moment 0, extended, velocity, velocity error, moments 1/2, S/N and single channels; click a spaxel for its spectrum and Gaussian fit; set a circle/ellipse/annulus or draw a polygon → *Extract region spectrum* → *Send to slab fit* (the target of the LTE slab fit) or *Send to rotation diagram*; PV cuts; write FITS + PNG; the equivalent `jalebi cube …` command and Python code, and the cube config YAML |
+| *module* **Rotation diagram** | a spectrum (file, the LTE-fit target, a cube region) or a flux table; pick the molecule → ① find lines → ② measure → ③ fit → ④ MCMC; the spectrum with the lines marked and each line's fit, the line table (tick lines in or out), the diagram with model curves, residuals and upper limits, the posterior (corner, parameters, derived quantities, model comparison); settings for the selection, measurement, physics and MCMC; downloads and the equivalent command. See [`docs/ROTDIAG.md`](docs/ROTDIAG.md) §5 |
 
 <p align="center"><img src="docs/images/app_cube.png" alt="the web app, Cube tab, HV Tau C" width="900"></p>
 <p align="center"><em>The Cube workspace on the bundled HV Tau C cubes: the [Fe II] 5.34 µm velocity map (relative to the source),
@@ -942,6 +995,7 @@ HITEMP water fast without changing the spectrum. Sources and credits for all bun
 | `09_cube_region_fit.py` | region spectra (jet lobes, H₂ wind, halo) over all sub-bands, line fluxes per region, `--fit` for a slab fit of a region | 15 s |
 | `10_cube_maps_recipe.py` | the old `cube_maps.py` functions and the same recipe through the jalebi API, numbers compared; the ratio figure, a masked map with an au box, channel slices | 35 s |
 | `11_absorption_fit.py` | a cold CO₂ absorption screen (v = −40 km/s, f_c = 0.6) in front of a continuum and hot CO₂ emission: synthetic spectrum → grid → DE → emcee, truth recovered within 1σ | 1–3 min |
+| `12_rotation_diagram.py` | rotation diagrams: the synthetic H₂ spectrum (two temperatures, A_V, OPR; model comparison), a flux table, CO of FZ Tau with the optical depth, and a thin-vs-thick comparison on a slab spectrum | 1 min |
 | `notebooks/jalebi_quickstart.ipynb` | all of the above in one notebook | 5 min |
 | `configs/` | `synthetic.yaml`, `FZ_Tau_quick.yaml`, `FZ_Tau_water_hot_cold.yaml`, `FZ_Tau_water_CO.yaml`, `FZ_Tau_autodetect.yaml`, `FZ_Tau_annuli.yaml`, `absorption_synthetic.yaml`, `targets.csv`, `HV_Tau_C_cube.yaml` (for `jalebi cube run`) | |
 
@@ -1009,7 +1063,12 @@ The test suite (`pytest -q`, about 20 s, offline) checks:
 - `jalebi.cube` on synthetic cubes with known answers (point source + Keplerian ring + jet, PSF convolved
   plane by plane): point-source and extended fluxes, calibrated Monte Carlo velocity errors (pull σ ≈ 1),
   ring rotation, an injected sub-band offset, resampling wiggles, stacking, channel maps, PV cuts, regions,
-  FITS WCS, and the HV Tau C jet; the numbers are in [`docs/CUBE.md`](docs/CUBE.md#3-validation).
+  FITS WCS, and the HV Tau C jet; the numbers are in [`docs/CUBE.md`](docs/CUBE.md#3-validation);
+- `jalebi.rotdiag`: the H₂ level sums against HITRAN's Q(T) and the LTE OPR, the curve of growth, extinction
+  curves, injection–recovery of one- and two-temperature and power-law H₂ diagrams with A_V and a free OPR, full LTE
+  slab spectra (thin H₂; optically thick CO with and without the opacity correction), flux tables, the pipeline, the
+  CLI and the web-app modules (a cube region sent to the rotation diagram); numbers in
+  [`docs/ROTDIAG.md`](docs/ROTDIAG.md#8-validation).
 
 GitHub Actions run the suite on Linux and macOS with Python 3.10–3.14, and also build and install the
 wheel in a clean environment.
@@ -1076,7 +1135,10 @@ jalebi/
 │   ├── app.py          the web app
 │   ├── lines.py        line catalogue (H2, fine-structure, H I), batched Gaussian fits, one-line fits
 │   ├── cube/           line maps from IFU cubes: io, continuum, psf, maps, channels, regions, plots,
-│   │                   config, pipeline, synthetic, cli (`jalebi cube`), app (the Cube workspace)
+│   │                   config, pipeline, synthetic, cli (`jalebi cube`), app (the Cube maps module)
+│   ├── rotdiag/        rotation diagrams: species, extinction, features, measure, physics, fit, config,
+│   │                   pipeline, plots, synthetic, cli (`jalebi rotdiag`), app (the Rotation diagram module)
+│   ├── modules.py      the modules of the web app (registry)
 │   ├── synthetic.py    synthetic spectra with known answers
 │   ├── doctor.py       installation checks
 │   ├── examples.py     bundled data paths, `example:` prefix, copying the examples
@@ -1085,7 +1147,8 @@ jalebi/
 │   └── data_files/     continuum windows and water line tables (Banzatti+2025)
 ├── examples/           scripts 01–09, configs/, notebooks/
 ├── tests/              pytest suite
-├── docs/               images, CUBE.md (cube maps), VERSION_CONTROL.md (releases), GitHub guide
+├── docs/               images, CUBE.md (cube maps), ROTDIAG.md (rotation diagrams), ABSORPTION.md,
+│                       VERSION_CONTROL.md (releases), GitHub guide
 └── .github/            CI, PyPI publishing, issue templates
 ```
 
@@ -1130,22 +1193,31 @@ matplotlib, pybaselines, pydantic, typer, rich, Panel and Bokeh, and the HITRAN 
 - Banzatti, A. et al. 2023, ApJL 957, L22 — cool water excess in compact disks
 - Banzatti, A. et al. 2025, AJ 169, 165 — *Water in protoplanetary disks with JWST-MIRI: spectral excitation atlas…*
 - Carr, J. S. & Najita, J. R. 2008, Science 319, 1504
+- Chiar, J. E. & Tielens, A. G. G. M. 2006, ApJ 637, 774 — mid-IR extinction, local ISM
 - Foreman-Mackey, D. et al. 2013, PASP 125, 306 — emcee
+- Francis, L. et al. 2025, A&A — JOYS: the [D/H] abundance from protostellar outflows (H₂ diagrams with A_V and the ln(OPR/3) correction)
+- Fritz, T. K. et al. 2011, ApJ 737, 73 — Galactic-centre extinction curve
 - Gamache, R. R. et al. 2021, JQSRT 271, 107713 — TIPS-2021
 - Gelman, A. & Rubin, D. B. 1992, Statistical Science 7, 457
 - Gelman, A. et al. 2013, *Bayesian Data Analysis*, 3rd ed. (CRC Press) — split-R̂
 - Goodman, J. & Weare, J. 2010, Comm. App. Math. Comp. Sci. 5, 65
 - Gordon, I. E. et al. 2022, JQSRT 277, 107949 — HITRAN2020
+- Gordon, K. D. et al. 2021, ApJ 916, 33; 2023, ApJ 950, 86; 2024, JOSS 9, 7023 — extinction curves and `dust_extinction`
+- Goldsmith, P. F. & Langer, W. D. 1999, ApJ 517, 209 — population diagrams with optical-depth corrections
 - Jones, O. C. et al. 2023, MNRAS 523, 2519 — MRS resolving power
 - Kaeufer, T. et al. 2024, A&A — *Bayesian analysis of the molecular emission and dust continuum of protoplanetary disks* (DuCKLinG)
 - Kochanov, R. V. et al. 2016, JQSRT 177, 15 — HAPI
 - Lahuis, F. & van Dishoeck, E. F. 2000, A&A 355, 699 — ISO absorption bands of C₂H₂, HCN and CO₂ toward massive protostars (slab absorption model)
 - Law, D. R. et al. 2023, AJ 166, 45 — MRS cubes and PSF
 - Lawson, C. L. & Hanson, R. J. 1974, *Solving Least Squares Problems* (NNLS)
+- Neufeld, D. A. & Yuan, Y. 2008, ApJ 678, 974 — power-law temperature distributions of shocked H₂
+- Pachucki, K. & Komasa, J. 2018, PCCP 20, 247 — H₂ level energies
 - Li, G. et al. 2015, ApJS 216, 15 — CO line list
 - Li, J., Boogert, A. C. A. & Tielens, A. G. G. M. 2024 — gas-phase absorption toward embedded protostars with JWST: $F = F_c\,[1 - f_c(1 - e^{-\tau})]$
 - Pontoppidan, K. M. et al. 2024, ApJ 963, 158 — *High-contrast JWST-MIRI spectroscopy of planet-forming disks for the JDISC Survey*
+- Pound, M. W. & Wolfire, M. G. 2023, AJ 165, 25 — PDR Toolbox / pdrtpy (H₂ excitation fits)
 - Rothman, L. S. et al. 2010, JQSRT 111, 2139 — HITEMP
+- Roueff, E. et al. 2019, A&A 630, A58 — the full infrared spectrum of H₂ (bundled line list)
 - Salyk, C. et al. 2011, ApJ 731, 130
 - Storn, R. & Price, K. 1997, J. Global Optimization 11, 341 — differential evolution
 - Tabone, B. et al. 2021, A&A 650, A192 — OH prompt emission from water photodissociation

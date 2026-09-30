@@ -11,7 +11,7 @@ Everything is available three ways, with the same settings and the same results:
 | --- | --- |
 | **Terminal** | `jalebi cube info / lines / maps / stack / channels / pv / ratio / moment0 / region / cutout / synth / run / demo` |
 | **Python** | `from jalebi import cube` → `CubeSet`, `prepare_line`, `line_maps`, `stack_lines`, `channel_maps`, `channel_slices`, `pv_diagram`, `ratio_map`, `region_spectrum`, `run_cube`; the old `cube_maps.py` functions in `jalebi.cube.cube_maps` (§6) |
-| **Web app** | `jalebi serve --tab cube`: the *Cube* workspace (map view, click a spaxel, draw a region, send it to the slab fit). It shows the equivalent command and Python code for what is on screen, and exports the cube config YAML |
+| **Web app** | `jalebi serve --module cube`: the *Cube maps* module (map view, click a spaxel, draw a region, send it to the LTE slab fit or to the rotation diagram). It shows the equivalent command and Python code for what is on screen, and exports the cube config YAML |
 
 The bundled example is **HV Tau C** (MINDS, JWST PID 1282): five cutouts around [Fe II] 5.34, H₂ S(3),
 S(2), S(1) and [Ne II] 12.81 µm. `jalebi cube demo` runs everything on it in about 30 s.

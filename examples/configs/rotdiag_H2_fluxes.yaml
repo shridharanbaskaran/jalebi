@@ -1,0 +1,69 @@
+# Example 12 part 2 — an H2 rotation diagram from a table of line fluxes (label, wave, flux, err in W m-2),
+# e.g. copied from a paper: no spectrum needed.  jalebi rotdiag run rotdiag_H2_fluxes.yaml
+molecule: H2
+target: H2_table
+spectrum:
+  path: ''
+  source: auto
+  rv_kms: 0.0
+  aperture_fwhm_scale: 1.5
+fluxes:
+  path: example:synthetic/rotdiag_H2_fluxes.csv
+  unit: W m-2
+  tol_fwhm: 0.5
+lines:
+  rel_min: 0.001
+  max_features: 60
+  blend_fwhm: 0.5
+  member_rel: 0.01
+  edge_fwhm: 3.0
+  include: []
+  exclude: []
+  resolving_power: argyriou2023
+measure:
+  method: gauss
+  velocity: auto
+  width: auto
+  window_fwhm: 8.0
+  joint_fwhm: 2.0
+  core_fwhm: 1.2
+  cont_order: 1
+  continuum: local
+  snr_detect: 3.0
+  integrate_fwhm: 1.2
+  contaminants: true
+  flux_unit: Jy
+  skip: []
+geometry:
+  mode: number
+  distance_pc: 140.0
+  R_au: 1.0
+  aperture_arcsec: 0.5
+fit:
+  model: two
+  opr: thermal
+  opr_value: 3.0
+  opr_free: true
+  av: 0.0
+  av_free: true
+  extinction: G23
+  opacity: false
+  fwhm_kms: 10.0
+  fwhm_free: false
+  R_free: false
+  sys_frac: 0.1
+  use: all
+  tmax_powerlaw: 4000.0
+  bounds: {}
+  fixed: {}
+  start: {}
+  compare: false
+mcmc:
+  enabled: true
+  walkers: 48
+  steps: 3000
+  burn: 1000
+  thin: 1
+  seed: 42
+output: results/{target}/rotdiag/{molecule}
+plots: true

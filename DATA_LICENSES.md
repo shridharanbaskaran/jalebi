@@ -15,6 +15,7 @@ table `*_Q.npz` next to it.
 | `CO2`, `13CO2`, `HCN`, `H13CN`, `C2H2`, `13CCH2`, `13CO`, `CH4`, `NH3`, `C2H4`, `C2H6`, `C4H2`, `HC3N`, `OH`, `H2`, `H2O` (`*_hitran.parquet`) | HITRAN2020, downloaded from hitran.org through astroquery/HAPI over the MIRI range. The C4H2 and HC3N lists are pruned to lines with S > 3×10⁻³ S<sub>max</sub>. | Gordon, I. E. et al. 2022, JQSRT 277, 107949 |
 | `H2O_hitemp.parquet` | HITEMP 2010 water, in the processed form distributed with iSLAT (Apache-2.0) | Rothman, L. S. et al. 2010, JQSRT 111, 2139 |
 | `CO_hitemp.parquet` | HITEMP CO (2019 update), in the processed form distributed with iSLAT (Apache-2.0) | Li, G. et al. 2015, ApJS 216, 15; Rothman et al. 2010 |
+| `H2_roueff2019.parquet` (+ `_Q.npz`) | The full infrared spectrum of H₂ (4712 electric-quadrupole and magnetic-dipole transitions of the X state; level energies of Pachucki & Komasa 2018), CDS catalogue J/A+A/630/A58, converted by `jalebi/rotdiag/_make_data.py`; Q(T) is the sum over its 302 levels | Roueff, E. et al. 2019, A&A 630, A58 |
 | `*_Q.npz` | Partition sums: TIPS-2021 via HAPI, or the table shipped with the list | Gamache, R. R. et al. 2021, JQSRT 271, 107713; Kochanov, R. V. et al. 2016, JQSRT 177, 15 |
 
 The HITRAN and HITEMP databases are freely available from https://hitran.org. Their maintainers ask
@@ -50,10 +51,10 @@ Telescope Science Institute, which is operated by the Association of Universitie
 Astronomy, Inc., under NASA contract NAS 5-03127 for JWST. These observations are associated with
 program #1282."*
 
-## Synthetic spectrum (`src/jalebi/example_data/synthetic/`)
+## Synthetic spectra (`src/jalebi/example_data/synthetic/`)
 
-JALEBI generated this spectrum (`jalebi.synthetic`) from the bundled line lists. It is released with
-the code under BSD-3-Clause.
+JALEBI generated these spectra (`jalebi.synthetic`, `jalebi.rotdiag.synthetic`) and the H₂ flux table from the
+bundled line lists. They are released with the code under BSD-3-Clause.
 
 ## Line-identification and continuum tables (`src/jalebi/data_files/`)
 
@@ -61,3 +62,5 @@ the code under BSD-3-Clause.
 | --- | --- |
 | `cont_ranges_Banzatti+2025.csv`, `MIRI_general_Banzatti+2025.csv`, `MIRI_H2O_*.csv` | Line-free continuum windows and water line lists of Banzatti, A. et al. 2025, AJ 169, 165 (as distributed with iSLAT) |
 | `Atomic_lines.csv` | Standard H I and fine-structure line wavelengths |
+| `H2_levels_Roueff2019.csv` | The 302 rovibrational levels of H₂ X¹Σ⁺_g (v, J, g, E) derived from Roueff, E. et al. 2019, A&A 630, A58 (CDS J/A+A/630/A58); used for the ortho/para partition functions of `jalebi.rotdiag` |
+| `extinction_curves.csv` | A_λ/A_V tabulated from the `dust_extinction` package (Gordon, K. D. et al. 2024, JOSS 9, 7023; BSD-3-Clause) for the curves of Gordon et al. 2023 (ApJ 950, 86; R_V 3.1 and 5.5), Gordon et al. 2021 (ApJ 916, 33), Chiar & Tielens 2006 (ApJ 637, 774) and Fritz et al. 2011 (ApJ 737, 73); cite the curve you use |

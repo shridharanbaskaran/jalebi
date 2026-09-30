@@ -1,0 +1,40 @@
+description: 'Synthetic MIRI-MRS spectrum of H2 (jalebi.rotdiag.synthetic): two temperature
+  components, number-of-molecules normalisation at 140 pc, A_V 10 (G23), OPR 2.3 (spin
+  species), lines at +8 km/s, continuum S/N 150'
+model: two
+opr: species
+extinction: G23
+distance_pc: 140.0
+v_kms: 8.0
+params:
+  logN1: 50.6
+  T1: 480.0
+  logN2: 48.5
+  T2: 1600.0
+  Av: 10.0
+  OPR: 2.3
+lines:
+- label: S(8)
+  wave: 5.05312
+  flux_true: 3.6756249634475323e-19
+- label: S(7)
+  wave: 5.51118
+  flux_true: 1.120427515433544e-18
+- label: S(6)
+  wave: 6.10856
+  flux_true: 5.71448353409632e-19
+- label: S(5)
+  wave: 6.90951
+  flux_true: 1.6204459432452513e-18
+- label: S(4)
+  wave: 8.02504
+  flux_true: 1.0823088780393152e-18
+- label: S(3)
+  wave: 9.66491
+  flux_true: 2.4012781512252515e-18
+- label: S(2)
+  wave: 12.27861
+  flux_true: 1.522498350887445e-18
+- label: S(1)
+  wave: 17.03485
+  flux_true: 1.2884747752013575e-18

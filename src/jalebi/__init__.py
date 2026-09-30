@@ -9,7 +9,9 @@ core      : constants, molecules, linedata, partition, instrument, model, lines 
 data      : data (ingest), continuum (baselines, masks, noise)
 fitting   : fit (likelihood, priors, grid, optimiser, emcee), detect, plots
 cubes     : cube (line maps, velocity maps, channel maps, PV cuts, region spectra of IFU cubes)
-interfaces: config (YAML), pipeline, cli (Typer), app (Panel web app)
+excitation: rotdiag (rotation diagrams of H2, CO, OH, H2O ...: N, T, A_V, OPR, optical depth; LSQ + MCMC)
+interfaces: config (YAML), pipeline, cli (Typer), app (Panel web app; modules: LTE slab fit, Cube maps,
+            Rotation diagram — see jalebi.modules)
 helpers   : synthetic (spectra with known answers), doctor (installation checks), examples
 
 Units: wavelengths in micron, column densities in cm^-2, temperatures in K,
@@ -22,9 +24,11 @@ Quick start
 >>> jalebi.example_path("FZ_Tau")                                  # bundled MIRI x1d files
 >>> from jalebi import cube                                        # line and velocity maps of s3d cubes
 >>> m = cube.line_maps(cube.prepare_line(cube.CubeSet("example:HV_Tau_C_cube"), "[Fe II] 5.34"))
+>>> from jalebi import rotdiag                                     # rotation diagrams
+>>> res = rotdiag.run_rotdiag(rotdiag.example_config("h2"), save=False)
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = ["__version__", "MOLECULES", "get_molecule", "LineList", "load_linelist", "example_path",
            "ProjectConfig", "Component", "build_model", "Spectrum", "load_spectrum", "run_pipeline"]
 

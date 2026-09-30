@@ -19,7 +19,9 @@
   jalebi cube demo                                          line/velocity maps of the bundled HV Tau C cubes
   jalebi cube maps DIR -l "[Fe II] 5.34" -l "H2 S(1)"       moment, extended-emission and velocity maps of s3d cubes
   jalebi cube region DIR --circle "dx dy r" --offsets --fit config.yaml   region spectrum -> slab fit
-  jalebi serve --tab cube                                   web app opened on the Cube workspace
+  jalebi serve --module cube                                web app opened on the Cube maps module
+  jalebi rotdiag fit example:FZ_Tau -m H2 --model two --opr species --av-free --mcmc   H2 rotation diagram
+  jalebi serve --module rotdiag                             web app opened on the Rotation diagram module
 """
 from __future__ import annotations
 
@@ -44,6 +46,8 @@ linedata_app = typer.Typer(help="Line-list cache management.")
 app.add_typer(linedata_app, name="linedata")
 from .cube.cli import cube_app  # noqa: E402  (light: typer + rich only; the cube code loads on use)
 app.add_typer(cube_app, name="cube")
+from .rotdiag.cli import rotdiag_app  # noqa: E402  (light as well)
+app.add_typer(rotdiag_app, name="rotdiag")
 
 _DATA_DIR_HELP = ("line-list cache folder. Precedence: this option, then linedata.data_dir of --config, then $JALEBI_DATA, "
                   "then ~/.jalebi/linedata (the bundled lists are always searched too). Use the same folder the app is started with.")
@@ -465,9 +469,12 @@ def about():
 def serve(port: int = 5006, data_root: Optional[str] = None, config: Optional[str] = None, show: bool = False,
           address: str = "localhost", allow_websocket_origin: Optional[str] = None,
           data_dir: Optional[str] = typer.Option(None, "--data-dir", help=_DATA_DIR_HELP),
-          tab: str = typer.Option("data", help="workspace to open: data | continuum | model | fit | results | batch | cube"),
-          cube_path: Optional[str] = typer.Option(None, "--cube", help="cube folder for the Cube workspace (default: bundled HV Tau C)")):
-    """Start the interactive web app (Panel)."""
+          module: Optional[str] = typer.Option(None, "--module", "-m", help="module to open: lte (LTE slab fit) | cube | rotdiag"),
+          tab: str = typer.Option("data", help="tab of the LTE slab fit to open: data | continuum | model | fit | results | batch "
+                                               "(or a module name: cube, rotdiag)"),
+          cube_path: Optional[str] = typer.Option(None, "--cube", help="cube folder for the Cube module (default: bundled HV Tau C)"),
+          rotdiag_config: Optional[str] = typer.Option(None, "--rotdiag-config", help="rotation-diagram YAML for the Rotation diagram module")):
+    """Start the interactive web app (Panel): modules LTE slab fit · Cube maps · Rotation diagram."""
     _use_cache(data_dir, config)
     import panel as pn
     from .app import make_app
@@ -475,7 +482,8 @@ def serve(port: int = 5006, data_root: Optional[str] = None, config: Optional[st
     if allow_websocket_origin:
         kwargs["websocket_origin"] = allow_websocket_origin.split(",")
     rprint(f"[bold]JALEBI web app[/bold] on http://{address}:{port}  (Ctrl+C to stop)")
-    pn.serve(lambda: make_app(data_root=data_root, config_path=config, start_tab=tab, cube_path=cube_path), title="JALEBI", **kwargs)
+    pn.serve(lambda: make_app(data_root=data_root, config_path=config, start_tab=tab, cube_path=cube_path, start_module=module,
+                              rotdiag_config=rotdiag_config), title="JALEBI", **kwargs)
 
 
 def main():

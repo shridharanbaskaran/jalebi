@@ -363,8 +363,13 @@ def load_csv(path: str, name: str | None = None, distance_pc: float = 140.0, wav
     (`wavelength`, `flux`, `Flux_err`, `flux_lines`), iSLAT (`wave`, `flux`, `err`) and JDISCS.
     A `continuum` / `baseline` column is loaded as the continuum (kept by continuum method "given")."""
     meta = {}
-    with open(path) as fh:
-        first = fh.readline()
+    if str(path).endswith(".gz"):                 # gzipped CSV (pandas reads it directly)
+        import gzip
+        with gzip.open(path, "rt") as fh:
+            first = fh.readline()
+    else:
+        with open(path) as fh:
+            first = fh.readline()
     if first.startswith("#"):
         for kv in first[1:].split():
             if "=" in kv:

@@ -1,0 +1,9 @@
+# synthetic H2 line fluxes [W m-2] (the truth of rotdiag_H2_synthetic_truth.yaml with 5-15 % Gaussian errors)
+label,wave,flux,err
+S(7),5.5112,9.2678e-19,1.4622e-19
+S(6),6.1086,5.9584e-19,5.8021e-20
+S(5),6.9095,1.6303e-18,8.9761e-20
+S(4),8.025,1.0051e-18,9.8325e-20
+S(3),9.6649,2.6167e-18,1.3177e-19
+S(2),12.279,1.3061e-18,1.7545e-19
+S(1),17.035,1.4812e-18,1.2047e-19

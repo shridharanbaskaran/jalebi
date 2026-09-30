@@ -281,7 +281,7 @@ def test_web_app_cube_workspace_builds():
     from jalebi.app import JalebiApp
     a = JalebiApp(start_tab="cube")
     ws = a.cube_ws
-    assert a.tabs.active == JalebiApp.TAB_NAMES.index("Cube")
+    assert a.module == "cube"
     assert "[Fe II] 5.34" in ws.line.options
     ws.n_mc.value = 0
     ws.make_maps()                                 # runs inline without a server

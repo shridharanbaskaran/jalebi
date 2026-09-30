@@ -24,6 +24,7 @@ results/
 examples/results/
 jalebi_demo/
 jalebi_cube_demo/
+jalebi_rotdiag_demo/
 jalebi_examples/
 install_log.txt
 *.h5
@@ -35,3 +36,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+.~lock.*#

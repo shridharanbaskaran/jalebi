@@ -3,7 +3,8 @@
 Left: the map (click a spaxel to see its spectrum; draw a polygon with the polygon tool) and sub-tabs for
 the PV diagram and the region spectrum.  Right: the settings, the region, and the equivalent terminal
 command and Python code for what is on screen, so a result found by clicking can be reproduced in a
-script.  "Send to slab fit" loads the region spectrum as the target of the Continuum/Model/Fit workspaces.
+script.  "Send to slab fit" loads the region spectrum as the target of the LTE slab-fit module (Continuum/Model/Fit);
+"Send to rotation diagram" opens it in the Rotation diagram module (e.g. H2 S(1)-S(8) of a jet knot).
 """
 from __future__ import annotations
 
@@ -93,6 +94,7 @@ class CubeWorkspace:
         self.pa = pn.widgets.FloatInput(name="PA [°]", value=0.0, step=5, width=95)
         self.extract_btn = pn.widgets.Button(name="Extract region spectrum", button_type="primary", **W)
         self.send_btn = pn.widgets.Button(name="→ Send to slab fit", button_type="success", disabled=True, **W)
+        self.send_rd_btn = pn.widgets.Button(name="→ Send to rotation diagram", button_type="default", disabled=True, **W)
         self.dl_spec = pn.widgets.FileDownload(callback=self._spec_bytes, filename="region_spectrum.csv", label="⬇ spectrum CSV", disabled=True, width=150)
         self.dl_ds9 = pn.widgets.FileDownload(callback=self._ds9_bytes, filename="region.reg", label="⬇ DS9 region", disabled=True, width=150)
         # ---- PV + output ------------------------------------------------------------------------
@@ -113,6 +115,7 @@ class CubeWorkspace:
         self.vel.param.watch(lambda e: self.show_product(), "value")
         self.extract_btn.on_click(lambda e: self.extract_region())
         self.send_btn.on_click(lambda e: self.send_to_fit())
+        self.send_rd_btn.on_click(lambda e: self.send_to_rotdiag())
         self.pv_btn.on_click(lambda e: self.make_pv())
         self.write_btn.on_click(lambda e: self.write_products())
         self.recipe_btn.on_click(lambda e: self.use_cube_maps_recipe())
@@ -159,7 +162,8 @@ class CubeWorkspace:
                         _html('<div class="sf-note">Offsets from the source. Ellipse: r = semi-major, b = semi-minor, PA of the '
                               'major axis (° E of N). Annulus: b = r_in, r = r_out. Polygon: pick the polygon tool on the map '
                               'and click the vertices (double-click ends).</div>'),
-                        self.extract_btn, self.send_btn, pn.Row(self.dl_spec, self.dl_ds9), title="Region → spectrum → slab fit")
+                        self.extract_btn, self.send_btn, self.send_rd_btn, pn.Row(self.dl_spec, self.dl_ds9),
+                        title="Region → spectrum → slab fit / rotation diagram")
         pvp = _panel(pn.Row(self.pv_pa, self.pv_len, self.pv_w, self.pv_btn), title="PV cut")
         outp = _panel(self.out, self.write_btn, self.cfg_dl, title="Save")
         codep = _panel(self.code, title="Same thing in the terminal / Python")
@@ -631,15 +635,23 @@ class CubeWorkspace:
         w, f, _ = spec.stitched()
         self.full_src.data = dict(w=w, f=f)
         self.full_fig.title.text = f"{spec.name}: {self.region.to_ds9()} · {len(spec.wave)} pixels in {', '.join(spec.bands)}"
-        self.send_btn.disabled = False; self.dl_spec.disabled = False; self.dl_ds9.disabled = False
+        self.send_btn.disabled = False; self.send_rd_btn.disabled = False; self.dl_spec.disabled = False; self.dl_ds9.disabled = False
         self.plot_tabs.active = 2
-        self.info.object = '<div class="sf-kv">region spectrum ready — <b>Send to slab fit</b> loads it as the target</div>'
+        self.info.object = ('<div class="sf-kv">region spectrum ready — <b>Send to slab fit</b> loads it as the LTE-fit target, '
+                            '<b>Send to rotation diagram</b> opens it in the Rotation diagram module</div>')
 
     def send_to_fit(self):
         if self.region_spec is None:
             return
         self.app.use_spectrum(self.region_spec, label=self.region_spec.name)
         pn.state.notifications.success("region spectrum loaded as the target: set the continuum, then Model / Fit")
+
+    def send_to_rotdiag(self):
+        if self.region_spec is None:
+            return
+        if hasattr(self.app, "send_spectrum"):
+            self.app.send_spectrum(self.region_spec, "rotdiag", label=self.region_spec.name)
+            pn.state.notifications.success("region spectrum sent to the Rotation diagram module: pick the molecule, Find lines")
 
     def _spec_bytes(self):
         buf = io.StringIO()

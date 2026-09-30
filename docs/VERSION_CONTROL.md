@@ -72,6 +72,37 @@ gh release create v0.10.1 --title "JALEBI 0.10.1" --notes "$(awk '/^## \[0.10.1\
 Authentication: `gh auth login` once (HTTPS + browser), or a personal access token as the password when
 git asks. `git push` over SSH works too if the remote is `git@github.com:shridharanbaskaran/jalebi.git`.
 
+## Releasing 0.11.0 + 0.12.0 to `main` (from `feature/absorption`)
+
+`git push` pushes the branch you are on to the branch it tracks: the working copy has been on
+`feature/absorption` (tracking `origin/feature/absorption`) since 0.11.0, which is why pushes went there. `main`
+(`dcebef0`, 0.10.1) is an ancestor of that branch, so `main` can simply be moved forward to it (fast-forward):
+
+```bash
+cd ~/Desktop/Work/LTE_fitting/jalebi
+source .venv-jalebi/bin/activate && python -m pip install -e ".[app,dev]"   # new files, new version
+pytest -q                                   # 139 tests, ~2 min
+ruff check src tests examples
+jalebi doctor && jalebi rotdiag demo        # the demo writes jalebi_rotdiag_demo/
+jalebi serve --module rotdiag --show        # look at the modules: LTE slab fit · Cube maps · Rotation diagram
+
+git status                                  # the 0.12.0 changes on feature/absorption (no results/, .venv)
+git add -A -- . ':(exclude)runs'            # runs/ (survey scripts + results) stays out unless you add it on purpose
+git commit -m "0.12.0: web-app modules (LTE fit, Cube maps, Rotation diagram); jalebi.rotdiag"
+git push                                    # keeps origin/feature/absorption in step (optional)
+
+git switch main
+git merge --ff-only feature/absorption      # main = 0.11.0 + 0.12.0; stops if main moved on (then: git merge feature/absorption)
+git push origin main                        # from now on `git push` on main goes to origin/main
+git tag -a v0.11.0 0fcbc42 -m "JALEBI 0.11.0: LTE gas absorption"
+git tag -a v0.12.0 -m "JALEBI 0.12.0: app modules, rotation diagrams"
+git push origin v0.11.0 v0.12.0
+git branch -d feature/absorption            # optional; `git push origin --delete feature/absorption` removes it on GitHub
+```
+
+New work afterwards: `git switch main && git pull && git switch -c feature/<what>`; when it is done, the same
+`git switch main && git merge --ff-only feature/<what> && git push origin main`.
+
 ## Every later release
 
 1. `git switch -c feature/<what>` → work → `git commit` often → `git push`.

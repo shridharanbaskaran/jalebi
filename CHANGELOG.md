@@ -3,7 +3,60 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] — unreleased — LTE gas absorption
+## [0.12.0] — 2026-09-30 — app modules and rotation diagrams
+
+### Added
+- **Web-app modules** (`jalebi.modules`): the app is now a shell around independent modules, switched from the
+  header — **LTE slab fit** (Data · Continuum · Model · Fit · Results · Batch), **Cube maps** (was the *Cube* tab)
+  and **Rotation diagram**. Modules other than the LTE fit are built the first time they are opened. New modules
+  plug in with `register_module(ModuleSpec(key, label, icon, description, "package.module:Class"))`.
+  `jalebi serve --module lte|cube|rotdiag` (`--tab cube` still opens the Cube module), `--rotdiag-config FILE`;
+  `JalebiApp.switch_module`, `JalebiApp.send_spectrum`, `make_app(start_module=...)`. The Cube module can send a
+  region spectrum to the rotation diagram (*Send to rotation diagram*; the region's solid angle becomes the aperture).
+- **`jalebi.rotdiag`**: rotation (population) diagrams. See `docs/ROTDIAG.md`.
+  - Molecules H₂, CO, ¹³CO, OH, H₂O (+ any molecule with a line list) with per-molecule presets (default bands,
+    ranking temperature, spin species, curated lines).
+  - Line selection inside the spectrum coverage, thin-LTE ranking, blends as single features (flux = sum of the
+    members), neighbours, other-band blends and contaminants flagged and fitted jointly.
+  - Flux measurement: pixel-integrated Gaussians of the MRS resolution at one velocity + polynomial baseline by
+    linear least squares (exact errors, iterative clipping of unmodelled lines); velocity and width scale (per MRS
+    channel) from the profile likelihood; Gaussian (free) and window-integration methods.
+  - Physics: one temperature, two temperatures (T₁ < T₂) or a power law dN ∝ T^−b dT (Neufeld & Yuan 2008);
+    ortho-to-para ratio thermal / free with each spin species in LTE (exact) / the ln(OPR/3) offset; extinction A_V
+    with G23 (R_V 3.1, 5.5), G21, CT06, F11 or a user CSV (e.g. KP5); curve-of-growth optical depth of a Gaussian
+    slab; normalisation to the number of molecules, an emitting radius, an aperture or intensity.
+  - Fit in flux space (χ² with a relative systematic, 10 % by default): multi-start bounded least squares with the
+    columns solved linearly at each start, then emcee (vectorised); derived column, number of molecules, mass,
+    equivalent radius, A_K, LTE OPR, hot fraction, mean T, τ_max, line luminosity; BIC/AIC comparison of the models.
+  - Inputs: spectra (x1d, CSV incl. `.csv.gz`, FITS, s3d apertures), a cube region, or a flux table (label or
+    wavelength; `W m-2`, `erg s-1 cm-2`, with a scale factor).
+  - Paper-style figures (`plots.plot_excitation`, `plot_model_panels`): log₁₀/ln axes, observed and de-reddened
+    points per vibrational band, labelled lines, warm/hot components, parameter box; `fit.also: [powerlaw]` fits the
+    power law next to the main model (+ MCMC) and draws the two side by side (also in the app's *Paper figure* tab).
+  - Outputs: `results/{target}/rotdiag/{molecule}/` with lines, members, diagram, fit, parameters, derived quantities,
+    model comparison, chain, figures (diagram, corner, line fits) and the config.
+  - CLI `jalebi rotdiag molecules|curves|lines|fit|run|init|demo`; YAML config (`RotDiagConfig`, examples h2,
+    h2_fluxes, co, oh, h2o); web-app module with spectrum/line/diagram/posterior views and the equivalent command.
+- **H₂ line data**: the full line list of Roueff et al. (2019) as the bundled release `roueff2019` (S(0) at 28.2 µm
+  included; the HITRAN list stopped at 26 µm) and its 302 levels (`data_files/H2_levels_Roueff2019.csv`), giving
+  exact ortho/para partition sums.
+- `data_files/extinction_curves.csv` (from `dust_extinction`; not a dependency).
+- Example data `synthetic/rotdiag_H2_synthetic.csv.gz` (+ truth) and `synthetic/rotdiag_H2_fluxes.csv`;
+  `examples/12_rotation_diagram.py`, `examples/configs/rotdiag_*.yaml`.
+- `load_csv` reads gzipped CSV files.
+- `tests/test_rotdiag.py` (17 tests).
+
+### Changed
+- `JalebiApp.TAB_NAMES` lists the six LTE-fit tabs only; `JalebiApp.cube_ws` is built on first use; the header
+  status chips are shown in the LTE module only; the sidebar's configuration panel is titled *LTE-fit configuration*.
+
+### Validation
+- H₂ level sums = HITRAN Q(T) to < 0.2 % (100–1000 K); injection–recovery of H₂ diagrams (T, N, A_V, OPR; two
+  temperatures; power law) within 1.6σ; LTE slab spectra of jalebi.model: thin H₂ (log N 22.01 ± 0.007, T 798 ± 3.5 for
+  22.0, 800 K) and thick CO (18.504 ± 0.011, 1098 ± 3 K for 18.5, 1100 K; a thin fit gives 1740 K); against pdrtpy
+  3.0.1: identical temperatures and OPR, columns within 3 %, and pdrtpy's A_V is ln 10 too large (its extinction term).
+
+## [0.11.0] — 2026-09-30 — LTE gas absorption (released on main together with 0.12.0)
 
 ### Added
 - **Absorption screens** (`kind: absorption`): a foreground slab seen against the continuum,

@@ -110,6 +110,20 @@ def check_cube() -> dict:
             "point_source_W_m2": s["point_source_line_flux_W_m2"], "extended_W_m2": s["extended_flux_W_m2"]}
 
 
+def check_rotdiag() -> dict:
+    """An H2 rotation diagram of the bundled flux table (two temperatures + A_V, least squares)."""
+    t0 = time.time()
+    from .rotdiag import example_config, run_rotdiag
+    cfg = example_config("h2_fluxes")
+    cfg.mcmc.enabled = False; cfg.plots = False
+    res = run_rotdiag(cfg, save=False)
+    f = res.fit
+    ok = f is not None and 300 < f.best["T1"] < 700 and len(res.features) == 7
+    return {"status": OK if ok else WARN, "seconds": round(time.time() - t0, 2), "n_lines": len(res.features),
+            "T1": round(f.best["T1"], 1) if f else None, "T2": round(f.best["T2"], 1) if f else None,
+            "Av": round(f.best["Av"], 2) if f else None}
+
+
 def check_parallel() -> dict:
     import multiprocessing as mp
     methods = mp.get_all_start_methods()
@@ -153,7 +167,7 @@ def collect(quick: bool = False) -> dict:
         core_ok = all(r["status"] == OK for r in rep["imports"])
     if not quick and core_ok:
         for key, fn in (("linelists", check_linelists), ("examples", check_examples), ("parallel", check_parallel),
-                        ("benchmark", benchmark), ("cube", check_cube)):
+                        ("benchmark", benchmark), ("cube", check_cube), ("rotdiag", check_rotdiag)):
             try:
                 rep[key] = fn()
             except Exception as e:
@@ -237,9 +251,16 @@ def _plain(rep: dict):
         else:
             line(Q["status"], f"HV Tau C [Ne II]: {Q['velocity_spaxels']} velocity spaxels, point source {Q['point_source_W_m2']:.2e}, "
                               f"extended {Q['extended_W_m2']:.2e} W m-2 ({Q['seconds']} s)")
+    if "rotdiag" in rep:
+        Q = rep["rotdiag"]
+        print("\nRotation diagrams (jalebi.rotdiag)")
+        if "error" in Q:
+            line(FAIL, Q["error"])
+        else:
+            line(Q["status"], f"H2 flux table: {Q['n_lines']} lines, T1 {Q['T1']} K, T2 {Q['T2']} K, A_V {Q['Av']} ({Q['seconds']} s)")
     print()
     if rep["ready"]:
-        print(f"  {col.get(OK, '')}Your jalebi is ready.{end}  Try:  jalebi demo   ·   jalebi cube demo   ·   jalebi serve   ·   jalebi examples ./my_examples\n")
+        print(f"  {col.get(OK, '')}Your jalebi is ready.{end}  Try:  jalebi demo   ·   jalebi cube demo   ·   jalebi rotdiag demo   ·   jalebi serve   ·   jalebi examples ./my_examples\n")
     else:
         print(f"  {col.get(FAIL, '')}Not ready yet.{end}")
         if rep.get("fix"):
