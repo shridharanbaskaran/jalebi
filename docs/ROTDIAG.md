@@ -27,7 +27,21 @@ res.features                              # lines, fluxes, S/N, flags
 res.fit.samples                           # the posterior (emcee)
 ```
 
-Step by step: `find_features` → `measure_features` → `fit_rotation` (see the section *Python API* below).
+Step by step: `find_features` → `measure_features` → `fit_rotation`.
+
+## 0. Which spectrum: cubes, not x1d
+
+For H₂, jets and anything extended, **use the `s3d` cubes** (`spectrum: {path: <cube folder>, source: s3d}`, the default
+when the folder holds cubes): the flux is summed over a region of the sky in every sub-band (a circle of
+`radius_arcsec` around the source by default; annulus, ellipse, polygon or `all` for the whole field), with no
+background annulus, and the region's solid angle sets the aperture for beam-averaged column densities. The
+pipeline's `x1d` extraction is a point-source aperture *minus a background annulus*: extended lines that are brighter
+in the annulus than in the aperture come out **negative** (HV Tau C: S(2) and S(4) "in absorption"). The x1d path is
+kept (`source: x1d`) for point sources and disks.
+
+<p align="center"><img src="images/rotdiag_hv_tau_c.png" alt="HV Tau C H2 rotation diagram from the cubes" width="900"></p>
+<p align="center"><em>HV Tau C (MINDS), H₂ summed over 1″ around the source in the s3d cubes: S(1)–S(8) of v=0–0 and S(3)–S(9) of
+v=1–1, two temperatures (723 K, 2150 K, A_V 6.2 ± 1.3 with KP5, OPR 3.3) and a power law (b 4.4, T_min 480 K).</em></p>
 
 ---
 
@@ -82,7 +96,13 @@ sits furthest from the edges, over ± `window_fwhm` (8) FWHM:
   profiles; a polynomial baseline of order `cont_order` (1) is fitted at the same time, and pixels of stronger
   unmodelled lines (e.g. water lines in a disk spectrum) are clipped iteratively;
 - the fit is **linear** in the amplitudes and the baseline, so the flux error is exact (covariance matrix) with the
-  pixel errors max(pipeline error, the local scatter), scaled by √χ²_red when that exceeds 1;
+  pixel errors max(pipeline error, the local scatter), scaled by √χ²_red when that exceeds 1; pixels within 2.5 FWHM
+  of a modelled line are never clipped;
+- strong lines (S/N ≥ `refine_snr`, 15, or a poor template fit) get their **own velocity and width** by profile
+  likelihood (± `refine_kms`, 80 km/s): the MRS sub-bands have velocity offsets of 10–20 km/s and the true resolving
+  power departs from the R(λ) law; a line with another known line within 2 FWHM keeps the global velocity instead;
+- a feature with a known line of another species within half a resolution element is **blended**: measured, shown,
+  but left out of the fit (`use` false; tick it back in the app) — e.g. H₂ v=1–1 S(1) under [Fe II] 17.94 µm;
 - **v and s** (`velocity: auto`, `width: auto`) come from the profile likelihood of this same template on the
   strongest features (v on a ±100 km/s grid; s per MRS channel, because the true resolving power departs from any
   R(λ) law differently in each channel); fix them for weak spectra or jets with known velocities;
@@ -123,12 +143,22 @@ Column mode (N in cm⁻², emitting solid angle Ω) and number mode (N = number 
 cm⁻²), `aperture` (Ω of the extraction aperture or a cube region: beam-averaged column density — set automatically
 when a region is sent from the Cube module), `intensity` (a spectrum in MJy sr⁻¹, Ω = 1 sr).
 
-**Extinction** k(λ) = A_λ/A_V: `G23` (Gordon et al. 2023, R_V = 3.1, default), `G23_Rv5.5`, `G21` (Gordon et al.
-2021), `CT06` (Chiar & Tielens 2006), `F11` (Fritz et al. 2011), tabulated from `dust_extinction` (`jalebi rotdiag
-curves` lists A_K/A_V and the values at S(3) and S(1)). For KP5 (Pontoppidan et al. 2024, the dense-cloud curve of
-JOYS and JDISCS) or McClure (2009), give the path of a CSV with two columns, λ [µm] and A_λ/A_V (or A_λ/A_K with
-`normalise="K"` in `get_curve`): `fit: {extinction: path/to/kp5.csv}`. The ln(N_u/g_u) points are shifted by
-−0.921 A_V k(λ); for H₂ only S(3) (9.66 µm, silicate feature) breaks the degeneracy between A_V and T.
+**Extinction** k(λ) = A_λ/A_V (`fit: {extinction: ...}` or the app's *extinction curve* dropdown; `jalebi rotdiag curves`
+prints A_K/A_V and the values at S(3) and S(1)):
+
+| name | curve | A_K/A_V | A(9.66)/A_V | for |
+| --- | --- | --- | --- | --- |
+| `KP5` (default) | Pontoppidan et al. (2024, RNAAS): dense clouds and protostellar envelopes, with ices; used by JOYS and JDISCS | 0.159 | 0.164 | embedded sources, outflows |
+| `KP5_benchmark` | the benchmark variant of the same model | 0.155 | 0.167 | |
+| `McClure09` | McClure (2009, ApJS 181, 360) for A_K > 1 (`McClure09_low` for A_K 0.3–1); A_V/A_K = 7.75 | 0.129 | 0.093 | dense clouds |
+| `HD23` | Hensley & Draine (2023, ApJ 948, 55) astrodust model | 0.096 | 0.090 | diffuse ISM |
+| `G23` | Gordon et al. (2023, ApJ 950, 86), Milky Way average, R_V = 3.1 | 0.107 | 0.084 | diffuse ISM |
+| `G23_Rv5.5`, `G21`, `CT06`, `F11` | Gordon+2023 R_V 5.5; Gordon+2021; Chiar & Tielens 2006; Fritz+2011 | | | |
+
+The ln(N_u/g_u) points are shifted by −0.921 A_V k(λ); for H₂ only S(3) (9.66 µm, silicate feature) breaks the degeneracy
+between A_V and T, so **A_V depends on the curve** while T and N barely do: HV Tau C (1″) gives A_V = 6.2 (KP5),
+10.7 (G23), 11.7 (HD23), 16.3 (McClure09) for T₁ = 720–760 K in all four. Any other curve: the path of a CSV with two
+columns, λ [µm] and A_λ/A_V (or A_λ/A_K with `normalise="K"` in `get_curve`).
 
 **Optical depth** (`opacity: true`): a slab with a Gaussian velocity distribution of intrinsic FWHM Δv (`fwhm_kms`;
 not the instrumental width) has the line-centre optical depth
@@ -243,7 +273,7 @@ All in `tests/test_rotdiag.py` (17 tests) unless noted.
 
 - LTE within each component: at low density the high-J H₂ lines are sub-thermal, OH prompt emission is not thermal
   at all, and CO vibrational levels can be radiatively pumped; the fitted T are then excitation temperatures.
-- A_V from H₂ rests on S(3) and on the extinction curve: quote the curve (and try another one).
+- A_V from H₂ rests on S(3) and on the extinction curve: quote the curve, and try another one (KP5 and McClure09 differ by a factor 2.5 in A_V for the same data).
 - Two temperatures and a power law are both approximations of a temperature distribution; the BIC says which one the
   data prefer, not which one is right.
 - In disk spectra, H₂ and OH lines sit among water lines: look at the line fits (lines with `neighbours` or

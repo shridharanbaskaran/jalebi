@@ -3,6 +3,58 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-10-01 — the 5–8 µm water band: T_vib, per-component windows, curated line regions
+
+### Added
+- **Vibrational temperature** `Tvib` per component (`Component.Tvib`, YAML `Tvib:`, app checkbox *vibrational
+  temperature*): two-temperature populations (Boltzmann at T within a vibrational state, at T_vib between states),
+  per-line source function, opacity-weighted source function on the fine grid; vibrational energies read from the
+  HITRAN/HITEMP global quanta (`LineList.vib_energies`, `vib_arrays`; water band origins recovered to < 0.1 cm⁻¹).
+  `Tvib` is a free parameter when set (bounds 100–1500 K, prior `fit.tvib_below_trot: true`); annuli keep T_vib/T
+  constant; tied isotopologues inherit it. `Tvib = T` reproduces LTE to 1e-5. Motivation: LTE fits of the rotational
+  lines over-predict the 5–8 µm ν₂ band by 3–6× (Banzatti+2025 Fig. 7, Pontoppidan+2024 §4.3) — `docs/ROVIB_WATER.md`.
+- **Default water split** `fit.water_split_um: 9.5`: when the fit windows reach below 9.5 µm, H₂O slabs without their
+  own `windows` or `Tvib` emit only beyond it and "*rovib*" components only below it (tied isotopologues follow their
+  parent), in the pipeline and in the app; the log reports the windows applied and warns when nothing covers the band.
+- **Per-component wavelength windows** `windows: [[lo, hi], ...]`: a component contributes only there, so the
+  separate-region fits of Gasman+2023 / Temmink+2024 (a ro-vibrational H₂O slab at 5–9 µm, rotational slabs at
+  12–27 µm, CO at 4.9–5.7 µm) run as one simultaneous fit; the grid stage grids such a component on its own windows.
+- **Curated line regions** `fit.line_regions: [H2O_v0-0 | H2O_v1-0 | H2O_v1-1 | H2O_general | general | file.csv]`,
+  `fit.region_pad_um`, `fit.region_weight_beyond: [20, 5]` (new module `jalebi.regions`): fit only narrow regions
+  around the isolated lines of the Banzatti+2025 lists, Temmink+2025-style weights beyond 20 µm, instead of every pixel.
+  On CI Tau this recovers the published two-temperature solution (827/386 K vs Banzatti+2023 840 K, Romero-Mirza+2024
+  903/477 K) where the every-pixel fit gave 1281/605 K.
+- `fit.region_other_molecules: features | default | none` (+ `region_feature_pad_um`): with `line_regions`, the
+  non-water components keep their Q-branch / band-head ranges (or default windows); `ComponentConfig.priors`
+  (Gaussian `{T: [mu, sigma]}` on any free parameter). Detection judges hot/warm water on 12–27.5 µm so the
+  17.5–27.5 µm lines are fitted even without a cold slab. `runs/validation_blind.yaml` and
+  `runs/survey_300_autodetect.yaml` fit the isolated-line regions (blind CI Tau: 934/525 K instead of 1500/295 K).
+- Example configs `examples/configs/CI_Tau_rovib_tvib.yaml`, `CI_Tau_rovib_separate.yaml`, `CI_Tau_lines_B23.yaml`;
+  validation manifest runs `CI_Tau_B23` (line regions) added, CI Tau / AS 209 published values corrected (RM24 Table).
+- Continuum method `aspls` for the 1D slab fit (pybaselines adaptive smoothness-penalised LS, `aspls_lam` 5e6,
+  `aspls_alpha`), the same estimator the cube module and the group's `cube_maps.py` use; in the app's method list.
+- Tests `tests/test_tvib_and_regions.py` (8 tests) + `aspls` in the continuum-method test.
+
+### Fixed
+- App: slider titles, checkbox text and the component-card subtitle rendered black on the dark panel. The theme's CSS
+  variables were defined per component `:host` only and did not reach the Bokeh widgets' shadow roots; they are now set on
+  `:root`, every widget-label rule has a literal fallback, and labels use a lighter grey (`PAL.label`).
+
+## [0.12.1] — 2026-10-01 — rotation diagrams from the cubes
+
+### Added / fixed (jalebi.rotdiag)
+- `spectrum.source: s3d` (default for a cube folder): the cubes summed over a region (circle / annulus / ellipse / polygon /
+  whole field, offsets from the source), the region's solid angle as the aperture; `jalebi rotdiag fit --source s3d
+  --region --dx --dy --radius-arcsec`; the app's *s3d cubes (region)* input; example config `rotdiag_H2_HV_Tau_C.yaml`.
+  The pipeline x1d (background annulus) turns extended H₂ lines negative — kept as an option only.
+- Measurement: pixels near modelled lines are never clipped (bright lines lost their cores); strong lines get their own
+  velocity and width (sub-band offsets, lines narrower than the R(λ) law); unresolvable blends with other species flagged
+  and left out of the fit; H₂ preset selects v=0–0 and v=1–1 with a per-molecule strength floor; OPR bound 0.1–6.
+- Extinction curves KP5 (Pontoppidan et al. 2024; now the default), KP5_benchmark, HD23 (Hensley & Draine 2023) and
+  McClure (2009; A_K < 1 and > 1) bundled next to G23/G21/CT06/F11.
+- Verified on HV Tau C (full MINDS cubes, 1″): S(1)–S(8) and v=1–1 S(3)–S(9) detected; T 723/2150 K, OPR 3.3, A_V 6.2 (KP5),
+  10.7 (G23), 16.3 (McClure09).
+
 ## [0.12.0] — 2026-09-30 — app modules and rotation diagrams
 
 ### Added
@@ -28,8 +80,13 @@ version numbers follow [Semantic Versioning](https://semver.org/).
   - Fit in flux space (χ² with a relative systematic, 10 % by default): multi-start bounded least squares with the
     columns solved linearly at each start, then emcee (vectorised); derived column, number of molecules, mass,
     equivalent radius, A_K, LTE OPR, hot fraction, mean T, τ_max, line luminosity; BIC/AIC comparison of the models.
-  - Inputs: spectra (x1d, CSV incl. `.csv.gz`, FITS, s3d apertures), a cube region, or a flux table (label or
-    wavelength; `W m-2`, `erg s-1 cm-2`, with a scale factor).
+  - Inputs: the s3d cubes summed over a region (`spectrum.source: s3d`, the default for a cube folder; circle /
+    annulus / ellipse / polygon / whole field as offsets from the source; the region's solid angle sets the aperture),
+    x1d, CSV incl. `.csv.gz`, FITS, a cube region from the Cube module, or a flux table (label or wavelength;
+    `W m-2`, `erg s-1 cm-2`, with a scale factor). Verified on HV Tau C: from the cubes all S(1)–S(8) and v=1–1
+    S(3)–S(9) lines are detected (S/N 90–380), while the x1d gives S(2) and S(4) in absorption (background annulus).
+  - Measurement robustness: pixels near modelled lines are never clipped; strong lines get their own velocity and
+    width (sub-band offsets); unresolvable blends with other species are flagged and left out of the fit.
   - Paper-style figures (`plots.plot_excitation`, `plot_model_panels`): log₁₀/ln axes, observed and de-reddened
     points per vibrational band, labelled lines, warm/hot components, parameter box; `fit.also: [powerlaw]` fits the
     power law next to the main model (+ MCMC) and draws the two side by side (also in the app's *Paper figure* tab).

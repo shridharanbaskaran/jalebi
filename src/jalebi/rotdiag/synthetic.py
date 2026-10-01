@@ -25,7 +25,7 @@ ALL_BANDS = ("1A", "1B", "1C", "2A", "2B", "2C", "3A", "3B", "3C", "4A", "4B", "
 
 
 def make_rotdiag_spectrum(molecule: str = "H2", model: str = "single", params: dict | None = None, opr: str = "thermal",
-                          geometry: Geometry | None = None, extinction: str = "G23", opacity: bool = False,
+                          geometry: Geometry | None = None, extinction: str = "KP5", opacity: bool = False,
                           bands=ALL_BANDS, snr: float = 300.0, continuum: dict | None = None, seed: int = 0,
                           v_kms: float = 0.0, width_scale: float = 1.0, release: str | None = None,
                           selection: Selection | None = None, name: str | None = None, distance_pc: float = 140.0):

@@ -54,8 +54,13 @@ from .molecules import DEFAULT_WINDOWS, MOLECULES
 # template shape is the molecule's band shape (not saturated), the NNLS area supplies the scale.
 # water candidates: each is a pair of templates (thin-ish and thick column) at the same T, so the NNLS
 # can reproduce the line-saturation pattern of the real column and leaves less residual for others
-_WATER_TEMPLATES = {"H2O_hot": [(17.5, 850.0), (18.5, 850.0)], "H2O_warm": [(17.5, 400.0), (18.5, 400.0)],
+_WATER_TEMPLATES = {"H2O_rovib": [(17.5, 950.0), (18.5, 950.0)],
+                    "H2O_hot": [(17.5, 850.0), (18.5, 850.0)], "H2O_warm": [(17.5, 400.0), (18.5, 400.0)],
                     "H2O_cold": [(17.0, 170.0), (18.0, 170.0)]}
+# the ro-vibrational nu2 band (5-8 um) is sub-thermal: it gets its own component restricted to these windows
+_ROVIB_WATER_WINDOWS = [(5.0, 8.0)]
+_ROVIB_COMPONENT_WINDOWS = [[4.9, 9.5]]
+_ROT_COMPONENT_WINDOWS = [[9.5, 28.5]]
 _TEMPLATE_LOGN = {"CO": 17.5, "13CO": 16.0, "CO2": 17.0, "13CO2": 15.5, "C2H2": 16.5, "13CCH2": 15.0,
                   "HCN": 16.5, "H13CN": 15.0, "CH4": 16.5, "NH3": 16.5, "C2H4": 16.0, "C2H6": 16.5,
                   "C4H2": 15.5, "HC3N": 15.5, "C6H6": 16.0, "C3H4": 16.0, "H2_18O": 15.5}
@@ -63,7 +68,9 @@ _TEMPLATE_T = {"CO": [700.0, 1500.0], "13CO": [700.0, 1500.0]}
 _DEFAULT_T = [300.0, 600.0]
 # windows where the water templates are judged: hot/warm on the 5-8 and 12-17.5 um forests,
 # cold on the low-E_up lines longward of 17.5 um (MRS channel 4)
-_WARM_WATER_WINDOWS = [(5.0, 8.0), (12.0, 17.5)]
+# hot/warm are judged on the whole rotational range: the 17.5-27.5 um lines (E_up 1500-4000 K) are what
+# separates a warm from a hot slab, and they must enter the fit windows even when no cold slab is detected
+_WARM_WATER_WINDOWS = [(12.0, 17.5), (17.5, 27.5)]
 _COLD_WATER_WINDOWS = [(17.5, 27.5)]
 _SKIP = {"OH", "H2"}          # non-LTE prompt emission / not a slab species
 # absorption screens: colder gas, higher columns (embedded protostars: Lahuis & van Dishoeck 2000)
@@ -128,14 +135,18 @@ def _templates(candidates: list[str], coverage: tuple[float, float], mode: str =
         return comps, by_cand, wins
     # water: one candidate per temperature
     for name, tmpls in _WATER_TEMPLATES.items():
-        w = _COLD_WATER_WINDOWS if name == "H2O_cold" else _WARM_WATER_WINDOWS
+        w = _COLD_WATER_WINDOWS if name == "H2O_cold" else _ROVIB_WATER_WINDOWS if name == "H2O_rovib" else _WARM_WATER_WINDOWS
         w = [(a, b) for a, b in w if b > lo_c and a < hi_c]
         if not w:
             continue
         names = []
         for logN, T in tmpls:
             n = f"{name}@{logN:.1f}"
-            comps.append(Component(n, "H2O", logN=logN, T=T, logR=-0.5)); names.append(n)
+            # templates emit only on their own side of 9.5 um, so the rotational candidates cannot stand in
+            # for the (sub-thermal) ro-vibrational band and vice versa
+            comps.append(Component(n, "H2O", logN=logN, T=T, logR=-0.5,
+                                   windows=_ROVIB_COMPONENT_WINDOWS if name == "H2O_rovib" else _ROT_COMPONENT_WINDOWS))
+            names.append(n)
         by_cand[name] = names; wins[name] = w
     for m in candidates:
         if m == "H2O":
@@ -349,10 +360,14 @@ def detect_molecules(spec: Spectrum, candidates: list[str] | None = None, thresh
             continue
         logR0 = float(np.clip(r["logR"], -3, 2))
         if cand in _WATER_TEMPLATES:
-            comps_out.append(ComponentConfig(name=cand, molecule="H2O", logN=logN0, T=T0, logR=logR0,
+            # a detected ro-vibrational component emits only at 4.9-9.5 um and the rotational ones beyond
+            rovib = cand == "H2O_rovib"
+            wins_c = _ROVIB_COMPONENT_WINDOWS if rovib else (_ROT_COMPONENT_WINDOWS if det.get("H2O_rovib") else None)
+            comps_out.append(ComponentConfig(name=cand, molecule="H2O", logN=logN0, T=T0, logR=logR0, windows=wins_c,
                                              linelist_release=rel.get("H2O") or ("hitran" if cand == "H2O_cold" else "hitemp")))
         elif parent and (parent in det or parent == "H2O"):
-            comps_out.append(ComponentConfig(name=mol, molecule=mol, tie_to="H2O_hot" if parent == "H2O" else parent,
+            h2o_parent = next((k for k in ("H2O_hot", "H2O_warm", "H2O_cold", "H2O_rovib") if det.get(k)), "H2O_hot")
+            comps_out.append(ComponentConfig(name=mol, molecule=mol, tie_to=h2o_parent if parent == "H2O" else parent,
                                              ratio=MOLECULES[mol].default_ratio or 70.0, logN=logN0, T=T0, logR=logR0))
         else:
             comps_out.append(ComponentConfig(name=mol, molecule=mol, logN=logN0, T=T0, logR=logR0))

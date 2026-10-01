@@ -2,7 +2,8 @@
 
   jalebi rotdiag molecules                                   molecules, line lists, defaults
   jalebi rotdiag lines H2 example:FZ_Tau                     the features that would be measured
-  jalebi rotdiag fit example:FZ_Tau --molecule H2 --model two --opr species --av-free --mcmc
+  jalebi rotdiag fit /data/HV_Tau_C --molecule H2 --model two --opr species --av-free --mcmc   (s3d cubes, 1" region)
+  jalebi rotdiag fit example:FZ_Tau --molecule CO --opacity                                 (x1d spectrum)
   jalebi rotdiag fit --fluxes h2.csv --flux-unit "erg s-1 cm-2" --molecule H2 --distance 140
   jalebi rotdiag init rd.yaml --example h2  ;  jalebi rotdiag run rd.yaml
   jalebi rotdiag demo                                        synthetic H2 spectrum: recovered vs true parameters
@@ -108,7 +109,7 @@ def fit(spectrum: Optional[str] = typer.Argument(None, help="spectrum: x1d folde
         fix_opr: bool = typer.Option(False, "--fix-opr"),
         av: float = typer.Option(0.0, help="A_V [mag] (start value with --av-free)"),
         av_free: bool = typer.Option(False, "--av-free"),
-        extinction: str = typer.Option("G23", help="G23 | G23_Rv5.5 | G21 | CT06 | F11 | path of a CSV (µm, A_λ/A_V)"),
+        extinction: str = typer.Option("KP5", help="KP5 | G23 | HD23 | McClure09 | G23_Rv5.5 | G21 | CT06 | F11 | path of a CSV (µm, A_λ/A_V)"),
         opacity: bool = typer.Option(False, "--opacity", help="curve-of-growth optical depth correction"),
         fwhm: float = typer.Option(10.0, help="intrinsic line FWHM [km/s] for the optical depth"),
         geometry: str = typer.Option("number", help="number | radius | aperture | intensity"),
@@ -116,6 +117,11 @@ def fit(spectrum: Optional[str] = typer.Argument(None, help="spectrum: x1d folde
         aperture: float = typer.Option(0.5, help="aperture radius [arcsec] (geometry aperture)"),
         distance: Optional[float] = typer.Option(None, help="distance [pc] (default: the spectrum's, else 140)"),
         rv: float = typer.Option(0.0, help="systemic velocity [km/s] removed from the spectrum"),
+        source: str = typer.Option("auto", help="auto | s3d (sum the cubes over a region; default for a cube folder) | x1d | csv"),
+        region: str = typer.Option("circle", help="s3d: circle | annulus | all"),
+        dx: float = typer.Option(0.0, help="s3d: region offset east of the source [arcsec]"),
+        dy: float = typer.Option(0.0, help="s3d: region offset north of the source [arcsec]"),
+        radius_arcsec: float = typer.Option(1.0, help="s3d: region radius [arcsec]"),
         method: str = typer.Option("gauss", help="gauss | gauss_free | integrate"),
         velocity: str = typer.Option("auto", help="line velocity [km/s] or auto"),
         width: str = typer.Option("auto", help="line width / instrumental or auto"),
@@ -134,7 +140,8 @@ def fit(spectrum: Optional[str] = typer.Argument(None, help="spectrum: x1d folde
         raise typer.BadParameter("give a spectrum or --fluxes")
     num = lambda s: s if s == "auto" else float(s)  # noqa: E731
     d = dict(molecule=molecule,
-             spectrum=dict(path=spectrum or "", rv_kms=rv, distance_pc=distance),
+             spectrum=dict(path=spectrum or "", rv_kms=rv, distance_pc=distance, source=source, region=region, dx=dx, dy=dy,
+                           radius_arcsec=radius_arcsec),
              fluxes=dict(path=fluxes, unit=flux_unit) if fluxes else None,
              lines=dict(wmin=wmin, wmax=wmax, bands=list(bands) if bands else None),
              measure=dict(method=method, velocity=num(velocity), width=num(width), skip=list(skip or [])),
@@ -167,7 +174,7 @@ def run(config: str = typer.Argument(..., help="rotation-diagram YAML (jalebi ro
 
 
 @rotdiag_app.command("init")
-def init(path: str = typer.Argument("rotdiag.yaml"), example: str = typer.Option("h2", help="h2 | h2_fluxes | co | oh | h2o")):
+def init(path: str = typer.Argument("rotdiag.yaml"), example: str = typer.Option("h2", help="h2 | hv_tau_c (s3d region) | h2_fluxes | co | oh | h2o")):
     """Write an example rotation-diagram config."""
     from .config import example_config
     example_config(example).save(path)

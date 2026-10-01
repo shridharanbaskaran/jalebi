@@ -39,7 +39,7 @@ SUGGESTED = {
 SPIN_COL = {"o": "#ff6b6b", "p": "#5fb3ff", "op": "#c77dff", "": PAL.teal}
 LADDER_COLS = ["#5fb3ff", "#ff6b6b", "#3ddc84", "#ffb347", "#c77dff", "#f6c343", "#a9d8ff", "#ffb3b3"]
 TABLE_COLS = ["use", "label", "wave", "eu", "gA", "flux", "flux_err", "snr", "detected", "n_members", "spin", "ladder",
-              "band", "neighbours", "contaminants", "note"]
+              "band", "v_kms", "neighbours", "contaminants", "note"]
 
 
 def _fmt(v, f=".4g"):
@@ -69,9 +69,21 @@ class RotDiagWorkspace:
         W = dict(sizing_mode="stretch_width")
         c = self.cfg
         # ---- input ------------------------------------------------------------------------------
-        self.src = pn.widgets.RadioButtonGroup(options={"file": "file", "LTE-fit target": "lte", "flux table": "table"},
-                                               value="table" if (c.fluxes and c.fluxes.path) else "file", button_type="default", **W)
+        self.src = pn.widgets.RadioButtonGroup(options={"s3d cubes (region)": "s3d", "x1d / CSV / FITS": "file", "LTE-fit target": "lte",
+                                                        "flux table": "table"},
+                                               value="table" if (c.fluxes and c.fluxes.path) else ("s3d" if c.spectrum.source == "s3d" else "file"),
+                                               button_type="default", **W)
         self.path = pn.widgets.TextInput(name="spectrum: x1d folder, CSV, FITS (or example:…)", value=c.spectrum.path or DEFAULT_EXAMPLE, **W)
+        self.cube_path = pn.widgets.TextInput(name="cube folder (Level3_*_s3d.fits; or example:HV_Tau_C_cube)",
+                                              value=c.spectrum.path if c.spectrum.source == "s3d" else "example:HV_Tau_C_cube", **W)
+        self.reg_kind = pn.widgets.Select(name="region", options=["circle", "annulus", "all"], value=c.spectrum.region if c.spectrum.region in ("circle", "annulus", "all") else "circle", width=110)
+        self.reg_dx = pn.widgets.FloatInput(name="Δx [″]", value=c.spectrum.dx, step=0.1, width=90)
+        self.reg_dy = pn.widgets.FloatInput(name="Δy [″]", value=c.spectrum.dy, step=0.1, width=90)
+        self.reg_r = pn.widgets.FloatInput(name="radius [″]", value=c.spectrum.radius_arcsec, step=0.1, start=0.1, width=100)
+        self.reg_rin = pn.widgets.FloatInput(name="r_in [″]", value=(c.spectrum.params[0] if c.spectrum.params else 0.5), step=0.1, width=90)
+        self.reg_row = pn.Row(self.reg_kind, self.reg_dx, self.reg_dy, self.reg_r, self.reg_rin,
+                              _html('<div class="sf-note" style="margin-top:22px">offsets from the source found in the cubes; the flux is '
+                                    'summed over the region in every sub-band (no background annulus, so extended H₂ is kept)</div>', width=330))
         self.table_path = pn.widgets.TextInput(name="flux table: CSV with label (S(1) …) or wave, flux, err",
                                                value=(c.fluxes.path if c.fluxes else "example:synthetic/rotdiag_H2_fluxes.csv"), **W)
         self.table_unit = pn.widgets.TextInput(name="table flux unit", value=(c.fluxes.unit if c.fluxes else "W m-2"), width=170)
@@ -98,7 +110,7 @@ class RotDiagWorkspace:
         self.bands = pn.widgets.MultiChoice(name="vibrational bands (none = all)", options=[], value=[], **W)
         self.eu_max = pn.widgets.FloatInput(name="E_u max [K] (0 = none)", value=L.eu_max or 0.0, step=500, width=150)
         self.t_ref = pn.widgets.FloatInput(name="ranking T [K] (0 = preset)", value=L.t_ref or 0.0, step=100, width=150)
-        self.rel_min = pn.widgets.FloatInput(name="min rel. strength", value=L.rel_min, step=1e-3, width=150)
+        self.rel_min = pn.widgets.FloatInput(name="min rel. strength (0 = preset)", value=L.rel_min or 0.0, step=1e-3, width=150)
         self.max_feat = pn.widgets.IntInput(name="max lines", value=L.max_features, step=5, start=1, width=150)
         self.blend = pn.widgets.FloatInput(name="blend if closer than [FWHM]", value=L.blend_fwhm, step=0.1, width=150)
         self.curated = pn.widgets.Checkbox(name="curated line list (H₂O: Banzatti et al. 2025)", value=True if L.curated is None else L.curated,
@@ -131,7 +143,7 @@ class RotDiagWorkspace:
                                                               "power law dN ∝ T⁻ᵇ dT": "powerlaw"}, value=f.model, width=150)
         self.geo = pn.widgets.Select(name="normalise to", options={"number of molecules": "number", "emitting radius R": "radius",
                                                                    "aperture (column density)": "aperture", "intensity (MJy/sr)": "intensity"},
-                                     value=g.mode, width=150)
+                                     value=g.mode if g.mode != "auto" else ("aperture" if c.spectrum.source == "s3d" else "number"), width=150)
         self.R_au = pn.widgets.FloatInput(name="R [au]", value=g.R_au, step=0.1, width=150)
         self.ap = pn.widgets.FloatInput(name="aperture radius [″]", value=g.aperture_arcsec, step=0.1, width=150)
         self.omega = pn.widgets.FloatInput(name="or Ω [sr] (0 = from radius)", value=g.omega_sr or 0.0, step=1e-12, width=150)
@@ -192,6 +204,7 @@ class RotDiagWorkspace:
         self.write_btn.on_click(lambda e: self.write())
         self.mol.param.watch(self._molecule_changed, "value")
         self.src.param.watch(lambda e: self._show_source(), "value")
+        self.reg_kind.param.watch(lambda e: self._show_source(), "value")
         self.geo.param.watch(lambda e: self._show_physics(), "value")
         self.opacity.param.watch(lambda e: self._show_physics(), "value")
         self.opr.param.watch(lambda e: self._show_physics(), "value")
@@ -224,7 +237,8 @@ class RotDiagWorkspace:
                                                      _panel(self.compare_html, title="Model comparison"), width=460),
                                            _paper(self.corner, title="Posterior (MCMC)"), **W), **W)),
             dynamic=False, css_classes=["sf-subtabs"], **W)
-        top = _panel(self.src, pn.Row(self.path, self.load_btn, **W), pn.Row(self.table_path, self.table_unit, **W),
+        top = _panel(self.src, pn.Row(self.path, self.load_btn, **W), pn.Row(self.cube_path, **W), self.reg_row,
+                     pn.Row(self.table_path, self.table_unit, **W),
                      pn.Row(self.rv, self.dist, self.mol, self.release, **W), self.mol_note,
                      pn.Row(self.find_btn, self.measure_btn, self.fit_btn, self.mcmc_btn, self.run_btn, self.run_mcmc_cb),
                      self.progress, self.info, title="Rotation diagram")
@@ -325,7 +339,7 @@ class RotDiagWorkspace:
     def on_show(self):
         if not self._shown:
             self._shown = True
-            if self.src.value == "file" and self.path.value and self.spec is None:
+            if self.src.value in ("file", "s3d") and self.spec is None:
                 try:
                     self.load()
                 except Exception as ex:
@@ -367,17 +381,21 @@ class RotDiagWorkspace:
         if not sg:
             return
         self.model.value = sg["model"]; self.opr.value = sg["opr"]; self.av_free.value = sg["av_free"]
-        self.opacity.value = sg["opacity"]; self.geo.value = sg["geo"]; self.method.value = sg["method"]
+        self.opacity.value = sg["opacity"]; self.method.value = sg["method"]
+        if not (self.geo.value == "aperture" and self.omega.value > 0):      # keep the region's aperture
+            self.geo.value = sg["geo"]
         self.also_pl.value = sg.get("also_pl", False)
         if sg["opr"] != "thermal":
             self.opr_free.value = True
 
     def _show_source(self):
         s = self.src.value
-        self.path.visible = s == "file"; self.load_btn.visible = s in ("file", "lte", "sent")
+        self.path.visible = s == "file"; self.load_btn.visible = s in ("file", "lte", "sent", "s3d")
+        self.cube_path.visible = s == "s3d"; self.reg_row.visible = s == "s3d"
+        self.reg_rin.visible = self.reg_kind.value == "annulus"
         self.table_path.visible = s == "table"; self.table_unit.visible = s == "table"
         self.measure_btn.disabled = s == "table"
-        self.load_btn.name = {"file": "Load", "lte": "Use target", "sent": "Reload"}.get(s, "Load")
+        self.load_btn.name = {"file": "Load", "lte": "Use target", "sent": "Reload", "s3d": "Extract"}.get(s, "Load")
 
     def _show_physics(self):
         g = self.geo.value
@@ -398,11 +416,16 @@ class RotDiagWorkspace:
         R = self.R_const.value if self.R_model.value == "constant" else self.R_model.value
         c.update(molecule=self.mol.value, release=self.release.value or None,
                  target=(self.spec.name if self.spec is not None else None))
-        c["spectrum"] = dict(path=self.path.value if self.src.value == "file" else "", rv_kms=self.rv.value, distance_pc=self.dist.value)
+        if self.src.value == "s3d":
+            c["spectrum"] = dict(path=self.cube_path.value, source="s3d", rv_kms=self.rv.value, distance_pc=self.dist.value,
+                                 region=self.reg_kind.value, dx=self.reg_dx.value, dy=self.reg_dy.value, radius_arcsec=self.reg_r.value,
+                                 params=[self.reg_rin.value] if self.reg_kind.value == "annulus" else [])
+        else:
+            c["spectrum"] = dict(path=self.path.value if self.src.value == "file" else "", rv_kms=self.rv.value, distance_pc=self.dist.value)
         c["fluxes"] = dict(path=self.table_path.value, unit=self.table_unit.value) if self.src.value == "table" else None
         split = lambda s: [x.strip() for x in s.split(",") if x.strip()]
         c["lines"].update(wmin=self.wmin.value or None, wmax=self.wmax.value or None, bands=list(self.bands.value),
-                          eu_max=self.eu_max.value or None, t_ref=self.t_ref.value or None, rel_min=self.rel_min.value,
+                          eu_max=self.eu_max.value or None, t_ref=self.t_ref.value or None, rel_min=self.rel_min.value or None,
                           max_features=self.max_feat.value, blend_fwhm=self.blend.value,
                           curated=self.curated.value if self.curated.visible else None,
                           include=split(self.include.value), exclude=split(self.exclude.value), resolving_power=R)
@@ -484,6 +507,13 @@ class RotDiagWorkspace:
             cfg = self.current_config()
             spec = load_input_spectrum(cfg)
             self._set_spectrum(spec, self.path.value)
+        elif s == "s3d":
+            cfg = self.current_config()
+            spec = load_input_spectrum(cfg)
+            ex = spec.meta.get("extraction", {})
+            self.geo.value = "aperture"
+            self.omega.value = float(ex.get("area_arcsec2", 0.0)) * ARCSEC ** 2
+            self._set_spectrum(spec, f"{self.reg_kind.value} region of the cubes, {ex.get('area_arcsec2', 0):.2f} arcsec²")
         elif s == "sent" and self.sent_spec is not None:
             self._set_spectrum(self.sent_spec, "sent spectrum")
 
@@ -508,6 +538,10 @@ class RotDiagWorkspace:
         w, f, _ = spec.stitched()
         self.spec_src.data = dict(w=w, f=f)
         self.spec_fig.title.text = f"{spec.name}: {len(spec.wave)} pixels, {', '.join(spec.bands) or '1 band'}"
+        unit = self.flux_unit.value
+        ex = spec.meta.get("extraction") if isinstance(spec.meta, dict) else None
+        self.spec_fig.yaxis.axis_label = (f"F_ν [{unit}]" + (" summed over the region" if isinstance(ex, dict) and ex.get("area_arcsec2") else ""))
+        self.zoom_fig.yaxis.axis_label = f"F_ν − baseline [{unit}]"
         self.mark_src.data = {k: [] for k in self.mark_src.data}
         if spec.distance_pc and self.src.value != "table":
             self.dist.value = spec.distance_pc
@@ -590,7 +624,7 @@ class RotDiagWorkspace:
         from .pipeline import fit_config
         cfg = self.current_config()
         F, M = self.features, self.members
-        fcfg = fit_config(cfg, self.dist.value)
+        fcfg = fit_config(cfg, self.dist.value, self.spec)
         mc = MCMCConfig(cfg.mcmc.walkers, cfg.mcmc.steps, cfg.mcmc.burn, cfg.mcmc.thin, cfg.mcmc.seed) if mcmc else None
 
         def prog(x):
@@ -620,7 +654,7 @@ class RotDiagWorkspace:
 
     def run_all(self):
         try:
-            if self.src.value != "table" and self.spec is None:
+            if self.src.value == "s3d" or (self.src.value != "table" and self.spec is None):
                 self.load()
             self.find()
         except Exception as ex:
@@ -637,7 +671,7 @@ class RotDiagWorkspace:
         from .pipeline import fit_config
         cfg = self.current_config()
         F, M = self.features, self.members
-        fcfg = fit_config(cfg, self.dist.value)
+        fcfg = fit_config(cfg, self.dist.value, self.spec)
 
         def done(t):
             self.comparison = t
@@ -740,7 +774,7 @@ class RotDiagWorkspace:
             return
         cfg = self.current_config()
         from .pipeline import fit_config
-        fc = fit_config(cfg, self.dist.value)
+        fc = fit_config(cfg, self.dist.value, self.spec)
         geo = fc.geometry
         res = self.fit
         av = res.best.get("Av", 0.0) if res is not None else 0.0
@@ -881,6 +915,9 @@ class RotDiagWorkspace:
             inp = f'--fluxes {cfg.fluxes.path} --flux-unit "{cfg.fluxes.unit}"'
         elif self.src.value == "file":
             inp = cfg.spectrum.path
+        elif self.src.value == "s3d":
+            sp = cfg.spectrum
+            inp = f"{sp.path} --source s3d --region {sp.region} --dx {sp.dx:g} --dy {sp.dy:g} --radius-arcsec {sp.radius_arcsec:g}"
         else:
             inp = "SPECTRUM.csv   # the LTE-fit target / cube region: save it as CSV first"
         cli = (f"jalebi rotdiag fit {inp} --molecule {cfg.molecule} --model {f.model} --opr {f.opr}"

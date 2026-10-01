@@ -38,7 +38,7 @@ class TargetConfig(BaseModel):
 
 
 class ContinuumConfig(BaseModel):
-    method: str = "irsqr"               # irsqr | median_sg | asls | convex_hull | rolling_min | spline | banzatti | none
+    method: str = "irsqr"               # irsqr | median_sg | asls | aspls | convex_hull | rolling_min | spline | banzatti | none
                                         # | given (keep the continuum loaded with the spectrum, e.g. a CSV
                                         #   'continuum'/'baseline' column).  For absorption-dominated
                                         #   spectra use irsqr with quantile ~0.9 (upper envelope) or given.
@@ -54,6 +54,8 @@ class ContinuumConfig(BaseModel):
     n_iter: int = 5
     lam: float = 1e3
     p: float = 0.01
+    aspls_lam: float = 5e6              # aspls stiffness (the cube_maps.py value)
+    aspls_alpha: float = 0.5            # aspls asymmetry coefficient
     segment: int = 300
     overlap: int = 100
     percentile: float = 5.0
@@ -89,15 +91,21 @@ class ComponentConfig(BaseModel):
     fc: float = 1.0                     # absorption: covering fraction of the continuum (0-1)
     covers: str = "continuum"           # absorption: continuum | all (also absorbs the emission components)
     fwhm_thermal: bool = False          # add the thermal width at T in quadrature to fwhm
+    Tvib: float | None = None           # vibrational temperature (K) of a two-temperature population; null = LTE.
+                                        # Set it (e.g. 600) to fit T_vib: the 5-8 um H2O nu2 band is sub-thermal
+    windows: list[list[float]] | None = None   # ranges (um) where this component emits; null = everywhere.
+                                        # e.g. [[4.9, 9.0]] for a ro-vibrational H2O component fitted on its own band
     enabled: bool = True
     linelist_release: str | None = None      # None = project default (linedata.releases[molecule], else "hitran")
     eup_max: float | None = None
     linelist_path: str | None = None
     bounds: dict[str, list[float]] = Field(default_factory=dict)   # per-parameter [lo, hi]
+    priors: dict[str, list[float]] = Field(default_factory=dict)   # Gaussian priors [mu, sigma] on top of the bounds,
+                                                                   # e.g. {T: [800, 150]} (Romero-Mirza+2024 use 400 / 800 K)
     fixed: list[str] = Field(default_factory=list)                 # parameter names held fixed
 
     def to_component(self) -> Component:
-        d = self.model_dump(exclude={"bounds", "fixed"})
+        d = self.model_dump(exclude={"bounds", "fixed", "priors"})
         return Component(**d)
 
 
@@ -139,6 +147,17 @@ class DetectConfig(BaseModel):
 
 class FitConfig(BaseModel):
     windows: list[list[float]] = Field(default_factory=list)
+    # fit only narrow regions around curated lines (Banzatti+2025 lists; see jalebi.regions) instead of
+    # every pixel of `windows`; `windows` then only limits the range.  e.g. [H2O_v0-0]
+    line_regions: list[str] = Field(default_factory=list)
+    region_pad_um: float = 0.0
+    region_weight_beyond: list[float] | None = None     # [lambda_um, weight]: weight regions beyond lambda (Temmink+2025: [20, 5])
+    # with line_regions, how the pixels of the OTHER (non-H2O) components are chosen:
+    #   features: their curated Q-branch / band-head ranges (molecules.FEATURES) widened by region_feature_pad_um
+    #   default:  their full default windows (molecules.DEFAULT_WINDOWS; re-admits water pixels, e.g. CO2 14.6-16.4)
+    #   none:     only the line regions
+    region_other_molecules: str = "features"
+    region_feature_pad_um: float = 0.15
     auto_detect: bool = False                  # detect molecules and rewrite components before fitting
     detect: DetectConfig = DetectConfig()
     area_param: str = "logR"            # logR | logNA
@@ -149,6 +168,11 @@ class FitConfig(BaseModel):
     window_weights: dict[int, float] = Field(default_factory=dict)
     use_pipeline_err: bool = False
     oversample: int = 6
+    tvib_below_trot: bool = True        # prior T_vib <= T for components with a free Tvib (sub-thermal vibration)
+    # Default split of the water components at this wavelength (um) when the fit windows reach below it: H2O
+    # slabs without their own `windows` and without `Tvib` emit only beyond it (pure-rotational lines), and
+    # components whose name contains "rovib" only below it (the sub-thermal nu2 band, Banzatti+2025).  null = off.
+    water_split_um: float | None = 9.5
     stages: list[str] = ["grid", "optimise", "mcmc"]
     grid: GridConfig = GridConfig()
     optimise: OptimiseConfig = OptimiseConfig()
@@ -199,6 +223,12 @@ class ProjectConfig(BaseModel):
                 raise ValueError(f"component {c.name}: covers must be 'continuum' or 'all'")
             if not 0.0 <= c.fc <= 1.0:
                 raise ValueError(f"component {c.name}: fc must be between 0 and 1")
+            if c.windows is not None:
+                for w in c.windows:
+                    if len(w) != 2 or not w[0] < w[1]:
+                        raise ValueError(f"component {c.name}: windows must be [[lo, hi], ...] in micron, got {c.windows}")
+            if c.Tvib is not None and c.Tvib <= 0:
+                raise ValueError(f"component {c.name}: Tvib must be positive (K) or null")
         return v
 
     # ---- io -------------------------------------------------------------------------------
@@ -245,10 +275,47 @@ class ProjectConfig(BaseModel):
             out = out.split("{target}")[0]
         return os.path.normpath(os.path.expanduser(out.rstrip("/\\") or "."))
 
+    def window_weights(self) -> dict[int, float]:
+        """Explicit fit.window_weights, plus the automatic weight beyond `region_weight_beyond[0]` um."""
+        w = {int(k): float(v) for k, v in self.fit.window_weights.items()}
+        if self.fit.region_weight_beyond:
+            from .regions import region_weights
+            for k, v in region_weights(self.windows(), tuple(self.fit.region_weight_beyond)).items():
+                w.setdefault(k, v)
+        return w
+
     def components_list(self) -> list[Component]:
-        return [c.to_component() for c in self.components]
+        comps = [c.to_component() for c in self.components]
+        return apply_water_split(comps, self.windows(), self.fit.water_split_um)
 
     def windows(self) -> list[tuple[float, float]]:
+        if self.fit.line_regions:
+            from .regions import line_regions
+            lim = None
+            if self.fit.windows:
+                lim = (min(w[0] for w in self.fit.windows), max(w[1] for w in self.fit.windows))
+            ws = line_regions(self.fit.line_regions, pad_um=self.fit.region_pad_um, limit=lim)
+            # the other molecules keep their own pixels (Q branches / band heads, or their default windows)
+            mode = (self.fit.region_other_molecules or "features").lower()
+            if mode != "none":
+                from .molecules import DEFAULT_WINDOWS, FEATURES
+                pad = float(self.fit.region_feature_pad_um)
+                for c in self.components:
+                    if c.molecule == "H2O" or not c.enabled:
+                        continue
+                    if mode == "default":
+                        ws += [tuple(w) for w in DEFAULT_WINDOWS.get(c.molecule, [])]
+                    else:
+                        ws += [(a - pad, b + pad) for a, b, _ in FEATURES.get(c.molecule, [])] or \
+                              [tuple(w) for w in DEFAULT_WINDOWS.get(c.molecule, [])]
+                from .model import merge_intervals
+                ws = merge_intervals(ws)
+            if self.fit.windows and ws:
+                # keep only the parts inside the explicit windows
+                from .model import merge_intervals
+                ws = merge_intervals([(max(a, w[0]), min(b, w[1])) for a, b in ws for w in self.fit.windows if a <= w[1] and b >= w[0]])
+            if ws:
+                return ws
         if self.fit.windows:
             return [tuple(w) for w in self.fit.windows]
         from .molecules import DEFAULT_WINDOWS
@@ -257,6 +324,31 @@ class ProjectConfig(BaseModel):
             ws += DEFAULT_WINDOWS.get(c.molecule, [])
         from .model import merge_intervals
         return merge_intervals(ws) if ws else [(4.9, 28.0)]
+
+
+def is_rovib_name(name: str) -> bool:
+    return "rovib" in name.lower() or "ro-vib" in name.lower() or name.lower().endswith("_vib")
+
+
+def apply_water_split(comps: list[Component], windows: list[tuple[float, float]], split: float | None) -> list[Component]:
+    """Default wavelength windows for water slabs when the fit reaches below `split` um (the nu2 band).
+
+    LTE slabs fitted to the rotational lines over-predict the 5-8 um band by 3-6x (docs/ROVIB_WATER.md), so
+    an H2O component that has no `windows` of its own and no `Tvib` is restricted to [split, 28.5] um, and a
+    component whose name says "rovib" to [4.9, split].  Components with explicit `windows`, with `Tvib`
+    (whose two-temperature populations handle the band), or of kind absorption are left alone.  Tied
+    isotopologues follow their parent.  Returns the same list, modified in place."""
+    if split is None or not windows or min(w[0] for w in windows) >= split:
+        return comps
+    by_name = {c.name: c for c in comps}
+    for c in comps:
+        if c.molecule != "H2O" or c.kind == "absorption" or c.windows is not None or c.Tvib is not None:
+            continue
+        c.windows = [[4.9, float(split)]] if is_rovib_name(c.name) else [[float(split), 28.5]]
+    for c in comps:
+        if c.tie_to and c.windows is None and c.tie_to in by_name and by_name[c.tie_to].windows is not None:
+            c.windows = [list(w) for w in by_name[c.tie_to].windows]
+    return comps
 
 
 EXAMPLE_CONFIG = ProjectConfig(

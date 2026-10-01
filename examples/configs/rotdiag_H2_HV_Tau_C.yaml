@@ -1,14 +1,20 @@
-# OH pure rotational lines of FZ Tau longward of 13 µm, two temperatures.  jalebi rotdiag run rotdiag_OH_FZ_Tau.yaml
-molecule: OH
+# H2 rotation diagram of HV Tau C from the s3d cubes (bundled cutouts: 5 lines; point it at the full cube folder for
+# S(1)-S(8) + v=1-1): 1" circle around the source, two temperatures + power law, A_V and OPR free.
+# jalebi rotdiag run rotdiag_H2_HV_Tau_C.yaml
+molecule: H2
+target: HV_Tau_C
 spectrum:
-  path: example:FZ_Tau
-  source: auto
+  path: example:HV_Tau_C_cube
+  source: s3d
   rv_kms: 0.0
+  region: circle
+  dx: 0.0
+  dy: 0.0
+  radius_arcsec: 1.0
+  params: []
   aperture_fwhm_scale: 1.5
 lines:
-  wmin: 13.0
-  rel_min: 0.001
-  max_features: 30
+  max_features: 60
   blend_fwhm: 0.5
   member_rel: 0.01
   edge_fwhm: 3.0
@@ -30,16 +36,16 @@ measure:
   flux_unit: Jy
   skip: []
 geometry:
-  mode: number
+  mode: aperture
   R_au: 1.0
   aperture_arcsec: 0.5
 fit:
   model: two
-  opr: thermal
+  opr: species
   opr_value: 3.0
   opr_free: true
   av: 0.0
-  av_free: false
+  av_free: true
   extinction: KP5
   opacity: false
   fwhm_kms: 10.0
@@ -51,7 +57,9 @@ fit:
   bounds: {}
   fixed: {}
   start: {}
-  compare: false
+  compare: true
+  also:
+  - powerlaw
 mcmc:
   enabled: true
   walkers: 48

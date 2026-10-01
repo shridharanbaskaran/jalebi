@@ -4,6 +4,8 @@ Methods (all return a continuum array on the spectrum's pixels; run per sub-band
   irsqr        Iteratively reweighted spline quantile regression (pybaselines) — MINDS default
   median_sg    Iterative running median + Savitzky–Golay smoothing — JDISCS style
   asls         Asymmetric least squares (pybaselines) — the legacy setting from the notebooks
+  aspls        Adaptive smoothness-penalised least squares (pybaselines; Zhang et al. 2020), the
+               continuum of the group's cube_maps.py (lam ~ 5e6); good under dense line forests (5-8 um)
   convex_hull  Lower convex hull of the spectrum in overlapping segments, smoothed
   rolling_min  Rolling minimum (percentile) envelope, smoothed
   spline       Cubic spline through user-supplied anchor wavelengths (manual mode)
@@ -89,6 +91,9 @@ class ContinuumSettings:
     # asls
     lam: float = 1e3
     p: float = 0.01
+    # aspls (adaptive smoothness penalty; no asymmetry parameter -- the weights adapt)
+    aspls_lam: float = 5e6
+    aspls_alpha: float = 0.5       # asymmetric_coef of pybaselines (0.5 = default)
     # convex hull / rolling minimum
     segment: int = 300              # pixels per hull segment
     overlap: int = 100
@@ -106,7 +111,7 @@ class ContinuumSettings:
         return d
 
 
-METHODS = ["irsqr", "median_sg", "asls", "convex_hull", "rolling_min", "spline", "banzatti", "none", "given"]
+METHODS = ["irsqr", "median_sg", "asls", "aspls", "convex_hull", "rolling_min", "spline", "banzatti", "none", "given"]
 
 
 # ------------------------------------------------------------------------------------
@@ -178,6 +183,17 @@ def cont_asls(wave, flux, use, s: ContinuumSettings):
     f = _fill(wave, flux, use)
     bl = Baseline(x_data=np.arange(len(f)))
     base, _ = bl.asls(f, lam=s.lam, p=s.p)
+    return base
+
+
+def cont_aspls(wave, flux, use, s: ContinuumSettings):
+    """Adaptive smoothness-penalised least squares (pybaselines `aspls`), as in the cube module and the
+    group's cube_maps.py.  `aspls_lam` sets the stiffness (5e6 for MRS sub-bands), `aspls_alpha` the
+    asymmetry coefficient."""
+    from pybaselines import Baseline
+    f = _fill(wave, flux, use)
+    bl = Baseline(x_data=np.arange(len(f)))
+    base, _ = bl.aspls(f, lam=s.aspls_lam, asymmetric_coef=s.aspls_alpha)
     return base
 
 
@@ -266,7 +282,7 @@ def cont_banzatti(wave, flux, use, s: ContinuumSettings):
     return _pchip_clamped(np.asarray(xs)[o], np.asarray(ys)[o])(wave)
 
 
-ESTIMATORS = {"irsqr": cont_irsqr, "median_sg": cont_median_sg, "asls": cont_asls, "convex_hull": cont_convex_hull,
+ESTIMATORS = {"irsqr": cont_irsqr, "median_sg": cont_median_sg, "asls": cont_asls, "aspls": cont_aspls, "convex_hull": cont_convex_hull,
               "rolling_min": cont_rolling_min, "spline": cont_spline, "banzatti": cont_banzatti}
 
 

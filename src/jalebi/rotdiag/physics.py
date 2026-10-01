@@ -286,7 +286,7 @@ def default_params(kind: str, m: RotModel | None = None, t_bounds=(50.0, 5000.0)
     else:
         raise ValueError(f"model must be one of {MODELS}")
     P["Av"] = ParamSpec("Av", 0.0, 0.0, 100.0, False, "A_V [mag]", "mag")
-    P["OPR"] = ParamSpec("OPR", 3.0, 0.05, 3.0, False, "OPR")
+    P["OPR"] = ParamSpec("OPR", 3.0, 0.1, 6.0, False, "OPR")
     P["logR"] = ParamSpec("logR", 0.0, -3.0, 3.0, False, "log R [au]", "au")
     P["fwhm"] = ParamSpec("fwhm", 10.0, 0.5, 200.0, False, "Δv [km/s]", "km/s")
     return P

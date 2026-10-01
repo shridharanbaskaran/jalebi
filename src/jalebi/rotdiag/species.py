@@ -42,12 +42,14 @@ class RotSpecies:
     note: str = ""
     curated: str = ""                  # optional curated line list (data_files CSV) used as the default selection
     releases: tuple[str, ...] = field(default=())
+    rel_min: float = 1e-3              # default minimum relative strength of a feature (Selection.rel_min=None)
 
 
 PRESETS: dict[str, RotSpecies] = {
-    "H2": RotSpecies("H2", "H₂", "roueff2019", 800.0, bands=("0-0",), spin="h2", t_bounds=(80.0, 5000.0),
-                     note="pure rotational S(J) lines (0-0); add 1-0 for NIRSpec. Quadrupole lines: always optically thin. "
-                          "S(3) at 9.66 µm sits in the silicate feature and pins A_V."),
+    "H2": RotSpecies("H2", "H₂", "roueff2019", 1500.0, bands=("0-0", "1-1"), spin="h2", t_bounds=(80.0, 6000.0), rel_min=1e-7,
+                     note="pure rotational S(J) lines of v=0 and the v=1-1 lines (hot gas; E_u > 10 000 K); add 1-0 for "
+                          "NIRSpec. Quadrupole lines: always optically thin. S(3) at 9.66 µm sits in the silicate feature "
+                          "and pins A_V."),
     "CO": RotSpecies("CO", "CO", "hitemp", 1000.0, bands=("1-0",), t_bounds=(100.0, 5000.0),
                      note="rovibrational v=1-0 (and 2-1 ...) P/R lines at 4.4-5.3 µm; the low-J lines are often optically "
                           "thick: switch on the opacity correction."),

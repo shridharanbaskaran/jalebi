@@ -46,11 +46,13 @@ class MeasureConfig:
     snr_detect: float = 3.0
     integrate_fwhm: float = 1.2
     center_shift_kms: float = 60.0
-    sigma_range: tuple[float, float] = (0.6, 2.0)
+    sigma_range: tuple[float, float] = (0.4, 2.0)
     clip_sigma: float = 3.0
     contaminants: bool = True            # fit known lines of other species inside the window
     blend_rel: float = 0.02              # lines of the molecule outside the selection that are fitted as blends
     scale_errors: bool = True
+    refine_snr: float = 15.0             # lines above this S/N get their own velocity and width (0 = never)
+    refine_kms: float = 80.0             # ± search range of the per-line velocity
     R_model: str | float = "argyriou2023"
     flux_unit: str = "Jy"                # Jy | MJy/sr (then the fluxes are intensities, W m^-2 sr^-1)
 
@@ -238,6 +240,11 @@ def measure_features(spec, features: pd.DataFrame, members: pd.DataFrame, cfg: M
             res = _gauss_free(x, y, e, good, r, fw, sig, fac, cfg, comps)
         else:
             res = _gauss_linear(x, y, e, good, fw, sig, fac, cfg, comps)
+            if (res is not None and cfg.refine_snr > 0 and res[1] > 0 and (res[0] / res[1] >= cfg.refine_snr or res[2] > 3.0)
+                    and len(comps) == 1):                       # not next to another line: v could slide onto it
+                # a strong line: refine its own velocity and width on a grid (sub-band velocity offsets, lines
+                # narrower or wider than the R(λ) law), keeping the linear template
+                res = _refine_line(x, y, e, good, fw, cfg, comps, res, s, v)
         if res is None:
             notes[k] = notes[k] or "fit failed"; continue
         area, aerr, chi2r, npix, model, base, used, vk, fwk, own = res
@@ -256,11 +263,40 @@ def measure_features(spec, features: pd.DataFrame, members: pd.DataFrame, cfg: M
     F["measured"] = ok_fit
     F["note"] = notes
     F["use"] = ok_fit & np.isfinite(F["flux"]) & np.isfinite(F["flux_err"]) & (F["flux_err"] > 0)
+    if "blended" in F:                                     # unresolvable blends with other species stay out of the fit
+        F["use"] &= ~F["blended"].astype(bool)
+        F.loc[F["blended"].astype(bool), "note"] = ["blended with " + c for c in F.loc[F["blended"].astype(bool), "contaminants"]]
     F.attrs.update(features.attrs)
     F["width_scale"] = [scales.get(str(b)[:1] if isinstance(b, str) and b else "all", scales["all"]) for b in F["band"]]
     F.attrs.update(velocity_kms=v, width_scale=scales["all"], width_scales={k: round(float(x), 4) for k, x in scales.items()},
                    n_calibration=ncal, method=cfg.method, flux_unit=cfg.flux_unit)
     return F, stamps
+
+
+def _refine_line(x, y, e, good, fw, cfg, comps, res0, s0, v0):
+    """Profile likelihood of one line over (v, width scale) with the pixels of the first fit held fixed."""
+    use0 = res0[6]
+    vgrid = np.arange(v0 - cfg.refine_kms, v0 + cfg.refine_kms + 1e-9, 4.0)
+    sgrid = np.linspace(cfg.sigma_range[0], cfg.sigma_range[1], 33)
+    best = (np.inf, v0, s0)
+    chi_v = np.full(len(vgrid), np.inf)
+    for i, vv in enumerate(vgrid):
+        r = _gauss_linear(x, y, e, good, fw, s0 * fw * FWHM2SIG, 1.0 + vv / C_KMS, cfg, comps, fixed_use=use0)
+        if r is not None:
+            chi_v[i] = r[2] * max(r[3] - len(comps) - cfg.cont_order - 1, 1)
+    if np.isfinite(chi_v).any():
+        v1 = _profile_min(vgrid, np.where(np.isfinite(chi_v), chi_v, np.nanmax(chi_v[np.isfinite(chi_v)]) * 10))
+    else:
+        v1 = v0
+    chi_s = np.full(len(sgrid), np.inf)
+    for j, sc in enumerate(sgrid):
+        r = _gauss_linear(x, y, e, good, fw, sc * fw * FWHM2SIG, 1.0 + v1 / C_KMS, cfg, comps, fixed_use=use0)
+        if r is not None:
+            chi_s[j] = r[2] * max(r[3] - len(comps) - cfg.cont_order - 1, 1)
+    s1 = _profile_min(sgrid, np.where(np.isfinite(chi_s), chi_s, np.nanmax(chi_s[np.isfinite(chi_s)]) * 10)) if np.isfinite(chi_s).any() else s0
+    best = (0.0, v1, s1)
+    r = _gauss_linear(x, y, e, good, fw, best[2] * fw * FWHM2SIG, 1.0 + best[1] / C_KMS, cfg, comps)
+    return r if r is not None and r[2] <= res0[2] else res0
 
 
 def _design_baseline(x, x0, order, scale):
@@ -278,9 +314,11 @@ def _gauss_linear(x, y, e, good, fw, sig, fac, cfg, comps, fixed_use=None):
     B = _design_baseline(x, x0, cfg.cont_order, cfg.window_fwhm * fw)
     X = np.concatenate([G, B], axis=1)
     use = good.copy() if fixed_use is None else fixed_use.copy()
+    # pixels near the modelled lines are never clipped (within 2.5 FWHM: the wings of a bright line exceed many σ
+    # when the template width or velocity is slightly off, and the refinement step takes care of that)
     core = np.zeros(len(x), bool)
     for _, wl, _ in comps:
-        core |= np.min(np.abs(x[:, None] - wl[None, :] * fac), axis=1) < cfg.core_fwhm * fw
+        core |= np.min(np.abs(x[:, None] - wl[None, :] * fac), axis=1) < max(2.5, cfg.core_fwhm) * fw
     for _ in range(6 if fixed_use is None else 1):
         if use.sum() <= X.shape[1] + 2:
             return None
@@ -292,8 +330,12 @@ def _gauss_linear(x, y, e, good, fw, sig, fac, cfg, comps, fixed_use=None):
             return None
         p = C @ (A.T @ y[use])
         r = (y - X @ p) / e
-        # clip strong positive outliers outside the modelled cores (unmodelled lines) and gross outliers anywhere
-        new = good & ~(((r > cfg.clip_sigma) & ~core) | (np.abs(r) > 3 * cfg.clip_sigma))
+        # clip unmodelled lines (positive outliers) and gross outliers away from the modelled lines; the threshold
+        # also allows for a residual of a few per cent of the brightest modelled line (template imperfections)
+        amp = float(np.nanmax(np.abs(X[:, :G.shape[1]] @ p[:G.shape[1]]))) if G.shape[1] else 0.0
+        thr = cfg.clip_sigma * e + 0.02 * amp
+        resid = y - X @ p
+        new = good & ~(((resid > thr) | (np.abs(resid) > 3 * thr)) & ~core)
         if fixed_use is not None or np.array_equal(new, use):
             break
         use = new

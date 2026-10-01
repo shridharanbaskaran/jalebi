@@ -32,6 +32,7 @@ from __future__ import annotations
 import glob
 import io
 import os
+import re
 import threading
 import time
 import traceback
@@ -438,19 +439,27 @@ class ComponentCard:
         self.fc = pn.widgets.EditableFloatSlider(name="f_c (covering fraction)", start=0.0, end=1.0, step=0.01, value=cfg.fc, format="0.00", visible=is_abs, **W)
         self.covers = pn.widgets.Select(name="absorbs", options={"continuum only": "continuum", "continuum + emission": "all"}, value=cfg.covers, visible=is_abs, **W)
         self.fwhm_thermal = pn.widgets.Checkbox(name="add thermal width at T to Δv", value=cfg.fwhm_thermal, **W)
+        # non-LTE vibrational excitation (T_vib < T_rot weakens the 5-8 um nu2 band and the hot bands)
+        self.use_tvib = pn.widgets.Checkbox(name="vibrational temperature T_vib ≠ T (non-LTE ν₂ band)", value=cfg.Tvib is not None, **W)
+        self.Tvib = pn.widgets.EditableFloatSlider(name="T_vib [K]", start=50.0, end=2000.0, step=5.0,
+                                                   value=float(cfg.Tvib) if cfg.Tvib is not None else min(cfg.T, 600.0),
+                                                   format="0", visible=cfg.Tvib is not None, **W)
+        self.windows = pn.widgets.TextInput(name="emits only in [µm]", value=", ".join(f"{a:g}-{b:g}" for a, b in (cfg.windows or [])),
+                                            placeholder="everywhere (e.g. 4.9-9 for a ro-vibrational component)", **W)
         self.logR.visible = not is_abs
         self.q = pn.widgets.EditableFloatSlider(name="q (T∝r⁻ᑫ)", start=0.0, end=1.5, step=0.02, value=cfg.q, visible=cfg.kind == "annuli", **W)
         self.p = pn.widgets.EditableFloatSlider(name="p (N∝r⁻ᵖ)", start=-1.0, end=3.0, step=0.05, value=cfg.p, visible=cfg.kind == "annuli", **W)
         self.logRin = pn.widgets.EditableFloatSlider(name="log R_in [au]", start=-3.0, end=1.0, step=0.02, value=cfg.logRin, visible=cfg.kind == "annuli", **W)
-        self.fixed = pn.widgets.MultiChoice(name="fixed in fit", options=["logN", "T", "logR", "rv", "fwhm", "ratio", "fc"], value=list(cfg.fixed), **W)
+        self.fixed = pn.widgets.MultiChoice(name="fixed in fit", options=["logN", "T", "logR", "rv", "fwhm", "ratio", "fc", "Tvib"], value=list(cfg.fixed), **W)
         self.head = _html("", sizing_mode="stretch_width")
         self._tau_txt = None
         # live parameters: coalesced through the app scheduler (one evaluation per tick)
-        for w in (self.logN, self.T, self.logR, self.rv, self.fwhm, self.q, self.p, self.logRin, self.ratio, self.fc):
+        for w in (self.logN, self.T, self.logR, self.rv, self.fwhm, self.q, self.p, self.logRin, self.ratio, self.fc, self.Tvib):
             w.param.watch(lambda e: app._schedule("param"), "value")
         for w in (self.molecule, self.release, self.enabled, self.group, self.tie_to, self.kind, self.name,
-                  self.covers, self.fwhm_thermal):
+                  self.covers, self.fwhm_thermal, self.use_tvib, self.windows):
             w.param.watch(lambda e: app._schedule("structure"), "value")
+        self.use_tvib.param.watch(lambda e: setattr(self.Tvib, "visible", bool(e.new)), "value")
         self.molecule.param.watch(self._molecule_changed, "value")
         self.kind.param.watch(self._kind_changed, "value")
         self.remove.on_click(lambda e: app.remove_component(self))
@@ -458,8 +467,8 @@ class ComponentCard:
             self.rv, self.fwhm,
             pn.Row(self.group, self.tie_to, sizing_mode="stretch_width"),
             pn.Row(self.kind, self.ratio, sizing_mode="stretch_width"),
-            self.q, self.p, self.logRin, self.covers, self.fwhm_thermal, self.fixed,
-            header=_html('<span class="sf-subtitle">velocity · geometry · absorption · ties · fixed</span>'),
+            self.q, self.p, self.logRin, self.covers, self.fwhm_thermal, self.use_tvib, self.Tvib, self.windows, self.fixed,
+            header=_html('<span class="sf-subtitle">velocity · geometry · absorption · T_vib · ties · fixed</span>'),
             collapsed=True, css_classes=["sf-sub"], sizing_mode="stretch_width", margin=(4, 0, 2, 0))
         self.panel = pn.Card(
             pn.Row(self.name, self.enabled, self.remove, sizing_mode="stretch_width"),
@@ -513,11 +522,23 @@ class ComponentCard:
                                tie_to=self.tie_to.value.strip() or None, ratio=self.ratio.value, q=self.q.value,
                                p=self.p.value, logRin=self.logRin.value, enabled=self.enabled.value, fixed=list(self.fixed.value),
                                fc=self.fc.value, covers=self.covers.value, fwhm_thermal=self.fwhm_thermal.value,
+                               Tvib=float(self.Tvib.value) if self.use_tvib.value else None,
+                               windows=self._parse_windows(self.windows.value),
                                linelist_release=None if self.release.value == "auto" else self.release.value)
 
+    @staticmethod
+    def _parse_windows(text: str):
+        """'4.9-9, 12-27' -> [[4.9, 9.0], [12.0, 27.0]]; empty or unparsable -> None (emits everywhere)."""
+        out = []
+        for part in re.split(r"[,;]+", text or ""):
+            m = re.match(r"^\s*([0-9.]+)\s*[-–]\s*([0-9.]+)\s*$", part)
+            if m and float(m.group(1)) < float(m.group(2)):
+                out.append([float(m.group(1)), float(m.group(2))])
+        return out or None
+
     def set_values(self, d: dict):
-        for k in ("logN", "T", "logR", "rv", "fwhm", "q", "p", "logRin", "fc"):
-            if k in d:
+        for k in ("logN", "T", "logR", "rv", "fwhm", "q", "p", "logRin", "fc", "Tvib"):
+            if k in d and d[k] is not None:
                 getattr(self, k).value = float(np.clip(d[k], getattr(self, k).start, getattr(self, k).end))
         if "ratio" in d:
             self.ratio.value = float(d["ratio"])
@@ -1149,6 +1170,8 @@ class JalebiApp:
         self.w_niter = pn.widgets.IntInput(name="iterations", value=c.n_iter, **W)
         self.w_lam = pn.widgets.FloatInput(name="λ (asls)", value=c.lam, **W)
         self.w_p = pn.widgets.FloatInput(name="p (asls)", value=c.p, step=0.005, **W)
+        self.w_aspls_lam = pn.widgets.FloatInput(name="λ (aspls)", value=c.aspls_lam, **W)
+        self.w_aspls_alpha = pn.widgets.FloatInput(name="asymmetry (aspls)", value=c.aspls_alpha, step=0.05, start=0.0, end=1.0, **W)
         self.w_segment = pn.widgets.IntInput(name="hull segment [px]", value=c.segment, **W)
         self.w_overlap = pn.widgets.IntInput(name="hull overlap [px]", value=c.overlap, **W)
         self.w_pct = pn.widgets.FloatInput(name="min percentile", value=c.percentile, **W)
@@ -1159,6 +1182,7 @@ class JalebiApp:
             "irsqr": pn.Row(self.w_quantile, self.w_knots, **W),
             "median_sg": pn.Column(pn.Row(self.w_medwin, self.w_medpct, **W), pn.Row(self.w_sgwin, self.w_sgord, self.w_niter, **W), **W),
             "asls": pn.Row(self.w_lam, self.w_p, **W),
+            "aspls": pn.Row(self.w_aspls_lam, self.w_aspls_alpha, **W),
             "convex_hull": pn.Row(self.w_segment, self.w_overlap, **W),
             "rolling_min": pn.Row(self.w_pct, self.w_minwin, **W),
             "spline": pn.Column(self.w_anchors, self.w_anchorw, **W),
@@ -1172,7 +1196,7 @@ class JalebiApp:
         self.cont_btn.on_click(lambda e: self.estimate_continuum())
         self.cont_auto = pn.widgets.Checkbox(name="auto-update", value=True, margin=(12, 10, 5, 10))
         for w in (self.w_quantile, self.w_knots, self.w_medwin, self.w_medpct, self.w_sgwin, self.w_sgord, self.w_niter,
-                  self.w_lam, self.w_p, self.w_segment, self.w_overlap, self.w_pct, self.w_minwin, self.w_anchorw, self.cont_smooth,
+                  self.w_lam, self.w_p, self.w_aspls_lam, self.w_aspls_alpha, self.w_segment, self.w_overlap, self.w_pct, self.w_minwin, self.w_anchorw, self.cont_smooth,
                   self.cont_protect, self.cont_method):
             w.param.watch(lambda e: self.cont_auto.value and self.estimate_continuum(), "value")
         self.w_anchors.param.watch(lambda e: self.cont_auto.value and self.cont_method.value == "spline" and self.estimate_continuum(), "value")
@@ -1242,7 +1266,8 @@ class JalebiApp:
                                protected=_parse_named_ranges(self.cont_protected.value), smooth=self.cont_smooth.value,
                                quantile=self.w_quantile.value, knot_spacing=self.w_knots.value, median_window=self.w_medwin.value,
                                median_percentile=self.w_medpct.value, sg_window=self.w_sgwin.value, sg_order=self.w_sgord.value,
-                               n_iter=self.w_niter.value, lam=self.w_lam.value, p=self.w_p.value, segment=self.w_segment.value,
+                               n_iter=self.w_niter.value, lam=self.w_lam.value, p=self.w_p.value, aspls_lam=self.w_aspls_lam.value,
+                               aspls_alpha=self.w_aspls_alpha.value, segment=self.w_segment.value,
                                overlap=self.w_overlap.value, percentile=self.w_pct.value, min_window=self.w_minwin.value,
                                anchors=[float(x) for x in self.w_anchors.value.replace("\n", ",").split(",") if x.strip()],
                                anchor_width=self.w_anchorw.value, refine_iterations=self.fit_refine.value if hasattr(self, "fit_refine") else 0)
@@ -1430,7 +1455,10 @@ class JalebiApp:
             return [(13.5, 16.5)]
 
     def components(self) -> list[Component]:
-        return [c.to_config().to_component() for c in self.cards]
+        from .config import apply_water_split
+        comps = [c.to_config().to_component() for c in self.cards]
+        # the same default as the pipeline: water slabs without their own windows / Tvib stay off the nu2 band
+        return apply_water_split(comps, self.windows(), self.cfg.fit.water_split_um)
 
     @staticmethod
     def _cat(idx_list: list[np.ndarray], arr: np.ndarray) -> np.ndarray:
@@ -1784,6 +1812,7 @@ class JalebiApp:
             self.w_quantile.value = c.quantile; self.w_knots.value = c.knot_spacing; self.w_medwin.value = c.median_window
             self.w_medpct.value = c.median_percentile; self.w_sgwin.value = c.sg_window; self.w_sgord.value = c.sg_order
             self.w_niter.value = c.n_iter; self.w_lam.value = c.lam; self.w_p.value = c.p; self.w_segment.value = c.segment
+            self.w_aspls_lam.value = c.aspls_lam; self.w_aspls_alpha.value = c.aspls_alpha
             self.w_overlap.value = c.overlap; self.w_pct.value = c.percentile; self.w_minwin.value = c.min_window
             self.w_anchors.value = ", ".join(f"{a:.4f}" for a in c.anchors); self.w_anchorw.value = c.anchor_width
             self.mask_default.value = cfg.masks.default_lines; self.mask_oh.value = cfg.masks.oh_prompt

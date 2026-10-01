@@ -1,0 +1,34 @@
+# JALEBI example: CI Tau (jw01640), the 5-8 µm ro-vibrational water band and the 12-27 µm rotational
+# lines in ONE fit, with a vibrational temperature on the hot component.  An LTE slab fitted to the
+# rotational lines over-predicts the nu2 band by 3-6x (Banzatti+2025 Fig. 7, Pontoppidan+2024 §4.3);
+# T_vib < T_rot reproduces both.  See docs/ROVIB_WATER.md.
+target:
+  name: CI Tau
+  path: /home/dugong/Desktop/Work/YSOs_MIRI_reduced_cube_data_Aug2026/disk_only/V-CI-TAU_jw01640-o005_t005_miri
+  distance_pc: 160                  # Banzatti+2023 Table 1
+  rv_kms: 17.7
+  extraction: {source: s3d, ra: 68.466791, dec: 22.8416009, aperture_fwhm_scale: 1.5, apcorr: mrs}
+continuum:
+  method: irsqr
+  quantile: 0.1
+  knot_spacing: 25
+linedata:
+  releases: {H2O: hitemp, CO: hitemp}
+components:
+  # Tvib set -> fitted (prior T_vib <= T); start below T_rot
+  - {name: H2O_hot,  molecule: H2O, logN: 18.3, T: 900, logR: -0.6, Tvib: 650}
+  - {name: H2O_warm, molecule: H2O, logN: 18.2, T: 450, logR: -0.2}
+  - {name: OH,       molecule: OH,  logN: 16.5, T: 900, logR: -0.3, bounds: {T: [300, 1500]}}
+  - {name: C2H2,     molecule: C2H2, logN: 17.0, T: 500, logR: -0.9}
+  - {name: HCN,      molecule: HCN,  logN: 16.5, T: 500, logR: -0.9}
+  - {name: CO2,      molecule: CO2,  logN: 17.0, T: 500, logR: -0.9}
+  # the CO fundamental sits at the blue edge of the first window: let it emit only there
+  - {name: CO,       molecule: CO,  logN: 18.0, T: 1300, logR: -0.9, windows: [[4.9, 5.7]], bounds: {T: [500, 1500]}}
+fit:
+  windows: [[5.3, 8.0], [12.0, 27.0]]
+  ordering: [[H2O_hot, H2O_warm]]
+  tvib_below_trot: true
+  stages: [optimise, mcmc]
+  optimise: {method: de, maxiter: 120, popsize: 10, workers: 4}
+  mcmc: {nsteps: 4000, processes: 4}
+output: results/{target}/rovib_tvib

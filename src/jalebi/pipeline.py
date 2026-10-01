@@ -21,7 +21,7 @@ def continuum_settings(cfg: ProjectConfig) -> ContinuumSettings:
     return ContinuumSettings(method=c.method, protect=c.protect, protected={k: tuple(v) for k, v in c.protected.items()},
                              smooth=c.smooth, quantile=c.quantile, knot_spacing=c.knot_spacing,
                              median_window=c.median_window, median_percentile=c.median_percentile, sg_window=c.sg_window,
-                             sg_order=c.sg_order, n_iter=c.n_iter, lam=c.lam, p=c.p, segment=c.segment,
+                             sg_order=c.sg_order, n_iter=c.n_iter, lam=c.lam, p=c.p, aspls_lam=c.aspls_lam, aspls_alpha=c.aspls_alpha, segment=c.segment,
                              overlap=c.overlap, percentile=c.percentile, min_window=c.min_window,
                              anchors=list(c.anchors), anchor_width=c.anchor_width)
 
@@ -63,6 +63,10 @@ def free_params(cfg: ProjectConfig) -> list[Param]:
     free = default_free_params(comps, area_param=cfg.fit.area_param, fit_rv=cfg.fit.fit_rv,
                                fit_fwhm=cfg.fit.fit_fwhm, bounds=bounds)
     fixed = {(c.name, f) for c in cfg.components for f in c.fixed}
+    priors = {(c.name, k): (float(v[0]), float(v[1])) for c in cfg.components for k, v in c.priors.items()}
+    for p in free:
+        if (p.comp, p.name) in priors:
+            p.gauss = priors[(p.comp, p.name)]
     return [p for p in free if (p.comp, p.name) not in fixed]
 
 
@@ -70,8 +74,9 @@ def build_problem(cfg: ProjectConfig, spec: Spectrum) -> FitProblem:
     comps = cfg.components_list()
     return FitProblem(spec, comps, cfg.windows(), free_params(cfg), area_param=cfg.fit.area_param,
                       fit_noise_scale=cfg.fit.fit_noise_scale, ordering=[tuple(o) for o in cfg.fit.ordering],
-                      window_weights=cfg.fit.window_weights, oversample=cfg.fit.oversample,
+                      window_weights=cfg.window_weights(), oversample=cfg.fit.oversample,
                       releases=cfg.linedata.releases, use_pipeline_err=cfg.fit.use_pipeline_err,
+                      tvib_below_trot=cfg.fit.tvib_below_trot,
                       model_kwargs={"R_model": cfg.R_model, "R_scale": cfg.R_scale, "R_constant": cfg.R_constant})
 
 
@@ -103,8 +108,12 @@ def run_grid_stage(run: RunResult, progress=None):
     from .molecules import DEFAULT_WINDOWS
     for name in order:
         comp = next(c for c in cfg.components if c.name == name)
-        # component windows: intersection of the fit windows with the molecule's default windows
-        wins = [w for w in prob.windows if any(a <= w[1] and b >= w[0] for a, b in DEFAULT_WINDOWS.get(comp.molecule, []))] or prob.windows
+        # component windows: intersection of the fit windows with the molecule's default windows, or with
+        # the component's own `windows` when it has them (a component restricted to 5-9 um is gridded there)
+        own = [tuple(w) for w in comp.windows] if comp.windows else None
+        wins = [w for w in prob.windows if any(a <= w[1] and b >= w[0] for a, b in (own or DEFAULT_WINDOWS.get(comp.molecule, [])))] or prob.windows
+        if own:
+            wins = [(max(w[0], a), min(w[1], b)) for w in wins for a, b in own if a <= w[1] and b >= w[0]] or wins
         run.say(f"grid: {name} on {wins}")
         bar = None
         if progress is None:
@@ -262,6 +271,15 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
         run.say("components: " + ", ".join(c.name for c in cfg.components) + f"; windows {cfg.fit.windows}")
     run.say(f"{spec.name}: {len(prob.y)} pixels in {len(prob.windows)} windows, {prob.ndim} free parameters, "
             f"{prob.model.grid.n} fine-grid points")
+    split = cfg.fit.water_split_um
+    if split is not None and prob.windows and min(w[0] for w in prob.windows) < split:
+        restricted = [f"{c.name} {c.windows}" for c in prob.components if c.molecule == "H2O" and c.windows]
+        if restricted:
+            run.say(f"water split at {split} um (fit.water_split_um): " + ", ".join(restricted))
+        if not any(c.molecule == "H2O" and c.windows and c.windows[0][0] < split for c in prob.components) \
+                and not any(c.molecule == "H2O" and c.Tvib is not None for c in prob.components):
+            run.say(f"  note: the fit reaches below {split} um but no water component emits there -- add an H2O_rovib "
+                    f"component (or Tvib) if the nu2 band should be fitted")
     for it in range(cfg.continuum.refine_iterations + 1):
         if "grid" in stages and it == 0:
             run_grid_stage(run, progress=(lambda n, f: progress("grid", f, n)) if progress else None)

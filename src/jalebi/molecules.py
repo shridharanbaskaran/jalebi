@@ -53,7 +53,10 @@ def get_molecule(name: str) -> Molecule:
 # Wavelength ranges (micron) where each molecule has its main MIRI features; used as
 # default fit windows in the app and CLI.  Chosen from MINDS / JDISCS practice.
 DEFAULT_WINDOWS: dict[str, list[tuple[float, float]]] = {
-    "H2O":   [(5.0, 8.0), (12.0, 17.5), (17.5, 27.5)],
+    # pure-rotational lines only: the 5-8 um nu2 band is sub-thermal (Banzatti+2025) and is fitted by a
+    # separate ro-vibrational component (windows: [[4.9, 9.5]]) or with Tvib -- see docs/ROVIB_WATER.md
+    "H2O":   [(12.0, 17.5), (17.5, 27.5)],
+    "H2O_rovib": [(5.0, 8.0)],
     "CO":    [(4.9, 5.35)],
     "CO2":   [(14.6, 16.4)],
     "13CO2": [(15.3, 15.5)],

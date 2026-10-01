@@ -40,6 +40,11 @@ COLUMNS = ["wave", "nu", "a", "gu", "gl", "eu", "el", "vup", "vlow", "qup", "qlo
 BUNDLED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linedata")
 
 
+def normalize_vlabel(s) -> str:
+    """HITRAN global quanta label without separators: '0 1 0' and '0_1_0' -> '010'."""
+    return re.sub(r"[\s_]+", "", str(s)).strip()
+
+
 def data_dir() -> str:
     """Writable user cache: $JALEBI_DATA (legacy: $SLABFIT_DATA), default ~/.jalebi/linedata."""
     d = os.environ.get("JALEBI_DATA") or os.environ.get("SLABFIT_DATA") or \
@@ -110,6 +115,40 @@ class LineList:
 
     def __len__(self):
         return len(self.table)
+
+    # ---- vibrational structure (for T_vib != T_rot models) ----------------------
+    def vib_energies(self) -> dict[str, float]:
+        """Energy (K) of every vibrational state in the list, keyed by its normalised global
+        quanta label ("010", "100", ...): the lowest level energy found with that label among the
+        upper and lower levels of the lines.  For HITRAN/HITEMP water this recovers the band
+        origins to < 0.1 cm^-1 (000: 0, 010: 1594.7, 020: 3151.6, 100: 3657.0, 001: 3755.9 cm^-1).
+        Unassigned labels (HITEMP's "-2-2-2") are left out: their lines stay in LTE at T_rot."""
+        cache = getattr(self, "_vib_cache", None)
+        if cache is not None and cache[0] is self.table:
+            return cache[1]
+        t = self.table
+        vu = t["vup"].astype(str).map(normalize_vlabel).to_numpy()
+        vl = t["vlow"].astype(str).map(normalize_vlabel).to_numpy()
+        eu, el = t["eu"].to_numpy(float), t["el"].to_numpy(float)
+        out: dict[str, float] = {}
+        for labels, e in ((vu, eu), (vl, el)):
+            for lab in np.unique(labels):
+                if not lab or lab.startswith("-") or not re.fullmatch(r"[0-9A-Za-z+\-]+", lab):
+                    continue
+                m = labels == lab
+                v = float(np.nanmin(e[m]))
+                out[lab] = min(out.get(lab, np.inf), v)
+        self._vib_cache = (t, out)
+        return out
+
+    def vib_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """Vibrational energy (K) of the upper and lower level of every line; NaN when the label is
+        unassigned (those lines are treated in LTE)."""
+        ev = self.vib_energies()
+        t = self.table
+        vu = t["vup"].astype(str).map(normalize_vlabel).map(ev).to_numpy(float)
+        vl = t["vlow"].astype(str).map(normalize_vlabel).map(ev).to_numpy(float)
+        return vu, vl
 
     def select(self, wmin: float | None = None, wmax: float | None = None, eup_max: float | None = None,
                aul_min: float | None = None, vup=None, vlow=None, qup=None, qlow=None) -> "LineList":

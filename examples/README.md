@@ -38,7 +38,7 @@ All results go to `results/` next to the scripts.
 | `configs/FZ_Tau_annuli.yaml` | a radial temperature gradient for water instead of discrete slabs |
 | `configs/targets.csv` | a target table for `jalebi batch` |
 | `configs/HV_Tau_C_cube.yaml` | a cube config (`jalebi cube run`): five lines, the H₂ stack, channel maps, a PV cut along the jet, four regions |
-| `configs/rotdiag_H2_synthetic.yaml`, `rotdiag_H2_fluxes.yaml`, `rotdiag_CO_FZ_Tau.yaml`, `rotdiag_OH_FZ_Tau.yaml`, `rotdiag_H2O_FZ_Tau.yaml` | rotation-diagram configs (`jalebi rotdiag run`): H₂ two temperatures + A_V + OPR, a flux table, CO with the optical depth, OH two temperatures, water (Banzatti et al. 2025 lines) |
+| `configs/rotdiag_H2_synthetic.yaml`, `rotdiag_H2_HV_Tau_C.yaml`, `rotdiag_H2_fluxes.yaml`, `rotdiag_CO_FZ_Tau.yaml`, `rotdiag_OH_FZ_Tau.yaml`, `rotdiag_H2O_FZ_Tau.yaml` | rotation-diagram configs (`jalebi rotdiag run`): H₂ two temperatures + A_V + OPR, HV Tau C from the s3d cubes, a flux table, CO with the optical depth, OH two temperatures, water (Banzatti et al. 2025 lines) |
 | `configs/HV_Tau_C_cube_maps.yaml` | the old `cube_maps.py` recipe as a cube config: ±0.1 µm, aspls, 9-channel moment 0, RMS-circle masks, the [Fe II]/[Ne II] ratio, channel slices |
 
 Each one runs as it is: `jalebi fit configs/FZ_Tau_quick.yaml --stages grid,optimise`. For your own

@@ -131,7 +131,7 @@ data and the example scripts.
 
 ```text
 $ jalebi doctor
-JALEBI v0.12.0  JWST Analysis of Line Emission with Bayesian Inference
+JALEBI v0.12.1  JWST Analysis of Line Emission with Bayesian Inference
 Required packages
   ✔ numpy          2.4.6        (>= 1.24)  arrays
   ...
@@ -384,6 +384,27 @@ Things to know:
 - `jalebi model --kind absorption --fc 0.6 --rv -30` writes an absorbed flat continuum and the
   transmission; `examples/11_absorption_fit.py` fits a synthetic CO₂ screen in front of hot CO₂ emission
   and recovers $(\log N, T, v, f_c)$ within 1σ. Full description and validation: [`docs/ABSORPTION.md`](docs/ABSORPTION.md).
+
+### 6b. Vibrational temperature: the 5–8 µm water band is not in LTE
+
+An LTE slab fitted to the pure-rotational water lines over-predicts the ν₂ ro-vibrational band at
+5–8 µm by a factor 3–6 (Banzatti et al. 2025, Pontoppidan et al. 2024): the vibrational levels have critical
+densities ~10¹³ cm⁻³ and are sub-thermal. A component with `Tvib` set uses a two-temperature population,
+Boltzmann at $T$ inside each vibrational state and at $T_\text{vib}$ between states,
+
+$$
+\frac{n_i}{N} = \frac{g_i}{Z(T, T_\text{vib})}\,
+\exp\!\left(-\frac{E_{\text{vib},i}}{T_\text{vib}} - \frac{E_{\text{rot},i}}{T}\right),
+\qquad S_l = \frac{2h\nu^3/c^2}{x_l/x_u - 1},
+$$
+
+with the vibrational energies read from the HITRAN global quanta. Pure-rotational lines are unchanged,
+v = 1–0 lines are weakened through the source function, v = 1–1 hot bands (10–17 µm) through their
+population; `Tvib = T` is LTE. Components can also be restricted to their own wavelength `windows`
+(an `H2O_rovib` slab at 4.9–9.5 µm next to the rotational components), and `fit.line_regions` fits only the
+isolated lines of the Banzatti et al. (2025) lists instead of every pixel — the way the published
+temperatures were derived. Full description, the literature and the CI Tau comparison:
+[`docs/ROVIB_WATER.md`](docs/ROVIB_WATER.md).
 
 ### 7. Derived quantities
 
@@ -692,6 +713,7 @@ the module loads its line list, finds the lines inside the spectrum, measures th
 ln(N_u/g_u) vs E_u. Everything — physics, options, validation — is in [`docs/ROTDIAG.md`](docs/ROTDIAG.md).
 
 ```bash
+jalebi rotdiag fit /data/HV_Tau_C -m H2 --model two --opr species --av-free --mcmc   # s3d cubes, 1" region (default)
 jalebi rotdiag demo                                   # bundled synthetic H2: two temperatures, A_V 10, OPR 2.3
 jalebi rotdiag lines H2 example:FZ_Tau                # the lines (blends, contaminants) that would be used
 jalebi rotdiag fit example:FZ_Tau -m H2 --model two --opr species --av-free --mcmc --compare
@@ -700,6 +722,8 @@ jalebi rotdiag fit --fluxes h2.csv --flux-unit "1e-17 erg s-1 cm-2" -m H2 --mode
 jalebi serve --module rotdiag                         # the Rotation diagram module of the web app
 ```
 
+- **Input**: the s3d cubes summed over a region (the default for a cube folder — the x1d's background annulus
+  turns extended H₂ lines negative), an x1d/CSV spectrum, a cube region from the Cube module, or a flux table.
 - **Molecules**: H₂ (the full Roueff et al. 2019 line list is now bundled, S(0) included, with exact ortho and para
   partition sums), CO (HITEMP), ¹³CO, OH, H₂O (the isolated lines of Banzatti et al. 2025 by default), and any other
   molecule with a line list.
@@ -711,7 +735,7 @@ jalebi serve --module rotdiag                         # the Rotation diagram mod
   integration over windows.
 - **Models**: one temperature, two (warm + hot), or a power law dN ∝ T^−b dT (Neufeld & Yuan 2008); the
   ortho-to-para ratio thermal, free with each spin species in LTE (exact at any T), or the ln(OPR/3) offset (JOYS);
-  A_V with the Gordon et al. (2023) curve by default, four others bundled, or yours (e.g. KP5) as a CSV; optical
+  A_V with the KP5 curve (Pontoppidan et al. 2024) by default, McClure 2009, Hensley & Draine 2023, Gordon et al. 2021/2023 and others bundled, or yours as a CSV; optical
   depth by the curve of growth of a Gaussian slab; normalised to the number of molecules (unresolved disks), an
   emitting radius, an aperture (column density) or intensity.
 - **Fit**: χ² in flux space with a 10 % flux systematic, least squares with many starts, then emcee; corner plots,
@@ -746,7 +770,7 @@ target:
     annulus_arcsec: null        # [r_in, r_out] background annulus
     apcorr: mrs                 # mrs | gaussian | none | x1d
 continuum:
-  method: irsqr                 # irsqr | median_sg | asls | convex_hull | rolling_min | spline | banzatti | none
+  method: irsqr                 # irsqr | median_sg | asls | aspls | convex_hull | rolling_min | spline | banzatti | none
                                 # | given (keep the continuum loaded with the spectrum: CSV 'continuum'/'baseline' column)
   quantile: 0.1                 # irsqr (0.9 = upper envelope, for absorption-dominated spectra)
   knot_spacing: 25              # irsqr, pixels
@@ -755,6 +779,8 @@ continuum:
   sg_window: 51
   sg_order: 2
   n_iter: 5
+  aspls_lam: 5.0e6              # aspls (adaptive smoothness penalty; the cube_maps.py continuum)
+  aspls_alpha: 0.5
   lam: 1000.0                   # asls
   p: 0.01
   segment: 300                  # convex_hull
@@ -786,6 +812,8 @@ components:
     fc: 1.0                     # absorption: covering fraction of the continuum (free, 0-1)
     covers: continuum           # absorption: continuum | all (also absorbs the emission components)
     fwhm_thermal: false         # add the thermal width at T in quadrature to fwhm
+    Tvib: null                  # vibrational temperature (K): set it (e.g. 600) to fit T_vib != T; null = LTE
+    windows: null               # [[lo, hi], ...] µm where this component emits; null = everywhere
     group: null                 # components with the same group share T and area and add opacity
     tie_to: null                # parent component (isotopologues)
     ratio: null                 # parent/child column ratio for tie_to (default per molecule, e.g. 70)
@@ -798,6 +826,7 @@ components:
     eup_max: null               # drop lines above this E_up (K)
     enabled: true
     bounds: {}                  # {logN: [14, 19], T: [300, 1200], logR: [-2, 0]}
+    priors: {}                  # Gaussian priors {T: [800, 150]} on top of the bounds
     fixed: []                   # parameter names held fixed, e.g. [ratio]
 fit:
   windows: [[13.45, 17.5]]      # µm; default [] = the default windows of the listed molecules
@@ -809,6 +838,14 @@ fit:
   fit_noise_scale: false
   use_pipeline_err: false
   window_weights: {}            # {window index: weight}
+  line_regions: []              # fit only curated line regions, e.g. [H2O_v0-0] (Banzatti+2025 lists; see docs/ROVIB_WATER.md)
+  region_pad_um: 0.0            # widen each region (µm)
+  region_weight_beyond: null    # [λ_µm, weight]: weight regions beyond λ, e.g. [20, 5] (Temmink+2025)
+  region_other_molecules: features   # with line_regions: other molecules keep their Q-branch ranges | default windows | none
+  region_feature_pad_um: 0.15
+  tvib_below_trot: true         # prior T_vib <= T for components with Tvib
+  water_split_um: 9.5           # H2O slabs without windows/Tvib emit only beyond this when the fit reaches below it;
+                                # "*rovib*" components only below it (docs/ROVIB_WATER.md); null = off
   oversample: 6                 # fine-grid points per line FWHM
   auto_detect: false
   detect: {threshold: 10, candidates: [], replace_windows: true, keep_undetected: false, oversample: 2}
@@ -1057,6 +1094,8 @@ The test suite (`pytest -q`, about 20 s, offline) checks:
 - every continuum method on a toy spectrum;
 - config round trips and every bundled line list, partition function and example config;
 - the user-cache precedence rules;
+- the vibrational band origins read from HITEMP/HITRAN, `Tvib = T` ⇒ LTE, the thin-limit suppression of
+  v = 1–0 / 1–1 lines, per-component windows in the area solve, the Banzatti line regions;
 - detection of injected species;
 - optimiser recovery of a synthetic CO₂ slab (T within 40 K, log N within 0.25 dex, log R within 0.1 dex);
 - MCMC summaries, the CLI and `jalebi doctor`;

@@ -18,6 +18,23 @@ Absorption components (kind="absorption") are foreground screens with a covering
 i.e. the observed spectrum is F_c * (1 - f_c (1 - e^-tau)) (Li, Boogert & Tielens 2024; the
 `spec_abs` of the group's slabby.py).  Several absorbers multiply their transmissions; with
 covers="all" an absorber also attenuates the emission components behind it.
+
+Vibrational temperature (Component.Tvib)
+----------------------------------------
+LTE slabs fitted to the pure-rotational water lines (12-27 um) over-predict the ro-vibrational
+nu2 band at 5-8 um by factors of 3-6 (Banzatti et al. 2025, AJ 169, 165, Fig. 7; Pontoppidan et
+al. 2024, ApJ 963, 158, Sect. 4.3): the vibrational levels have critical densities ~1e13 cm^-3
+and are sub-thermally excited.  A component with `Tvib` set uses a two-temperature population,
+
+    n_i / N = g_i exp(-E_vib,i / T_vib - E_rot,i / T_rot) / Z(T_rot, T_vib),
+
+Boltzmann at T_rot inside every vibrational state and at T_vib between states (the usual
+"T_vib != T_rot" approximation used for CO and CO2 fundamentals).  Per line the opacity uses
+(x_l - x_u) and the source function S_l = (2 h nu^3 / c^2) / (x_l / x_u - 1); overlapping lines
+on the fine grid are combined with the opacity-weighted source function S(x) = sum_l tau_l S_l /
+sum_l tau_l, so that I = S (1 - e^-tau).  Pure-rotational lines (same vibrational state) are
+unchanged, v=1-0 lines are weakened through S, and hot-band v=1-1 lines through their population;
+Tvib = T_rot gives back LTE exactly.
 """
 from __future__ import annotations
 
@@ -32,10 +49,10 @@ from .instrument import build_lsf_operator, resolving_power
 from .linedata import LineList
 from .molecules import get_molecule
 
-PARAM_NAMES = ("logN", "T", "logR", "rv", "fwhm", "fc")
+PARAM_NAMES = ("logN", "T", "logR", "rv", "fwhm", "fc", "Tvib")
 PARAM_LABELS = {"logN": "log N [cm⁻²]", "T": "T [K]", "logR": "log R [au]", "rv": "v [km/s]",
                 "fwhm": "Δv [km/s]", "logNA": "log(N·A) [cm⁻² au²]", "ratio": "ratio", "q": "q", "p": "p",
-                "fc": "f_c (covering)"}
+                "fc": "f_c (covering)", "Tvib": "T_vib [K]"}
 KINDS = ("slab", "annuli", "absorption")
 
 
@@ -146,21 +163,75 @@ class OpacityBasis:
         self.el = lines.el[self.idx]
         self.lam3_8pi = (lines.wave[self.idx] * 1e-6) ** 3 / (8.0 * np.pi)
         self.partition = lines.partition
+        # 2 h c / lambda^3 per line: the Planck prefactor of the line's own source function
+        self.planck_c1 = 2.0 * H * C / (lines.wave[self.idx] * 1e-6) ** 3
+        self._vib = None            # (E_vib_u, E_vib_l, E_rot_u, E_rot_l, state energies) lazily built
 
-    def kappa(self, T: float) -> np.ndarray:
-        Z = self.partition(T)
-        return self.a * self.gu * self.lam3_8pi * (np.exp(-self.el / T) - np.exp(-self.eu / T)) / Z
+    # ---- vibrational structure ---------------------------------------------------------
+    def _vib_arrays(self):
+        if self._vib is None:
+            vu_all, vl_all = self.lines.vib_arrays()
+            vu, vl = vu_all[self.idx], vl_all[self.idx]
+            known = np.isfinite(vu) & np.isfinite(vl)
+            # unassigned labels: keep the line in LTE (E_vib = 0 for both levels -> only T_rot enters)
+            vu = np.where(known, vu, 0.0); vl = np.where(known, vl, 0.0)
+            states = np.array(sorted(set(self.lines.vib_energies().values())) or [0.0])
+            self._vib = (vu, vl, self.eu - vu, self.el - vl, states)
+        return self._vib
 
-    def tau(self, N_cm2: float, T: float) -> np.ndarray:
+    def zvib(self, T: float) -> float:
+        """Vibrational partition sum over the states present in the line list (ground state = 1)."""
+        states = self._vib_arrays()[4]
+        return float(np.sum(np.exp(-states / T)))
+
+    def populations(self, T: float, Tvib: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """x_u, x_l: Boltzmann factors per unit statistical weight of the upper and lower level,
+        normalised by the partition function.  Tvib=None (or == T) is LTE."""
+        if Tvib is None or Tvib == T:
+            Z = self.partition(T)
+            return np.exp(-self.eu / T) / Z, np.exp(-self.el / T) / Z
+        vu, vl, ru, rl, _ = self._vib_arrays()
+        Z = self.partition(T) * self.zvib(Tvib) / self.zvib(T)
+        return np.exp(-vu / Tvib - ru / T) / Z, np.exp(-vl / Tvib - rl / T) / Z
+
+    def kappa(self, T: float, Tvib: float | None = None) -> np.ndarray:
+        xu, xl = self.populations(T, Tvib)
+        k = self.a * self.gu * self.lam3_8pi * (xl - xu)
+        if Tvib is not None and Tvib != T:
+            # cross-band lines whose upper level lies in a *lower* vibrational state can invert for
+            # T_vib < T_rot (weak masers); a slab model has no use for them: drop them
+            k = np.where(xl > xu * (1.0 + 1e-6), k, 0.0)
+        return k
+
+    def source(self, T: float, Tvib: float | None = None) -> np.ndarray:
+        """Source function of every line, 2 h nu^3 / c^2 / (x_l / x_u - 1)  [W m^-2 Hz^-1 sr^-1].
+        Equals B_nu(T) at the line frequency in LTE.  Inverted lines (dropped from kappa) get 0."""
+        xu, xl = self.populations(T, Tvib)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            ratio = xl / xu
+            S = self.planck_c1 / (ratio - 1.0)
+        return np.where(np.isfinite(S) & (xl > xu * (1.0 + 1e-6)), S, 0.0)
+
+    def tau(self, N_cm2: float, T: float, Tvib: float | None = None) -> np.ndarray:
         """Optical depth on the fine grid for column N (cm^-2)."""
         if self.n_lines == 0:
             return np.zeros(self.grid.n)
-        return (N_cm2 * 1e4) * (self.phi @ self.kappa(T))
+        return (N_cm2 * 1e4) * (self.phi @ self.kappa(T, Tvib))
 
-    def tau_peaks(self, N_cm2: float, T: float) -> np.ndarray:
+    def tau_emissivity(self, N_cm2: float, T: float, Tvib: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """(tau(x), j(x)) on the fine grid with j = sum_l tau_l(x) S_l, so that the opacity-weighted
+        source function is j / tau and I = (j / tau) (1 - e^-tau)."""
+        if self.n_lines == 0:
+            z = np.zeros(self.grid.n)
+            return z, z.copy()
+        k = self.kappa(T, Tvib)
+        n = N_cm2 * 1e4
+        return n * (self.phi @ k), n * (self.phi @ (k * self.source(T, Tvib)))
+
+    def tau_peaks(self, N_cm2: float, T: float, Tvib: float | None = None) -> np.ndarray:
         """Peak optical depth of every line individually (for the tau flag and line pruning)."""
         phi0 = 1.0 / (self.sigma_x * np.sqrt(2 * np.pi)) / C
-        return (N_cm2 * 1e4) * self.kappa(T) * phi0
+        return (N_cm2 * 1e4) * self.kappa(T, Tvib) * phi0
 
 
 # --------------------------------------------------------------------------
@@ -201,6 +272,12 @@ class Component:
     covers: str = "continuum"      # "continuum": screen in front of the continuum only;
                                    # "all": it also absorbs every emission component (two-slab geometry)
     fwhm_thermal: bool = False     # add the thermal width at T in quadrature to fwhm (any kind)
+    # non-LTE vibrational excitation: T_vib (K) of the two-temperature population; None = LTE (T_vib = T)
+    Tvib: float | None = None
+    # wavelength ranges (um) outside which this component contributes nothing, e.g. [[4.9, 9.0]] for a
+    # ro-vibrational water component fitted on the nu2 band only while other components fit 12-27 um
+    # (the separate-region practice of Gasman+2023, Temmink+2024).  None = everywhere.
+    windows: list | None = None
 
     @property
     def is_absorber(self) -> bool:
@@ -212,6 +289,8 @@ class Component:
             d.update({"q": self.q, "p": self.p, "logRin": self.logRin})
         if self.kind == "absorption":
             d["fc"] = self.fc
+        if self.Tvib is not None:
+            d["Tvib"] = self.Tvib
         if self.tie_to:
             d["ratio"] = self.ratio if self.ratio is not None else get_molecule(self.molecule).default_ratio or 70.0
         return d
@@ -219,7 +298,7 @@ class Component:
     def set_params(self, d: dict):
         for k, v in d.items():
             if hasattr(self, k):
-                setattr(self, k, float(v))
+                setattr(self, k, None if v is None else float(v))
 
 
 # --------------------------------------------------------------------------
@@ -268,6 +347,7 @@ class SlabModel:
         self.tau_min_line = tau_min_line
         self.logN_max = logN_max
         self._planck_cache: dict[float, np.ndarray] = {}
+        self._winmask: dict[tuple, np.ndarray] = {}
         # Optional memo of per-unit fluxes keyed on the unit's parameters (used by the interactive
         # app so that moving one slider only re-evaluates that component).  Off by default: the
         # fitter changes every parameter at once, where a cache would only add hashing overhead.
@@ -364,11 +444,34 @@ class SlabModel:
                 P[c.name]["T"] = par["T"]; P[c.name]["logR"] = par["logR"]
                 P[c.name]["rv"] = par["rv"]; P[c.name]["fwhm"] = par["fwhm"]
                 P[c.name]["logN"] = par["logN"] - np.log10(P[c.name].get("ratio", 70.0))
+                if "Tvib" in par:
+                    P[c.name]["Tvib"] = par["Tvib"]
         return P
 
     # ---- intensities per emitting unit ----------------------------------------
+    @staticmethod
+    def _tvib(p: dict):
+        v = p.get("Tvib")
+        return None if v is None or not np.isfinite(v) else float(v)
+
     def _slab_tau(self, c: Component, p: dict) -> np.ndarray:
-        return self.basis(c, self.line_fwhm(c, p)).tau(10.0 ** p["logN"], p["T"])
+        return self.basis(c, self.line_fwhm(c, p)).tau(10.0 ** p["logN"], p["T"], self._tvib(p))
+
+    def _slab_tau_emis(self, c: Component, p: dict) -> tuple[np.ndarray, np.ndarray]:
+        return self.basis(c, self.line_fwhm(c, p)).tau_emissivity(10.0 ** p["logN"], p["T"], self._tvib(p))
+
+    def window_mask(self, c: Component) -> np.ndarray | None:
+        """Pixel mask of a component's own `windows` (None when it emits everywhere)."""
+        if not c.windows:
+            return None
+        key = (c.name, tuple(tuple(map(float, w)) for w in c.windows))
+        m = self._winmask.get(key)
+        if m is None:
+            m = np.zeros(len(self.wave_pix), bool)
+            for a, b in c.windows:
+                m |= (self.wave_pix >= float(a)) & (self.wave_pix <= float(b))
+            self._winmask[key] = m
+        return m
 
     # ---- absorption screens ------------------------------------------------------------
     def absorbers(self) -> list[Component]:
@@ -460,7 +563,7 @@ class SlabModel:
             if self.unit_cache is not None:
                 # the 1-au flux does not depend on logR for slabs (only the annuli R_out does)
                 skip = () if lead.kind == "annuli" else ("logR",)
-                ck = (key, lead.kind, lead.n_annuli, all_key,
+                ck = (key, lead.kind, lead.n_annuli, all_key, None if not lead.windows else tuple(map(tuple, lead.windows)),
                       tuple((c.name, self.linelist_key(c), c.fwhm_thermal, tuple(sorted((k, v) for k, v in P[c.name].items() if k not in skip)))
                             for c in members))
                 hit = self.unit_cache.get(ck)
@@ -471,6 +574,18 @@ class SlabModel:
             if lead.kind == "annuli" and len(members) == 1:
                 I = self._annuli_intensity(lead, p0)
                 tmax = np.nan
+            elif any(self._tvib(P[c.name]) is not None for c in members):
+                # two-temperature (T_rot, T_vib) populations: opacity-weighted source function
+                tau = np.zeros(self.grid.n); emis = np.zeros(self.grid.n)
+                for c in members:
+                    p = P[c.name]
+                    t, j = self._slab_tau_emis(c, {**p, "T": p0["T"], "fwhm": p0["fwhm"], "Tvib": self._tvib(p)})
+                    tau += t; emis += j
+                tmax = float(tau.max()) if tau.size else 0.0
+                # (1 - e^-tau) / tau -> 1 for tau -> 0: I = j * (1 - e^-tau) / tau
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    f = np.where(tau > 1e-8, -np.expm1(-tau) / np.where(tau > 1e-8, tau, 1.0), 1.0)
+                I = emis * f
             else:
                 tau = np.zeros(self.grid.n)
                 for c in members:
@@ -483,6 +598,9 @@ class SlabModel:
             if tr_all is not None:
                 I = I * tr_all
             flux[key] = (self.K @ I) * self._omega_unit / JY     # Jy for R = 1 au
+            wm = self.window_mask(lead)
+            if wm is not None:
+                flux[key] = flux[key] * wm
             taumax[key] = tmax
             logR[key] = p0["logR"]
             if ck is not None:
@@ -512,11 +630,18 @@ class SlabModel:
         rc = np.sqrt(edges[1:] * edges[:-1])
         w = (edges[1:] ** 2 - edges[:-1] ** 2) / r_out**2
         basis = self.basis(c, p["fwhm"])
+        tvib0 = self._tvib(p)                     # T_vib / T_rot is kept constant along the annuli
         I = np.zeros(self.grid.n)
         for r, wi in zip(rc, w):
             T = max(p["T"] * (r / r_in) ** (-p["q"]), 20.0)
             N = 10.0 ** p["logN"] * (r / r_in) ** (-p["p"])
-            I += wi * self.planck(T) * (-np.expm1(-basis.tau(N, T)))
+            if tvib0 is None:
+                I += wi * self.planck(T) * (-np.expm1(-basis.tau(N, T)))
+            else:
+                tau, j = basis.tau_emissivity(N, T, max(tvib0 * T / p["T"], 20.0))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    f = np.where(tau > 1e-8, -np.expm1(-tau) / np.where(tau > 1e-8, tau, 1.0), 1.0)
+                I += wi * j * f
         return I
 
     def evaluate(self, params: dict[str, dict] | None = None, per_unit: bool = False):

@@ -2,16 +2,20 @@
 
     F_obs = F_int · 10^(−0.4 A_V k(λ))    →    ln(N_u/g_u)_obs = ln(N_u/g_u)_int − 0.921 A_V k(λ)
 
-Bundled curves (tabulated from the `dust_extinction` package, Gordon et al. 2024, JOSS 9, 7023):
+Bundled curves:
 
-  G23        Gordon et al. (2023, ApJ 950, 86), Milky Way average, R_V = 3.1 (0.09–32 µm)  [default]
+  KP5        Pontoppidan et al. (2024, RNAAS): dense clouds / protostellar envelopes with ices (JOYS, JDISCS)  [default]
+  KP5_benchmark  the benchmark variant of the same model
+  HD23       Hensley & Draine (2023, ApJ 948, 55) astrodust model
+  McClure09  McClure (2009, ApJS 181, 360), A_K > 1 (and McClure09_low for A_K 0.3–1), A_V/A_K = 7.75
+and, tabulated from the `dust_extinction` package (Gordon et al. 2024, JOSS 9, 7023):
+  G23        Gordon et al. (2023, ApJ 950, 86), Milky Way average, R_V = 3.1 (0.09–32 µm)
   G23_Rv5.5  the same with R_V = 5.5 (dense clouds; flatter NIR, stronger silicate relative to A_V)
   G21        Gordon et al. (2021, ApJ 916, 33), MW average from Spitzer IRS (1–32 µm)
   CT06       Chiar & Tielens (2006, ApJ 637, 774), local ISM (1.24–27 µm)
   F11        Fritz et al. (2011, ApJ 737, 73), Galactic centre from H recombination lines (1.28–19 µm)
 
-Any other curve — e.g. KP5 (Pontoppidan et al. 2024), the dense-cloud curve used by JOYS / JDISCS, or
-McClure (2009) — is read from a CSV of two columns, wavelength [µm] and A_λ/A_V (or A_λ/A_K with
+Any other curve is read from a CSV of two columns, wavelength [µm] and A_λ/A_V (or A_λ/A_K with
 ``normalise="K"``, converted with A_K/A_V of G23), by passing its path as the curve name.
 Outside a curve's range the nearest tabulated value is used (and `ExtinctionCurve.extrapolated` says where).
 """
@@ -26,10 +30,13 @@ import pandas as pd
 
 from .species import DATA_FILES
 
-CURVES = {"G23": "G23_Rv3.1", "G23_Rv3.1": "G23_Rv3.1", "G23_Rv5.5": "G23_Rv5.5", "G21": "G21_MWAvg", "G21_MWAvg": "G21_MWAvg",
-          "CT06": "CT06_MWLoc", "CT06_MWLoc": "CT06_MWLoc", "F11": "F11_MWGC", "F11_MWGC": "F11_MWGC"}
-CURVE_LABELS = {"G23": "Gordon+2023 (R_V 3.1)", "G23_Rv5.5": "Gordon+2023 (R_V 5.5)", "G21": "Gordon+2021 MW avg",
-                "CT06": "Chiar & Tielens 2006 local ISM", "F11": "Fritz+2011 Galactic centre"}
+CURVES = {"KP5": "KP5", "KP5_benchmark": "KP5_benchmark", "G23": "G23_Rv3.1", "G23_Rv3.1": "G23_Rv3.1", "G23_Rv5.5": "G23_Rv5.5",
+          "HD23": "HD23", "McClure09": "McClure09_high", "McClure09_low": "McClure09_low", "McClure09_high": "McClure09_high",
+          "G21": "G21_MWAvg", "G21_MWAvg": "G21_MWAvg", "CT06": "CT06_MWLoc", "CT06_MWLoc": "CT06_MWLoc", "F11": "F11_MWGC", "F11_MWGC": "F11_MWGC"}
+CURVE_LABELS = {"KP5": "KP5 Pontoppidan+2024 (dense cloud, ices)", "KP5_benchmark": "KP5 benchmark variant",
+                "G23": "Gordon+2023 (R_V 3.1)", "G23_Rv5.5": "Gordon+2023 (R_V 5.5)", "HD23": "Hensley & Draine 2023 astrodust",
+                "McClure09": "McClure 2009, A_K > 1 (A_V > 7.75)", "McClure09_low": "McClure 2009, A_K 0.3-1 (A_V 2-7.75)",
+                "G21": "Gordon+2021 MW avg", "CT06": "Chiar & Tielens 2006 local ISM", "F11": "Fritz+2011 Galactic centre"}
 LN10_04 = 0.4 * np.log(10.0)          # 0.921: A_λ [mag] -> natural-log flux decrement
 K_BAND_UM = 2.159
 
@@ -63,7 +70,7 @@ class ExtinctionCurve:
         return 10.0 ** (-0.4 * A_V * self(wave_um))
 
 
-def get_curve(name: str = "G23", normalise: str = "V") -> ExtinctionCurve:
+def get_curve(name: str = "KP5", normalise: str = "V") -> ExtinctionCurve:
     """A bundled curve by name, or a CSV file (wave_um, A_λ/A_V; or A_λ/A_K with normalise='K')."""
     key = CURVES.get(name)
     if key is not None:
@@ -81,9 +88,9 @@ def get_curve(name: str = "G23", normalise: str = "V") -> ExtinctionCurve:
     w = df.iloc[:, 0].to_numpy(float); k = df.iloc[:, 1].to_numpy(float)
     o = np.argsort(w); w, k = w[o], k[o]
     if normalise.upper() == "K":
-        k = k * get_curve("G23").ak_av
+        k = k * get_curve("KP5").ak_av
     return ExtinctionCurve(os.path.basename(path), w, k, source=path)
 
 
 def available_curves() -> dict[str, str]:
-    return {k: CURVE_LABELS[k] for k in ("G23", "G23_Rv5.5", "G21", "CT06", "F11")}
+    return {k: CURVE_LABELS[k] for k in ("KP5", "G23", "HD23", "McClure09", "McClure09_low", "KP5_benchmark", "G23_Rv5.5", "G21", "CT06", "F11")}

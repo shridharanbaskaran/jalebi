@@ -42,7 +42,7 @@ fit:
   opr_free: true
   av: 0.0
   av_free: false
-  extinction: G23
+  extinction: KP5
   opacity: true
   fwhm_kms: 4.7
   fwhm_free: false

@@ -28,14 +28,29 @@ class _M(BaseModel):
 
 
 class SpectrumSource(_M):
+    """Where the spectrum comes from.
+
+    source: s3d  — the IFU cubes (preferred): the flux summed over a region of the sky in every sub-band
+                   (`jalebi.cube.region_spectrum`; no aperture correction, no background annulus, so extended
+                   emission is kept), the region given as offsets from the source: circle (dx, dy, r) by default.
+            x1d  — the pipeline's 1-D extraction (point-source aperture with a background annulus: extended
+                   lines can come out negative — avoid for H2 / jets).
+            csv | fits — a table or FITS spectrum.  auto: s3d when the folder has s3d cubes, else x1d / csv."""
     path: str = ""
-    source: str = "auto"                 # auto | x1d | csv | s3d
+    source: str = "auto"                 # auto | s3d | x1d | csv
     name: Optional[str] = None
     distance_pc: Optional[float] = None
     rv_kms: float = 0.0                  # systemic velocity removed before measuring (the lines' own shift is measured)
-    ra: Optional[Union[float, str]] = None       # s3d aperture extraction
+    # s3d: the region summed (offsets in arcsec from the source position found in the cubes, or ra/dec)
+    region: str = "circle"               # circle | ellipse | annulus | polygon | all (the whole field)
+    dx: float = 0.0
+    dy: float = 0.0
+    radius_arcsec: float = 1.0           # circle radius / ellipse semi-major / annulus outer radius
+    params: list[float] = Field(default_factory=list)   # ellipse: [b, pa]; annulus: [r_in]; polygon: [dx1, dy1, dx2, dy2, ...]
+    ra: Optional[Union[float, str]] = None       # centre instead of the cube's source position
     dec: Optional[Union[float, str]] = None
-    aperture_fwhm_scale: float = 1.5
+    background: Optional[list[float]] = None     # annulus [r_in, r_out] whose median per plane is subtracted
+    aperture_fwhm_scale: float = 1.5             # legacy point-source aperture (source: x1d-like extraction from s3d)
 
 
 class FluxTable(_M):
@@ -51,7 +66,7 @@ class LinesConfig(_M):
     eu_min: Optional[float] = None
     eu_max: Optional[float] = None
     t_ref: Optional[float] = None
-    rel_min: float = 1e-3
+    rel_min: Optional[float] = None      # default: the molecule's preset
     max_features: int = 60
     blend_fwhm: float = 0.5
     member_rel: float = 0.01
@@ -80,7 +95,7 @@ class MeasureSection(_M):
 
 
 class GeometrySection(_M):
-    mode: str = "number"                 # number | radius | aperture | intensity
+    mode: str = "auto"                   # auto (aperture for s3d regions, else number) | number | radius | aperture | intensity
     distance_pc: Optional[float] = None  # default: the spectrum's distance
     R_au: float = 1.0
     aperture_arcsec: float = 0.5
@@ -98,7 +113,7 @@ class FitSection(_M):
     opr_free: bool = True
     av: float = 0.0
     av_free: bool = False
-    extinction: str = "G23"              # G23 | G23_Rv5.5 | G21 | CT06 | F11 | path/to/curve.csv
+    extinction: str = "KP5"              # KP5 | G23 | HD23 | McClure09 | G23_Rv5.5 | G21 | CT06 | F11 | path/to/curve.csv
     opacity: bool = False
     fwhm_kms: float = 10.0
     fwhm_free: bool = False
@@ -164,6 +179,8 @@ EXAMPLES = {
     "h2_fluxes": dict(molecule="H2", target="H2_table", fluxes=dict(path="example:synthetic/rotdiag_H2_fluxes.csv", unit="W m-2"),
                       geometry=dict(mode="number", distance_pc=140.0),
                       fit=dict(model="two", opr="thermal", av_free=True)),
+    "hv_tau_c": dict(molecule="H2", target="HV_Tau_C", spectrum=dict(path="example:HV_Tau_C_cube", source="s3d", radius_arcsec=1.0),
+                     geometry=dict(mode="aperture"), fit=dict(model="two", opr="species", av_free=True, compare=True, also=["powerlaw"])),
     "co": dict(molecule="CO", spectrum=dict(path="example:FZ_Tau"), lines=dict(bands=["1-0"], max_features=30),
                geometry=dict(mode="radius", R_au=0.3), fit=dict(model="single", opacity=True, fwhm_kms=4.7)),
     "oh": dict(molecule="OH", spectrum=dict(path="example:FZ_Tau"), lines=dict(wmin=13.0, max_features=30),

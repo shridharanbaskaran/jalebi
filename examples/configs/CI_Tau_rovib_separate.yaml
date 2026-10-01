@@ -1,0 +1,28 @@
+# JALEBI example: CI Tau, the separate-region practice of Gasman+2023 / Temmink+2024 as one run:
+# an LTE ro-vibrational water slab that emits only at 4.9-9.5 µm, and hot/warm rotational slabs that
+# emit only beyond 9.5 µm (per-component `windows`).  One continuum, one noise model, one MCMC.
+target:
+  name: CI Tau
+  path: /home/dugong/Desktop/Work/YSOs_MIRI_reduced_cube_data_Aug2026/disk_only/V-CI-TAU_jw01640-o005_t005_miri
+  distance_pc: 160
+  rv_kms: 17.7
+  extraction: {source: s3d, ra: 68.466791, dec: 22.8416009, aperture_fwhm_scale: 1.5, apcorr: mrs}
+continuum: {method: irsqr, quantile: 0.1, knot_spacing: 25}
+linedata:
+  releases: {H2O: hitemp, CO: hitemp}
+components:
+  - {name: H2O_rovib, molecule: H2O, logN: 18.3, T: 950, logR: -0.8, windows: [[4.9, 9.5]]}
+  - {name: H2O_hot,   molecule: H2O, logN: 18.3, T: 900, logR: -0.6, windows: [[9.5, 28.5]]}
+  - {name: H2O_warm,  molecule: H2O, logN: 18.2, T: 450, logR: -0.2, windows: [[9.5, 28.5]]}
+  - {name: OH,        molecule: OH,  logN: 16.5, T: 900, logR: -0.3, bounds: {T: [300, 1500]}}
+  - {name: C2H2,      molecule: C2H2, logN: 17.0, T: 500, logR: -0.9}
+  - {name: HCN,       molecule: HCN,  logN: 16.5, T: 500, logR: -0.9}
+  - {name: CO2,       molecule: CO2,  logN: 17.0, T: 500, logR: -0.9}
+  - {name: CO,        molecule: CO,  logN: 18.0, T: 1300, logR: -0.9, windows: [[4.9, 5.7]], bounds: {T: [500, 1500]}}
+fit:
+  windows: [[5.3, 8.0], [12.0, 27.0]]
+  ordering: [[H2O_hot, H2O_warm]]
+  stages: [optimise, mcmc]
+  optimise: {method: de, maxiter: 120, popsize: 10, workers: 4}
+  mcmc: {nsteps: 4000, processes: 4}
+output: results/{target}/rovib_separate

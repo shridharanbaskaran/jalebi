@@ -23,6 +23,7 @@ from .config import RotDiagConfig
 from .features import Selection, find_features, match_table
 from .fit import FitConfig, MCMCConfig, RotFit, compare_models, diagram_points, fit_rotation
 from .measure import MeasureConfig, measure_features
+from .physics import ARCSEC
 
 
 @dataclass
@@ -47,6 +48,48 @@ class RotDiagResult:
 # building blocks (also used by the web app)
 # ------------------------------------------------------------------------------------------------
 
+def _is_cube_folder(path: str) -> bool:
+    import glob
+    return os.path.isdir(path) and bool(glob.glob(os.path.join(path, "*s3d*.fits*")))
+
+
+def region_from_config(s, center_radec):
+    from ..cube import offset_region
+    k = s.region
+    if k == "circle":
+        return offset_region("circle", center_radec, s.dx, s.dy, s.radius_arcsec)
+    if k == "ellipse":
+        b, pa = (s.params + [s.radius_arcsec, 0.0])[:2]
+        return offset_region("ellipse", center_radec, s.dx, s.dy, s.radius_arcsec, b, pa)
+    if k == "annulus":
+        r_in = s.params[0] if s.params else 0.5 * s.radius_arcsec
+        return offset_region("annulus", center_radec, s.dx, s.dy, r_in, s.radius_arcsec)
+    if k == "polygon":
+        return offset_region("polygon", center_radec, *s.params)
+    raise ValueError(f"unknown region kind '{k}' (circle | ellipse | annulus | polygon | all)")
+
+
+def load_cube_spectrum(cfg: RotDiagConfig):
+    """Sum the s3d cubes over the configured region -> Spectrum (Jy) with meta['extraction'] (area, Ω)."""
+    from ..cube import CubeSet, offset_region, region_spectrum
+    from ..data import parse_radec
+    from ..examples import resolve_path
+    s = cfg.spectrum
+    cs = CubeSet(resolve_path(s.path))
+    center = parse_radec(s.ra, s.dec) if (s.ra is not None and s.dec is not None) else cs.source_position()
+    if s.region == "all":
+        reg = offset_region("circle", center, 0.0, 0.0, 30.0)         # larger than any MRS field
+    else:
+        reg = region_from_config(s, center)
+    bg = offset_region("annulus", center, 0.0, 0.0, s.background[0], s.background[1]) if s.background else None
+    name = s.name or f"{cs.name}"
+    spec = region_spectrum(cs, reg, name=name, distance_pc=s.distance_pc or 140.0, background=bg)
+    spec.meta.setdefault("extraction", {})["center_radec"] = [float(center[0]), float(center[1])]
+    if s.rv_kms:
+        spec = spec.to_rest_frame(s.rv_kms)
+    return spec
+
+
 def load_input_spectrum(cfg: RotDiagConfig):
     from ..data import load_spectrum
     from ..examples import resolve_path
@@ -54,16 +97,15 @@ def load_input_spectrum(cfg: RotDiagConfig):
     path = resolve_path(s.path)
     src = s.source
     if src == "auto":
-        src = "csv" if path.lower().endswith((".csv", ".txt", ".dat", ".h5", ".hdf5")) else "x1d"
+        src = "s3d" if _is_cube_folder(path) else ("csv" if path.lower().endswith((".csv", ".gz", ".txt", ".dat", ".h5", ".hdf5")) else "x1d")
+    if src == "s3d":
+        return load_cube_spectrum(cfg)
     kw = {}
     if s.distance_pc:
         kw["distance_pc"] = s.distance_pc
     if s.name:
         kw["name"] = s.name
-    extraction = None
-    if src == "s3d":
-        extraction = dict(ra=s.ra, dec=s.dec, aperture_fwhm_scale=s.aperture_fwhm_scale)
-    spec = load_spectrum(path, source=src, extraction=extraction, **kw)
+    spec = load_spectrum(path, source="x1d" if src == "fits" else src, **kw)
     if s.rv_kms:
         spec = spec.to_rest_frame(s.rv_kms)
     return spec
@@ -85,9 +127,15 @@ def measure_config(cfg: RotDiagConfig) -> MeasureConfig:
                          R_model=cfg.lines.resolving_power)
 
 
-def fit_config(cfg: RotDiagConfig, distance_pc: float) -> FitConfig:
+def fit_config(cfg: RotDiagConfig, distance_pc: float, spec=None) -> FitConfig:
     f = cfg.fit
     geo = cfg.geometry.to_geometry(distance_pc)
+    ex = spec.meta.get("extraction") if (spec is not None and isinstance(spec.meta, dict)) else None
+    area = ex.get("area_arcsec2") if isinstance(ex, dict) else None
+    if geo.mode == "auto":
+        geo.mode = "aperture" if area else "number"
+    if geo.mode == "aperture" and not geo.omega_sr and area:
+        geo.omega_sr = float(area) * ARCSEC ** 2          # the region's solid angle -> beam-averaged column density
     if cfg.measure.flux_unit.lower() != "jy" and geo.mode not in ("intensity",):
         geo.mode = "intensity"
     return FitConfig(model=f.model, opr=f.opr, opr_value=f.opr_value, opr_free=f.opr_free, av=f.av, av_free=f.av_free,
@@ -190,7 +238,7 @@ def run_rotdiag(cfg: RotDiagConfig, spec=None, save: bool = True, progress=None,
         F, stamps = measure_features(spec, F0, M, measure_config(cfg), cfg.molecule)
         dist = cfg.geometry.distance_pc or spec.distance_pc
     F = apply_use(cfg, F)
-    fcfg = fit_config(cfg, dist)
+    fcfg = fit_config(cfg, dist, spec)
     mc = MCMCConfig(cfg.mcmc.walkers, cfg.mcmc.steps, cfg.mcmc.burn, cfg.mcmc.thin, cfg.mcmc.seed) if cfg.mcmc.enabled else None
     fit = None
     try:
@@ -235,7 +283,7 @@ def save_results(res: RotDiagResult, outdir: str | None = None) -> str:
     F.to_csv(os.path.join(outdir, "lines.csv"), index=False)
     res.members.to_csv(os.path.join(outdir, "members.csv"), index=False)
     cfg.save(os.path.join(outdir, "rotdiag_config.yaml"))
-    geo = res.fit.model.geometry if res.fit is not None else cfg.geometry.to_geometry(getattr(res.spec, "distance_pc", 140.0))
+    geo = res.fit.model.geometry if res.fit is not None else fit_config(cfg, getattr(res.spec, "distance_pc", 140.0), res.spec).geometry
     av = res.fit.best.get("Av", 0.0) if res.fit is not None else 0.0
     R = 10 ** res.fit.best.get("logR", 0.0) if res.fit is not None else geo.R_au
     pts = diagram_points(F, geo, av, cfg.fit.extinction, R, cfg.measure.snr_detect)

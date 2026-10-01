@@ -32,7 +32,7 @@ class FitConfig:
     opr_free: bool = True
     av: float = 0.0
     av_free: bool = False
-    extinction: str = "G23"
+    extinction: str = "KP5"
     geometry: Geometry = field(default_factory=Geometry)
     opacity: bool = False
     fwhm_kms: float = 10.0              # intrinsic line FWHM for the optical depth (not the instrumental one)
@@ -485,7 +485,7 @@ def derived_quantities(res: RotFit, max_samples: int = 4000) -> pd.DataFrame:
 # the diagram
 # ------------------------------------------------------------------------------------------------
 
-def diagram_points(features: pd.DataFrame, geometry: Geometry, av: float = 0.0, curve: str = "G23", R_au: float | None = None,
+def diagram_points(features: pd.DataFrame, geometry: Geometry, av: float = 0.0, curve: str = "KP5", R_au: float | None = None,
                    snr_detect: float = 3.0) -> pd.DataFrame:
     """x = E_u [K], y = ln(N_u/g_u) (cm⁻² or molecules) of every feature, de-reddened by `av`; upper limits
     (snr_detect σ) for the non-detections."""

@@ -54,7 +54,8 @@ class Param:
 
 DEFAULT_BOUNDS = {"logN": (13.0, 21.0), "T": (100.0, 1500.0), "logR": (-2.5, 1.5), "logNA": (12.0, 22.0),
                   "rv": (-30.0, 30.0), "fwhm": (2.0, 30.0), "ratio": (10.0, 300.0), "q": (0.0, 1.5),
-                  "p": (-1.0, 3.0), "logRin": (-2.5, 0.5), "log_s": (-1.0, 1.0), "fc": (0.0, 1.0)}
+                  "p": (-1.0, 3.0), "logRin": (-2.5, 0.5), "log_s": (-1.0, 1.0), "fc": (0.0, 1.0),
+                  "Tvib": (100.0, 1500.0)}
 # absorbing screens: colder gas, larger velocities (outflows), higher columns
 ABSORPTION_BOUNDS = {"logN": (13.0, 22.0), "T": (20.0, 1500.0), "rv": (-200.0, 200.0), "fwhm": (1.0, 60.0),
                      "fc": (0.0, 1.0)}
@@ -79,12 +80,14 @@ class FitProblem:
                  free: list[Param], area_param: str = "logR", fit_noise_scale: bool = False,
                  ordering: list[tuple[str, str]] | None = None, window_weights: dict | None = None,
                  oversample: int = 6, linelists=None, releases=None, model_kwargs: dict | None = None,
-                 use_pipeline_err: bool = False):
+                 use_pipeline_err: bool = False, tvib_below_trot: bool = True):
         self.spec = spec
         self.components = components
         self.windows = windows
         self.area_param = area_param
         self.ordering = ordering or []
+        self.tvib_below_trot = tvib_below_trot
+        self._tvib_comps = [c.name for c in components if c.enabled and c.Tvib is not None and not c.tie_to]
         self.fit_noise_scale = fit_noise_scale
         # pixel selection
         used = spec.mask & in_ranges(spec.wave, windows) & np.isfinite(spec.flux)
@@ -175,11 +178,16 @@ class FitProblem:
             if p.gauss is not None:
                 mu, sd = p.gauss
                 lp += -0.5 * ((v - mu) / sd) ** 2
-        if self.ordering:
+        if self.ordering or (self.tvib_below_trot and self._tvib_comps):
             P, _ = self.params_from_theta(theta)
             for hot, cold in self.ordering:
                 if P[hot]["T"] <= P[cold]["T"]:
                     return -np.inf
+            if self.tvib_below_trot:
+                for name in self._tvib_comps:
+                    tv = P[name].get("Tvib")
+                    if tv is not None and tv > P[name]["T"]:
+                        return -np.inf
         return lp
 
     def model_flux(self, theta) -> np.ndarray:
@@ -704,6 +712,8 @@ def default_free_params(components: list[Component], area_param: str = "logR", f
         free.append(Param(c.name, "logN", *b("logN"), init=c.logN))
         if c.kind == "annuli":
             free.append(Param(c.name, "T", *b("T"), init=c.T))
+            if c.Tvib is not None:
+                free.append(Param(c.name, "Tvib", *b("Tvib"), init=c.Tvib))
             free.append(Param(c.name, "q", *b("q"), init=c.q))
             free.append(Param(c.name, "p", *b("p"), init=c.p))
             free.append(Param(c.name, "logRin", *b("logRin"), init=c.logRin))
@@ -712,6 +722,8 @@ def default_free_params(components: list[Component], area_param: str = "logR", f
         lead_of_group = c.group and c.group not in seen_groups
         if not c.group or lead_of_group:
             free.append(Param(c.name, "T", *b("T"), init=c.T))
+            if c.Tvib is not None:
+                free.append(Param(c.name, "Tvib", *b("Tvib"), init=c.Tvib))
             if area_param == "logNA":
                 free.append(Param(c.name, "logNA", *b("logNA"), init=logNA_from(c.logN, c.logR)))
             else:

@@ -31,7 +31,7 @@ class Selection:
     eu_max: float | None = None             # K
     eu_min: float | None = None
     t_ref: float | None = None              # K (None = preset)
-    rel_min: float = 1e-3                   # relative to the strongest feature at t_ref
+    rel_min: float | None = None            # relative to the strongest feature at t_ref (None = the preset's)
     max_features: int = 60
     blend_fwhm: float = 0.5                 # lines closer than this x the instrumental FWHM form one feature
     member_rel: float = 0.01                # weaker lines join a feature's sum if >= this x its strongest line
@@ -145,7 +145,8 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
     insel = np.isin(vb, list(bands)) if bands else np.ones(len(cand), bool)
     if not insel.any():
         return _empty()
-    keep = I >= 1e-6 * I[insel].max()            # thin LTE photon-energy-weighted intensity per column at t_ref
+    rel_min = sp.rel_min if sel.rel_min is None else sel.rel_min
+    keep = I >= 1e-3 * rel_min * I[insel].max()  # thin LTE photon-energy-weighted intensity per column at t_ref
     cand, vb, I, insel = cand[keep].reset_index(drop=True), vb[keep], I[keep], insel[keep]
     Isel = float(I[insel].max())
     w = cand["wave"].to_numpy(); A = cand["a"].to_numpy(); g = cand["gu"].to_numpy(); E = cand["eu"].to_numpy()
@@ -176,7 +177,7 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
                 continue
             groups.append(list(idx)); windows.append((float(lo), float(hi)))
     else:
-        strong = I >= 1e-4 * Isel
+        strong = I >= 0.1 * rel_min * Isel
         order = np.flatnonzero(strong)[np.argsort(w[strong])]
         cur = [order[0]] if len(order) else []
         for a_, b_ in zip(order[:-1], order[1:]):
@@ -218,7 +219,7 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
         return _empty()
     F = pd.DataFrame(rows)
     rel = F["strength"] / F["strength"].max()
-    keep = rel >= sel.rel_min
+    keep = rel >= rel_min
     if sel.include:
         keep |= F["top"].isin(sel.include) | F["label"].isin(sel.include)
     if sel.exclude:
@@ -246,8 +247,11 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
     cat = _contaminant_catalogue(sp.name)
     cw = cat["wave"].to_numpy()
     cont = [", ".join(sorted(set(cat["name"].iloc[np.flatnonzero(np.abs(cw - wf[k]) < fw_f[k])]))) for k in range(len(F))]
+    # a known line of another species closer than half a resolution element cannot be separated: flagged
+    close = [", ".join(sorted(set(cat["name"].iloc[np.flatnonzero(np.abs(cw - wf[k]) < 0.5 * fw_f[k])]))) for k in range(len(F))]
     F["neighbours"] = near
     F["contaminants"] = cont
+    F["blended"] = [c != "" for c in close]
     if cov is not None:
         F["band"] = [next((b for lo, hi, b in sorted(cov, key=lambda c: -min(x - c[0], c[1] - x)) if lo <= x <= hi), "")
                      for x in wf]
@@ -255,7 +259,7 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
         F["band"] = ""
     # blends of the molecule that are not features (other vibrational bands, weaker or dropped lines): the
     # measurement fits them next to a feature when they are strong enough
-    oth = [k for k in range(len(groups)) if k not in chosen and strength[k] >= 1e-3 * Isel]
+    oth = [k for k in range(len(groups)) if k not in chosen and strength[k] >= rel_min * Isel]
     ow = [float(np.sum(I[groups[k]] * w[groups[k]]) / np.sum(I[groups[k]])) for k in oth]
     F.attrs.update(molecule=sp.name, release=ll.release, t_ref=t_ref, source=ll.source,
                    other_wave=ow, other_rel=[float(strength[k] / Isel) for k in oth],
@@ -265,7 +269,7 @@ def find_features(molecule: str, spec=None, sel: Selection | None = None, releas
 
 def _empty():
     cols = ["id", "label", "top", "wave", "eu", "gA", "a", "gu", "n_members", "strength", "spin", "ladder", "band_v",
-            "eu_spread", "xmin", "xmax", "rel_strength", "neighbours", "contaminants", "band"]
+            "eu_spread", "xmin", "xmax", "rel_strength", "neighbours", "contaminants", "blended", "band"]
     return pd.DataFrame(columns=cols), pd.DataFrame(columns=["feature", "wave", "a", "gu", "eu", "el", "label", "spin",
                                                              "ladder", "band_v", "rel"])
 

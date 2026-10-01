@@ -30,7 +30,7 @@ def plot_rotation_diagram(features, geometry, res: RotFit | None = None, ax=None
         fig, axr = ax.figure, None
     av = res.best.get("Av", 0.0) if (res is not None and deredden) else 0.0
     R = 10 ** res.best.get("logR", 0.0) if res is not None else geometry.R_au
-    curve = res.model.curve.name if res is not None else "G23"
+    curve = res.model.curve.name if res is not None else "KP5"
     pts = diagram_points(features, geometry, av, curve, R)
     keys, cols, names = _groups(pts)
     for k in cols:
@@ -206,7 +206,7 @@ def plot_excitation(features, res: RotFit, ax=None, title: str | None = None, mo
         d = mc["o"][-1] - mc["p"][-1]
         sp = features["spin"].astype(str).to_numpy()
         shift = np.where(sp == "o", -np.interp(der["eu"], E, d), 0.0)
-    bands = list(dict.fromkeys(features.get("band_v", features.get("ladder")).astype(str)))
+    bands = sorted(dict.fromkeys(features.get("band_v", features.get("ladder")).astype(str)))     # 0-0 first
     use = der["use"].to_numpy(bool)
     for bi, bnd in enumerate(bands):
         mk, colr = BAND_STYLE[bi % len(BAND_STYLE)]

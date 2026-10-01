@@ -64,7 +64,11 @@ def test_extinction_curves(tmp_path):
     p = tmp_path / "kp5_like.csv"
     pd.DataFrame({"wave": [1.0, 10.0, 30.0], "AlamAK": [5.0, 1.0, 0.5]}).to_csv(p, index=False)
     c = get_curve(str(p), normalise="K")
-    assert c(10.0) == pytest.approx(g.ak_av, rel=1e-6)
+    assert c(10.0) == pytest.approx(get_curve("KP5").ak_av, rel=1e-6)
+    kp = get_curve("KP5")
+    assert 0.15 < kp.ak_av < 0.17 and kp(9.66) > 1.8 * g(9.66)       # ices + large grains: deeper silicate relative to A_V
+    for name in ("HD23", "McClure09", "McClure09_low", "KP5_benchmark"):
+        assert np.isfinite(get_curve(name)(17.0))
     with pytest.raises(ValueError):
         get_curve("no_such_curve")
 
@@ -257,3 +261,37 @@ def test_cube_region_to_rotation_diagram():
     assert a.module == "rotdiag" and rd.src.value == "sent" and rd.geo.value == "aperture" and rd.omega.value > 0
     rd.find()
     assert {"S(1)", "S(2)", "S(3)"} <= set(rd.features["top"])
+
+
+def test_s3d_region_source_and_blend_flags():
+    """The bundled HV Tau C cutouts (5 lines) through the s3d region path: H2 S(1)-S(3) found, measured, aperture Ω set."""
+    from jalebi.rotdiag.pipeline import fit_config, load_input_spectrum
+    cfg = RotDiagConfig(molecule="H2", spectrum=dict(path="example:HV_Tau_C_cube", radius_arcsec=1.0),
+                        lines=dict(bands=["0-0"]), mcmc=dict(enabled=False), plots=False)
+    spec = load_input_spectrum(cfg)                      # source auto -> s3d
+    assert spec.meta["extraction"]["source"] == "s3d-region" and spec.meta["extraction"]["area_arcsec2"] > 3.0
+    F, M = find_features("H2", spec, Selection(bands=["0-0"]))
+    assert {"S(1)", "S(2)", "S(3)"} <= set(F["top"])
+    Fm, _ = measure_features(spec, F, M)
+    d = Fm.set_index("top")
+    assert all(d.loc[k, "snr"] > 20 for k in ("S(1)", "S(2)", "S(3)"))
+    assert (Fm["flux"][Fm["measured"]] > 0).all()        # no "absorption" lines: no background annulus
+    fc = fit_config(cfg, 140.0, spec)
+    assert fc.geometry.mode == "aperture" and fc.geometry.omega_sr > 0
+    assert "blended" in Fm.columns
+
+
+def test_strong_line_refinement_and_core_clipping():
+    """A strong unresolved line narrower than the R(λ) law and offset in velocity is still measured (no core clipping)."""
+    from jalebi.rotdiag.synthetic import make_rotdiag_spectrum
+    geo = Geometry(mode="number", distance_pc=140.0)
+    spec, truth = make_rotdiag_spectrum("H2", "single", dict(logN=51.0, T=700.0), geometry=geo, snr=2000, seed=5,
+                                        v_kms=40.0, width_scale=0.7, bands=("2B", "3A", "3C"))
+    F, M = find_features("H2", spec)
+    Fm, _ = measure_features(spec, F, M)
+    tl = dict(zip(np.round(truth["line_wave"], 5), truth["line_flux"]))
+    det = Fm[Fm["snr"] > 50]
+    assert {"S(1)", "S(2)", "S(3)"} <= set(det["top"])
+    for r in det.itertuples():
+        assert abs(r.flux / tl[round(r.wave, 5)] - 1) < 0.03, (r.label, r.flux, tl[round(r.wave, 5)])
+        assert abs(r.v_kms - 40.0) < 8.0
