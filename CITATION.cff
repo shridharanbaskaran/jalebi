@@ -8,8 +8,8 @@ authors:
     given-names: Shridharan
     email: shridharan.baskaran@tifr.res.in
     affiliation: "Tata Institute of Fundamental Research"
-version: 0.13.0
-date-released: 2026-10-01
+version: 0.14.0
+date-released: 2026-10-05
 license: BSD-3-Clause
 repository-code: "https://github.com/shridharanbaskaran/jalebi"
 keywords:

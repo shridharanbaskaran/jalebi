@@ -218,6 +218,9 @@ def extract_s3d(path: str, center="wcs", center_radec=None, aperture_fwhm_scale:
              Gaussian PSF (underestimates the wings), "none" no correction; "x1d" is handled by
              load_s3d_folder (per-band rescaling to the pipeline x1d level).
     Returns dict(wave, flux, err, band, meta, center_pix, center_radec).
+
+    The photometry itself is `aperture_photometry`, which `extract_cube` also uses on a cube already in
+    memory (`jalebi.cube.Cube`, e.g. the cubes a `jalebi.source.Source` keeps loaded).
     """
     from astropy.io import fits
     from astropy.wcs import WCS
@@ -227,70 +230,110 @@ def extract_s3d(path: str, center="wcs", center_radec=None, aperture_fwhm_scale:
         sci = h["SCI"].data.astype(float); err = h["ERR"].data.astype(float)
         hd = h["SCI"].header; hdr0 = h[0].header
         wcs = WCS(hd)
-        nz, ny, nx = sci.shape
+        nz = sci.shape[0]
         wave = hd["CRVAL3"] + hd["CDELT3"] * (np.arange(nz) + 1 - hd["CRPIX3"])
         pixar_sr = hd.get("PIXAR_SR"); pixscale = abs(hd["CDELT2"]) * 3600.0    # arcsec/pixel
         if pixar_sr is None:
             pixar_sr = (pixscale / 206265.0) ** 2
-        # centre
+        z0 = hd["CRVAL3"]
+        w2p = lambda ra, dec: wcs.all_world2pix(ra, dec, z0, 0)[:2]
+        p2w = lambda x, y: wcs.all_pix2world(x, y, z0, 0)[:2]
+        return aperture_photometry(sci, err, wave, w2p, p2w, pixscale, pixar_sr, hdr0, center=center,
+                                   center_radec=center_radec, aperture_fwhm_scale=aperture_fwhm_scale,
+                                   aperture_arcsec=aperture_arcsec, annulus_arcsec=annulus_arcsec, apcorr=apcorr)
+
+
+def extract_cube(cube, center="wcs", center_radec=None, aperture_fwhm_scale: float = 1.5,
+                 aperture_arcsec: float | None = None, annulus_arcsec: tuple | None = None,
+                 apcorr: str = "mrs") -> dict:
+    """`extract_s3d` on a `jalebi.cube.Cube` that is already in memory (no file is read).  Same options and
+    return value.  The cube's own NaN rules apply (`read_cube(dq_mask=, zero_is_nan=)`), so pixels flagged
+    DO_NOT_USE or exactly zero do not enter the aperture."""
+    hdr0 = cube.primary if cube.primary is not None else {}
+    w2p = lambda ra, dec: cube.world_to_pix(ra, dec)
+    p2w = lambda x, y: cube.pix_to_world(x, y)
+    return aperture_photometry(cube.sci, cube.err, np.asarray(cube.wave, float), w2p, p2w, cube.pixscale, cube.pixar_sr,
+                               hdr0, center=center, center_radec=center_radec, aperture_fwhm_scale=aperture_fwhm_scale,
+                               aperture_arcsec=aperture_arcsec, annulus_arcsec=annulus_arcsec, apcorr=apcorr)
+
+
+def peak_position(img: np.ndarray) -> tuple[float, float]:
+    """Brightest pixel of an image refined by the flux-weighted centroid in a 5x5 box (0-based x, y)."""
+    ny, nx = img.shape
+    iy, ix = np.unravel_index(np.nanargmax(np.where(np.isfinite(img), img, -np.inf)), img.shape)
+    y0, y1, x0, x1 = max(iy - 2, 0), min(iy + 3, ny), max(ix - 2, 0), min(ix + 3, nx)
+    sub = np.nan_to_num(img[y0:y1, x0:x1]); sub = np.clip(sub - np.nanmedian(img), 0, None)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    if sub.sum() > 0:
+        return float((sub * xx).sum() / sub.sum()), float((sub * yy).sum() / sub.sum())
+    return float(ix), float(iy)
+
+
+def aperture_photometry(sci, err, wave, world2pix, pix2world, pixscale: float, pixar_sr: float, hdr0,
+                        center="wcs", center_radec=None, aperture_fwhm_scale: float = 1.5,
+                        aperture_arcsec: float | None = None, annulus_arcsec: tuple | None = None,
+                        apcorr: str = "mrs") -> dict:
+    """The aperture photometry of `extract_s3d` on arrays: sci/err (nz, ny, nx) in MJy/sr, `world2pix(ra, dec)`
+    and `pix2world(x, y)` the cube's celestial transforms (0-based pixels), pixscale in arcsec, pixar_sr the
+    spaxel solid angle, hdr0 the primary header (TARG_RA/TARG_DEC, CHANNEL, BAND)."""
+    import warnings
+    nz, ny, nx = sci.shape
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
         if center_radec is not None:
-            xc, yc, _ = wcs.all_world2pix(center_radec[0], center_radec[1], hd["CRVAL3"], 0)
+            xc, yc = world2pix(center_radec[0], center_radec[1])
         elif isinstance(center, str) and center == "wcs":
-            xc, yc, _ = wcs.all_world2pix(hdr0["TARG_RA"], hdr0["TARG_DEC"], hd["CRVAL3"], 0)
+            xc, yc = world2pix(hdr0["TARG_RA"], hdr0["TARG_DEC"])
         elif isinstance(center, str) and center == "peak":
-            img = np.nanmedian(sci, axis=0)
-            iy, ix = np.unravel_index(np.nanargmax(np.where(np.isfinite(img), img, -np.inf)), img.shape)
-            # refine with the flux-weighted centroid in a 5x5 box
-            y0, y1, x0, x1 = max(iy - 2, 0), min(iy + 3, ny), max(ix - 2, 0), min(ix + 3, nx)
-            sub = np.nan_to_num(img[y0:y1, x0:x1]); sub = np.clip(sub - np.nanmedian(img), 0, None)
-            yy, xx = np.mgrid[y0:y1, x0:x1]
-            xc, yc = (float((sub * xx).sum() / sub.sum()), float((sub * yy).sum() / sub.sum())) if sub.sum() > 0 else (float(ix), float(iy))
+            xc, yc = peak_position(np.nanmedian(sci, axis=0))
         else:
             xc, yc = float(center[0]), float(center[1])
-        ra, dec, _ = wcs.all_pix2world(xc, yc, hd["CRVAL3"], 0)
-        # per-plane aperture
-        fwhm = mrs_psf_fwhm(wave)
-        r_as = np.full(nz, aperture_arcsec) if aperture_arcsec else aperture_fwhm_scale * fwhm
-        r_pix = r_as / pixscale
-        flux = np.full(nz, np.nan); ferr = np.full(nz, np.nan)
-        # cache weights per distinct radius (rounded) to save time
-        cache = {}
-        for k in range(nz):
-            key = round(float(r_pix[k]), 2)
-            if key not in cache:
-                cache[key] = _circular_weights(ny, nx, xc, yc, key)
-            w = cache[key]
-            plane = sci[k]; eplane = err[k]
-            good = np.isfinite(plane)
-            if good.sum() < 5:
-                continue
-            bg = 0.0
-            if annulus_arcsec:
-                wi = _circular_weights(ny, nx, xc, yc, annulus_arcsec[0] / pixscale) if round(annulus_arcsec[0] / pixscale, 2) not in cache else cache[round(annulus_arcsec[0] / pixscale, 2)]
-                wo = _circular_weights(ny, nx, xc, yc, annulus_arcsec[1] / pixscale)
-                ann = (wo - wi) > 0.5
-                if (ann & good).sum() >= 5:
-                    bg = float(np.nanmedian(plane[ann & good]))
-            f = np.nansum(w * np.where(good, plane - bg, 0.0))
-            e = np.sqrt(np.nansum((w * np.where(np.isfinite(eplane), eplane, 0.0)) ** 2))
-            # undefined (NaN) pixels inside the aperture: scale up by the covered fraction
-            cov = np.sum(w * good) / max(np.sum(w), 1e-9)
-            if cov < 0.5:
-                continue
-            flux[k] = f / cov * pixar_sr * 1e6          # MJy/sr * sr -> Jy
-            ferr[k] = e / cov * pixar_sr * 1e6
-        if apcorr == "gaussian":
-            sig = fwhm / 2.3548
-            frac = 1.0 - np.exp(-0.5 * (r_as / sig) ** 2)
-            flux /= frac; ferr /= frac
-        elif apcorr == "mrs":
-            frac = np.interp(r_as / fwhm, MRS_EE_R, MRS_EE)
-            flux /= frac; ferr /= frac
-        ch = str(hdr0.get("CHANNEL", "")).strip(); bd = str(hdr0.get("BAND", "")).strip().lower()
-        band = f"{ch}{_BAND_LETTER[bd]}" if ch and bd in _BAND_LETTER else ""
-        meta = {k: hdr0.get(k) for k in ("TARGNAME", "TARG_RA", "TARG_DEC", "PROGRAM", "CAL_VER", "CRDS_CTX", "DATE-OBS")}
-    return {"wave": wave, "flux": flux, "err": ferr, "band": band, "meta": meta,
-            "center_pix": (float(xc), float(yc)), "center_radec": (float(ra), float(dec)), "pixscale": pixscale}
+        xc, yc = float(xc), float(yc)
+        ra, dec = pix2world(xc, yc)
+    # per-plane aperture
+    fwhm = mrs_psf_fwhm(wave)
+    r_as = np.full(nz, aperture_arcsec) if aperture_arcsec else aperture_fwhm_scale * fwhm
+    r_pix = r_as / pixscale
+    flux = np.full(nz, np.nan); ferr = np.full(nz, np.nan)
+    # cache weights per distinct radius (rounded) to save time
+    cache = {}
+    ann = None
+    if annulus_arcsec:
+        wi = _circular_weights(ny, nx, xc, yc, annulus_arcsec[0] / pixscale)
+        wo = _circular_weights(ny, nx, xc, yc, annulus_arcsec[1] / pixscale)
+        ann = (wo - wi) > 0.5
+    for k in range(nz):
+        key = round(float(r_pix[k]), 2)
+        if key not in cache:
+            cache[key] = _circular_weights(ny, nx, xc, yc, key)
+        w = cache[key]
+        plane = np.asarray(sci[k], float); eplane = np.asarray(err[k], float)
+        good = np.isfinite(plane)
+        if good.sum() < 5:
+            continue
+        bg = 0.0
+        if ann is not None and (ann & good).sum() >= 5:
+            bg = float(np.nanmedian(plane[ann & good]))
+        f = np.nansum(w * np.where(good, plane - bg, 0.0))
+        e = np.sqrt(np.nansum((w * np.where(np.isfinite(eplane), eplane, 0.0)) ** 2))
+        # undefined (NaN) pixels inside the aperture: scale up by the covered fraction
+        cov = np.sum(w * good) / max(np.sum(w), 1e-9)
+        if cov < 0.5:
+            continue
+        flux[k] = f / cov * pixar_sr * 1e6          # MJy/sr * sr -> Jy
+        ferr[k] = e / cov * pixar_sr * 1e6
+    if apcorr == "gaussian":
+        sig = fwhm / 2.3548
+        frac = 1.0 - np.exp(-0.5 * (r_as / sig) ** 2)
+        flux /= frac; ferr /= frac
+    elif apcorr == "mrs":
+        frac = np.interp(r_as / fwhm, MRS_EE_R, MRS_EE)
+        flux /= frac; ferr /= frac
+    ch = str(hdr0.get("CHANNEL", "")).strip(); bd = str(hdr0.get("BAND", "")).strip().lower()
+    band = f"{ch}{_BAND_LETTER[bd]}" if ch and bd in _BAND_LETTER else ""
+    meta = {k: hdr0.get(k) for k in ("TARGNAME", "TARG_RA", "TARG_DEC", "PROGRAM", "CAL_VER", "CRDS_CTX", "DATE-OBS")}
+    return {"wave": np.asarray(wave, float), "flux": flux, "err": ferr, "band": band, "meta": meta,
+            "center_pix": (xc, yc), "center_radec": (float(ra), float(dec)), "pixscale": pixscale}
 
 
 def load_s3d_folder(folder: str, ra, dec, name: str | None = None, distance_pc: float = 140.0,

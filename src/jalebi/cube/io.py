@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import threading
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -360,6 +361,8 @@ class CubeSet:
         self._cache: OrderedDict[str, Cube] = OrderedDict()
         self._ncache = cache
         self._name = name
+        self._lock = threading.RLock()        # the web app reads cubes from worker threads
+        self._loading: dict[str, threading.Event] = {}
 
     # ---- basic facts ------------------------------------------------------------------------
     @property
@@ -404,16 +407,83 @@ class CubeSet:
 
     # ---- data ---------------------------------------------------------------------------------
     def load(self, path: str) -> Cube:
-        if path in self._cache:
-            self._cache.move_to_end(path)
-            return self._cache[path]
-        c = read_cube(path, **self._read_kw)
-        if self._name:
-            c.name = self._name
-        self._cache[path] = c
-        while len(self._cache) > self._ncache:
-            self._cache.popitem(last=False)
-        return c
+        """The cube at `path` (read on first use, then from memory).  Thread-safe: two threads asking for
+        the same cube wait for one read instead of reading it twice."""
+        while True:
+            with self._lock:
+                if path in self._cache:
+                    self._cache.move_to_end(path)
+                    return self._cache[path]
+                ev = self._loading.get(path)
+                if ev is None:
+                    ev = self._loading[path] = threading.Event()
+                    break
+            ev.wait()
+        try:
+            c = read_cube(path, **self._read_kw)
+            if self._name:
+                c.name = self._name
+            with self._lock:
+                self._cache[path] = c
+                while len(self._cache) > self._ncache:
+                    self._cache.popitem(last=False)
+            return c
+        finally:
+            with self._lock:
+                self._loading.pop(path, None)
+            ev.set()
+
+    # ---- memory ------------------------------------------------------------------------------
+    @property
+    def cache_size(self) -> int:
+        return self._ncache
+
+    @cache_size.setter
+    def cache_size(self, n: int):
+        with self._lock:
+            self._ncache = max(int(n), 1)
+            while len(self._cache) > self._ncache:
+                self._cache.popitem(last=False)
+
+    def estimated_bytes(self) -> int:
+        """Memory the SCI + ERR arrays of all cubes take once loaded (float32)."""
+        return int(sum(c.nz * c.ny * c.nx for c in self.info) * 4 * 2)
+
+    def loaded(self) -> list[str]:
+        """Sub-bands whose data are in memory now."""
+        with self._lock:
+            paths = set(self._cache)
+        return [c.band for c in self.info if c.path in paths]
+
+    def preload(self, workers: int = 4, progress=None, stop=None) -> list[str]:
+        """Read every cube into memory in parallel (threads: FITS reading and decompression release the GIL
+        for most of the time).  The cache is grown to hold all cubes.  `progress(done, total, band)` is called
+        after each cube; `stop` (a threading.Event) cancels the cubes not started yet.  Returns the bands read."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        self.cache_size = max(self._ncache, len(self.info))
+        todo = [c for c in self.info if c.path not in self._cache]
+        n_total = len(self.info); n_done = n_total - len(todo)
+        if progress:
+            progress(n_done, n_total, "")
+        done = []
+        if not todo:
+            return done
+
+        def one(ci):
+            if stop is not None and stop.is_set():
+                return None
+            self.load(ci.path)
+            return ci.band
+        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), len(todo)))) as ex:
+            futs = [ex.submit(one, ci) for ci in todo]
+            for f in as_completed(futs):
+                b = f.result()
+                n_done += 1
+                if b is not None:
+                    done.append(b)
+                if progress:
+                    progress(n_done, n_total, b or "")
+        return done
 
     def cube(self, band: str) -> Cube:
         for c in self.info:

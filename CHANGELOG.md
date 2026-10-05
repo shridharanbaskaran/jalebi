@@ -3,6 +3,34 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-10-05 — open a source once: the Source page and `jalebi.source`
+
+### Added
+- **Source page** (web app, new first module `source`): scan a data root, open a target folder once (headers, x1d, all
+  s3d cubes read in parallel threads, source position), see the sub-band coverage, header facts (programme,
+  observation, jwst `CAL_VER`, `CRDS_CTX`) and previews, then launch **LTE slab fit**, **Cube maps** or **Rotation
+  diagram**. The app now starts here (`--module lte|cube|rotdiag`, an LTE tab other than Data, or a config with a
+  target still open the old way). `jalebi serve --source DIR` opens a source on start; the header shows it in every module.
+- **`jalebi.source`**: `Source` (x1d, `aperture_spectrum`, `region_spectrum`, `spectrum("x1d"|"s3d"|"auto")`, `cubes`,
+  `position`, `image`, `coverage`, `summary`), all memoised and returned as copies; `open_source` keeps the last
+  `JALEBI_SOURCE_CACHE` (3) sources of the process, so the web app's sessions (browser refreshes, tabs) share them;
+  `scan_sources`, `get_cubeset`. Per-source settings (distance, RV, RA/Dec, name) in `jalebi_source.yaml` next to the
+  data or `~/.jalebi/sources/`.
+- Modules receive the open source (`use_source(src, distance_pc, rv_kms)`): the Cube module uses its cubes, the
+  Rotation diagram a 1″ circle on them (or the x1d), the LTE fit its x1d or an aperture on the cubes in memory; the
+  LTE *Data* tab moves the old target picker into an *Another spectrum* card.
+- `CubeSet.preload(workers, progress, stop)`, thread-safe `CubeSet.load` (concurrent requests read a cube once),
+  `cache_size`, `estimated_bytes`, `loaded`; cubes above `JALEBI_CUBE_CACHE_MB` (6000) are read on demand.
+- `jalebi.data.extract_cube` / `aperture_photometry` / `peak_position`: the photometry of `extract_s3d` on a cube in
+  memory (`extract_s3d` now calls the same code; outputs identical to 0.13.0 on the bundled cubes).
+- CLI `jalebi source list | info [--preload] | set | spectrum`. `rotdiag.pipeline.load_cube_spectrum(cfg, source=)`
+  and `load_input_spectrum(cfg, source=)`.
+- `docs/SOURCE.md`; `tests/test_source.py` (13 tests).
+
+### Changed
+- The LTE Data tab's cube preview, *header target position*, *brightest pixel* and click-to-set RA/Dec use the cached
+  cube instead of re-reading the FITS file on every change; the Cube module opens cubes through the source cache.
+
 ## [0.13.0] — 2026-10-01 — the 5–8 µm water band: T_vib, per-component windows, curated line regions
 
 ### Added
