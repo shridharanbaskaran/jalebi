@@ -18,6 +18,7 @@ import numpy as np
 import panel as pn
 from bokeh.models import ColumnDataSource
 
+from . import activity as act
 from .app import BAND_COLOURS, PAL, _bokeh_safe, _fig, _html, _panel
 from .data import BAND_ORDER
 
@@ -34,6 +35,7 @@ ANALYSES = [
 ]
 
 
+@act.traced("source", skip=("figures", "apply_theme", "_on_progress", "settings"))
 class SourceWorkspace:
     def __init__(self, app, source_path: str | None = None):
         self.app = app
@@ -135,7 +137,9 @@ class SourceWorkspace:
     def scan(self):
         from .source import scan_sources
         try:
-            found = scan_sources(self.root.value)
+            with act.step(f"scanning {self.root.value} for sources (2 levels deep)", "source") as st:
+                found = scan_sources(self.root.value)
+                st.note(f"{len(found)} found" + (": " + ", ".join(e.label for e in found[:8]) + (" …" if len(found) > 8 else "") if found else ""))
         except Exception as ex:
             self.info.object = f'<div class="sf-note">⚠ scan failed: {ex}</div>'; return
         self.list.options = {e.label: e.path for e in found}
@@ -160,30 +164,41 @@ class SourceWorkspace:
         self._stop.clear()
         res = {"src": None, "error": None, "t": time.time()}
         self._prog.update(done=0, total=0, band="", stage="reading headers")
+        act.info("source", "opening %s (DQ mask %s, SCI = 0 undefined %s, %s, %d readers%s)", path, dq, zero,
+                 "read all cubes now" if pre else "cubes read when needed", nw, ", re-read from disk" if refresh else "")
 
         def work():
+            self._bar = None
             try:
                 src = open_source(path, dq_mask=dq, zero_is_nan=zero, refresh=refresh)
                 _ = src.meta, src.name
+                act.info("source", "%s: %s", src.name, ", ".join(f"{k} {v}" for k, v in src.meta.items()
+                                                                  if k in ("PROGRAM", "OBSERVTN", "DATE-OBS", "CAL_VER", "CRDS_CTX")) or "no header facts")
                 if src.has_1d:
                     self._prog["stage"] = "reading x1d"; src.x1d()
                 if src.has_cubes:
                     self._prog["total"] = len(src.cubes.info)
                     if pre:
                         self._prog["stage"] = "reading cubes"
+                        self._bar = act.Progress(f"reading the cubes of {src.name}", total=len(src.cubes.info), unit="cube", area="source")
                         src.preload(workers=nw, progress=self._on_progress, stop=self._stop)
+                        self._bar.close(f"{len(src.cubes.loaded())}/{len(src.cubes.info)} cubes in memory ({src.memory_mb():.0f} MB)")
                     self._prog["stage"] = "locating the source"
                     src.position(); src.image()
                 res["src"] = src
+                act.info("source", "✓ %s ready in %s · %.0f MB in memory", src.name, act.fmt_time(time.time() - res["t"]), src.memory_mb())
             except Exception as ex:
                 res["error"] = f"{ex}\n{traceback.format_exc(limit=4)}"
+                if self._bar is not None:
+                    self._bar.close("failed", ok=False)
+                act.log("source", "could not open %s: %s", path, ex, level=act.ERROR, exc_info=True)
 
         self.open_btn.disabled = True
         self.progress.visible = True; self.progress.value = 0
         self.info.object = f'<div class="sf-kv">⏳ opening <span class="sf-mono">{path}</span> …</div>'
         if pn.state.curdoc is None:
             work(); self._opened(res); return
-        self._job = threading.Thread(target=work, daemon=True)
+        self._job = threading.Thread(target=act.thread_target(work), daemon=True, name="jalebi-open-source")
         self._job.start()
 
         def poll():
@@ -200,6 +215,11 @@ class SourceWorkspace:
 
     def _on_progress(self, done, total, band):
         self._prog.update(done=done, total=total, band=band)
+        bar = getattr(self, "_bar", None)
+        if bar is not None:
+            bar.update(n=done, total=total, extra=band)
+        if band:
+            act.debug("source", "cube %d/%d in memory: %s", done, total, band)
 
     @_bokeh_safe
     def _opened(self, res):
@@ -337,5 +357,6 @@ class SourceWorkspace:
     def go(self, key: str):
         if self.src is None:
             return
+        act.info("source", "launching %s on %s", dict((k, l) for k, _, l, _, _ in ANALYSES).get(key, key), self.src.name)
         self.app.switch_module(key)
 

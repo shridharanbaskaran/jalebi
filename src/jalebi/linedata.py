@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from . import activity as act
 from .constants import CM1_TO_K
 from .molecules import Molecule, get_molecule
 from .partition import PartitionFunction, partition_for
@@ -400,6 +401,7 @@ def load_linelist(molecule: str | Molecule, release: str = "hitran", path: str |
             raise FileNotFoundError(f"{mol.name} release '{release}' is not cached ({cpath}); only HITRAN can be downloaded — "
                                     f"import other releases from a .par file: jalebi linedata import {mol.name} file.par --release {release}")
         src = "HITRAN download"
+        act.info("linedata", "downloading %s lines from HITRAN (%g–%g µm) …", mol.name, wmin, wmax)
         try:
             df = fetch_hitran(mol, wmin, wmax)
         except Exception as e_astro:
@@ -413,6 +415,7 @@ def load_linelist(molecule: str | Molecule, release: str = "hitran", path: str |
         raise FileNotFoundError(f"No cached line list for {mol.name} ({cpath}) and fetch=False")
     if len(df) == 0:
         raise ValueError(f"Line list for {mol.name} from {src} is empty")
+    act.debug("linedata", "line list %s (%s): %d lines from %s", mol.name, release, len(df), src)
     pf = partition_for(mol, table=Qtab, qtpy_folder=qtpy_folder)
     return LineList(mol, df, pf, source=src, release=release)
 

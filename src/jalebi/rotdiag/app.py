@@ -19,6 +19,7 @@ import pandas as pd
 import panel as pn
 from bokeh.models import ColumnDataSource, HoverTool, Range1d, Span, Whisker
 
+from .. import activity as act
 from ..app import PAL, PLOT_THEMES, _bokeh_safe, _df_html, _fig, _html, _panel, _paper, _theme_fig
 from ..molecules import get_molecule
 from .config import RotDiagConfig
@@ -49,6 +50,8 @@ def _fmt(v, f=".4g"):
         return str(v)
 
 
+@act.traced("rotdiag", skip=("figures", "_build_figures", "apply_theme", "_cfg_bytes", "_lines_bytes", "_fit_bytes", "_colours"),
+            hot=("current_config", "update_code", "_show_physics", "_show_source"))
 class RotDiagWorkspace:
     def __init__(self, app, config_path: str | None = None):
         self.app = app
@@ -448,17 +451,20 @@ class RotDiagWorkspace:
         c["output"] = self.out.value
         return RotDiagConfig.model_validate(c)
 
-    def _start(self, work, done, label, progress=False):
+    def _start(self, work, done, label, progress=False, log_label: str | None = None):
         if self._job is not None and self._job["thread"].is_alive():
             pn.state.notifications.warning("still working on the previous request"); return
         job = {"result": None, "error": None}
+        alog = act.Job(log_label or label, "rotdiag", bar=progress)
 
         def run():
             try:
                 job["result"] = work()
             except Exception as ex:
                 job["error"] = f"{ex}\n{traceback.format_exc(limit=4)}"
-        job["thread"] = threading.Thread(target=run, daemon=True)
+            finally:
+                alog.end_bar(ok=job["error"] is None)
+        job["thread"] = threading.Thread(target=act.thread_target(run), daemon=True, name="jalebi-rotdiag")
         self._job = job
         self._progress = 0.0
         self.progress.visible = progress; self.progress.value = 0
@@ -468,17 +474,20 @@ class RotDiagWorkspace:
         def finish():
             self.progress.visible = False
             if job["error"]:
+                alog.failed(job["error"])
                 msg = job["error"].splitlines()[0]
                 self.info.object = f'<div class="sf-note">⚠ {label} failed: {msg}</div>'
                 if pn.state.curdoc is not None:
                     pn.state.notifications.error(f"{label} failed: {msg}")
                 return False
+            alog.done()
             done(job["result"])
             return True
 
         if pn.state.curdoc is None:           # not served (tests, scripts): run inline
             job["thread"].join()
             if job["error"]:
+                alog.failed(job["error"])
                 raise RuntimeError(job["error"])
             finish()
             return
@@ -487,6 +496,7 @@ class RotDiagWorkspace:
             if job["thread"].is_alive():
                 if progress:
                     self.progress.value = int(100 * self._progress)
+                alog.tick(self._progress if progress else None)
                 return
             self._cb.stop(); self._cb = None
             finish()
@@ -592,7 +602,9 @@ class RotDiagWorkspace:
             self.load()
         if self.spec is None:
             return
-        F, M = find_features(cfg.molecule, self.spec, selection(cfg), release=cfg.release)
+        with act.step(f"finding {cfg.molecule} lines in {self.spec.name} ({cfg.release})", "rotdiag") as st:
+            F, M = find_features(cfg.molecule, self.spec, selection(cfg), release=cfg.release)
+            st.note(f"{len(F)} features, {int((F['n_members'] > 1).sum())} blends")
         F["use"] = True; F["measured"] = False
         for k in ("flux", "flux_err", "snr"):
             F[k] = np.nan
@@ -676,7 +688,10 @@ class RotDiagWorkspace:
                                 " · ".join(f"{k} <b>{_fmt(res.best[k])}</b>" for k in res.free) + "</div>")
             if then:
                 then()
-        self._start(work, done, "MCMC" if mcmc else "fitting", progress=mcmc)
+        act.info("rotdiag", "%s of %s: model %s%s, %d measured lines, distance %g pc%s", "MCMC" if mcmc else "least-squares fit",
+                 cfg.molecule, cfg.fit.model, f" (+ {', '.join(extra)})" if extra else "", int(F["measured"].sum()), self.dist.value,
+                 f", {cfg.mcmc.walkers} walkers × {cfg.mcmc.steps} steps" if mcmc else "")
+        self._start(work, done, "MCMC" if mcmc else "fitting", progress=mcmc, log_label=f"{'MCMC' if mcmc else 'fitting'} {cfg.molecule}")
 
     def run_all(self):
         try:
@@ -719,7 +734,9 @@ class RotDiagWorkspace:
         cfg = self.current_config()
         res = RotDiagResult(cfg, self.spec, self.features, self.members, self.stamps, self.fit, self.comparison,
                             extra_fits=dict(self.fit_extra))
-        out = save_results(res)
+        with act.step("writing the rotation-diagram results", "rotdiag") as st:
+            out = save_results(res)
+            st.note(str(out))
         self.info.object = f'<div class="sf-kv">results written to <span class="sf-mono">{out}</span></div>'
         if pn.state.curdoc is not None:
             pn.state.notifications.success(f"written to {out}")

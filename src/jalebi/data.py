@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from . import activity as act
 from .constants import C
 from .instrument import _BANDS, band_of
 
@@ -116,6 +117,7 @@ class Spectrum:
 def read_x1d(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, dict]:
     """Read one jwst pipeline Level-3 `_x1d.fits` product."""
     from astropy.io import fits
+    act.debug("data", "reading %s (%s)", os.path.basename(path), act.file_size(path))
     with fits.open(path) as h:
         d = h[1].data
         hdr0 = h[0].header
