@@ -7,6 +7,8 @@ or, in a notebook:
 Layout ("observatory" dark theme): a header with the module switcher and live status chips, a slim
 session sidebar (config YAML in/out, cached line lists) and independent *modules* (jalebi.modules):
 
+  Source            open a target folder once (jalebi.source): headers, x1d, all cubes read in parallel into a
+                    process-wide cache; then choose one of the analyses below, which all use the data in memory
   LTE slab fit      Data · Continuum · Model · Fit · Results · Batch
   Cube maps         line / velocity / channel / PV maps of IFU cubes (jalebi.cube); region spectra can be
                     sent to the LTE slab fit or to the rotation diagram
@@ -552,8 +554,12 @@ class JalebiApp:
     TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch"]      # the tabs of the LTE slab-fit module
 
     def __init__(self, data_root: str | None = None, config_path: str | None = None, start_tab: str = "data",
-                 cube_path: str | None = None, start_module: str | None = None, rotdiag_config: str | None = None):
+                 cube_path: str | None = None, start_module: str | None = None, rotdiag_config: str | None = None,
+                 source_path: str | None = None):
         self.cfg = ProjectConfig.load(config_path) if config_path else ProjectConfig()
+        self.source = None                      # the jalebi.source.Source opened on the Source page (shared by all modules)
+        self._source_kw: dict = {}              # distance / RV chosen on the Source page
+        self._lte_source_key = None             # (source key, distance, rv) the LTE fit last loaded
         self._spec: Spectrum | None = None
         self._spec_version = 0
         self._noise_cache: tuple[int, np.ndarray] | None = None
@@ -587,7 +593,8 @@ class JalebiApp:
         self._build_fit_tab()
         self._build_results_tab()
         self._build_batch_tab()
-        self._module_options = {"cube": dict(cube_path=cube_path), "rotdiag": dict(config_path=rotdiag_config)}
+        self._module_options = {"cube": dict(cube_path=cube_path), "rotdiag": dict(config_path=rotdiag_config),
+                                "source": dict(source_path=source_path)}
         self.workspaces: dict[str, object] = {}
         for c in (self.cfg.components or []):
             self.add_component(c, rebuild=False)
@@ -598,7 +605,18 @@ class JalebiApp:
                             sizing_mode="stretch_width", dynamic=False)
         low = [t.lower() for t in self.TAB_NAMES]
         from .modules import resolve_module
-        start = resolve_module(start_module) or resolve_module(start_tab) or "lte"
+        # start on the Source page unless a module / an LTE tab other than Data / a config with a target is asked for
+        st = (start_tab or "").lower()
+        if resolve_module(start_module):
+            start = resolve_module(start_module)
+        elif st in low and st != "data":
+            start = "lte"
+        elif resolve_module(start_tab):
+            start = resolve_module(start_tab)
+        elif self.cfg.target.path:
+            start = "lte"
+        else:
+            start = "source"
         if start == "lte" and start_tab and start_tab.lower() in low:
             self.tabs.active = low.index(start_tab.lower())
         self._build_modules(start)
@@ -612,6 +630,8 @@ class JalebiApp:
                 self.load_target(self.cfg.target.path)
             except Exception as e:
                 self.status.object = f'<div class="sf-kv">⚠ could not load {self.cfg.target.path}: {e}</div>'
+        if source_path:                         # `jalebi serve --source DIR`: open it straight away
+            self.workspace("source").open(source_path)
 
     # ------------------------------------------------------------------ modules
     def _build_modules(self, start: str):
@@ -648,6 +668,12 @@ class JalebiApp:
                 ws.apply_theme(PLOT_THEMES[self.plot_theme])
             for f in (ws.figures() if hasattr(ws, "figures") else []):
                 _theme_fig(f, PLOT_THEMES[self.plot_theme])
+            if self.source is not None and hasattr(ws, "use_source"):
+                try:
+                    ws.use_source(self.source, **self._source_kw)
+                except Exception as ex:
+                    traceback.print_exc()
+                    self._notify("warning", f"{MODULES[key].label}: could not use the source: {ex}")
         return self.workspaces[key]
 
     @property
@@ -668,6 +694,8 @@ class JalebiApp:
             self.module_nav.value = key
         if key == "lte" and tab and tab in self.TAB_NAMES:
             self.tabs.active = self.TAB_NAMES.index(tab)
+        if key == "lte":
+            self._lte_sync_source()
         if ws is not self and hasattr(ws, "on_show"):
             ws.on_show()
         self._refresh_header()
@@ -679,6 +707,79 @@ class JalebiApp:
             return self.use_spectrum(spec, label=label)
         ws = self.switch_module(module)
         ws.use_spectrum(spec, label=label)
+
+    # ------------------------------------------------------------------ the shared source
+    def _notify(self, kind: str, msg: str):
+        if pn.state.curdoc is not None:
+            getattr(pn.state.notifications, kind)(msg)
+
+    def set_source(self, src, distance_pc: float | None = None, rv_kms: float | None = None, force: bool = False):
+        """Make `src` (a jalebi.source.Source) the source of every module.  Modules already built get it now
+        (`use_source`), the others when they are first opened; the LTE fit loads its spectrum when it is shown.
+        Nothing is read from disk again: the source keeps the cubes and spectra in memory."""
+        same = self.source is not None and self.source.key == src.key
+        self.source = src
+        self._source_kw = dict(distance_pc=distance_pc if distance_pc else (src.distance_pc or None),
+                               rv_kms=rv_kms if rv_kms is not None else src.rv_kms)
+        if not same or force:
+            self._lte_source_key = None
+            for k, ws in list(self.workspaces.items()):
+                if ws is self or k == "source" or not hasattr(ws, "use_source"):
+                    continue
+                try:
+                    ws.use_source(src, **self._source_kw)
+                except Exception as ex:
+                    traceback.print_exc()
+                    self._notify("warning", f"{k}: could not use the source: {ex}")
+        self._lte_show_source()
+        if self.spec is None or self.spec.name != src.name:
+            self.status.object = (f'<div class="sf-title" style="font-size:17px">◉ {src.name}</div>'
+                                  f'<div class="sf-kv">{len(src.x1d_bands)} x1d · {len(src.files.s3d)} cubes '
+                                  f'({src.memory_mb():.0f} MB in memory)<br>choose an analysis on the Source page '
+                                  'or in the header</div>')
+        if hasattr(self, "module_tabs") and self.module == "lte":
+            self._lte_sync_source()
+        self._refresh_header()
+
+    def _lte_show_source(self):
+        src = self.source
+        if src is None or not hasattr(self, "source_note"):
+            return
+        self.source_note.object = (f'<div class="sf-kv">◉ <b>{src.name}</b> · <span class="sf-mono">{src.path}</span><br>'
+                                   f'{len(src.x1d_bands)} x1d · {len(src.files.s3d)} cubes in memory-backed cache · '
+                                   'change it on the <b>Source</b> page</div>')
+        opts = {"x1d (pipeline extraction)": "x1d", "s3d cubes (aperture at RA, Dec)": "s3d"}
+        if not src.has_x1d and src.has_table:
+            opts = {"table (CSV)": "x1d"}
+        elif not src.has_x1d:
+            opts = {"s3d cubes (aperture at RA, Dec)": "s3d"}
+        elif not src.has_cubes:
+            opts = {"x1d (pipeline extraction)": "x1d"}
+        self.ex_source.options = opts
+        if self.ex_source.value not in opts.values():
+            self.ex_source.value = list(opts.values())[0]
+        if src.has_cubes and not (self.ex_ra.value.strip() and self.ex_dec.value.strip()):
+            try:
+                ra, dec, _ = src.position()
+                self.ex_ra.value, self.ex_dec.value = f"{ra:.6f}", f"{dec:.6f}"
+            except Exception:
+                pass
+        if self._source_kw.get("distance_pc"):
+            self.distance.value = float(self._source_kw["distance_pc"])
+        if self._source_kw.get("rv_kms") is not None:
+            self.rv.value = float(self._source_kw["rv_kms"])
+        self.other_card.collapsed = True
+
+    def _lte_sync_source(self):
+        """Load the source's spectrum into the LTE fit if it is not the one already there (cheap: from memory)."""
+        src = self.source
+        if src is None:
+            return
+        key = (src.key, self.ex_source.value, self.distance.value, self.rv.value)
+        if self._lte_source_key == key:
+            return
+        self._lte_source_key = key
+        self.load_target(src.path)
 
     # ------------------------------------------------------------------ plot theme
     def _reg(self, kind: str, obj, band: str | None = None):
@@ -811,9 +912,11 @@ class JalebiApp:
 
     def _refresh_header(self, extra: str = ""):
         s = self.spec
-        if hasattr(self, "module_tabs") and self.module != "lte":       # the chips describe the LTE-fit target
+        src = getattr(self, "source", None)
+        src_chip = chip(f"◉ <b>{src.name}</b>", "accent") if src is not None else chip("no source open", "dim")
+        if hasattr(self, "module_tabs") and self.module != "lte":       # the other chips describe the LTE-fit target
             self.header.object = (f'<div style="display:flex;align-items:center;gap:6px;width:100%;">'
-                                  f'<span class="sf-sub" style="margin-right:10px">{_ACRONYM_HTML}</span></div>')
+                                  f'<span class="sf-sub" style="margin-right:10px">{_ACRONYM_HTML}</span>{src_chip}</div>')
             return
         if s is None:
             body = chip("no spectrum loaded", "dim")
@@ -823,6 +926,8 @@ class JalebiApp:
                 self._hdr_cache = (key, chip(f"<b>{s.name}</b>", "accent") + chip(f"{len(s.wave)} px · {len(s.bands)} bands") +
                                    chip(f"d {s.distance_pc:g} pc · RV {s.rv_kms:g}"))
             body = self._hdr_cache[1]
+        if src is not None and (s is None or src.name != s.name):
+            body = src_chip + body
         if self._last_chi2:
             body += self._last_chi2
         if self._worker is not None and self._worker.is_alive():
@@ -833,7 +938,8 @@ class JalebiApp:
 
     # ------------------------------------------------------------------ sidebar
     def _build_sidebar(self):
-        self.status = _html('<div class="sf-kv">No spectrum loaded.<br>Pick a target in <b>Data</b>.</div>', sizing_mode="stretch_width")
+        self.status = _html('<div class="sf-kv">No source open.<br>Open one on the <b>◉ Source</b> page: it is read once and '
+                            'shared by every analysis.</div>', sizing_mode="stretch_width")
         self.cfg_download = pn.widgets.FileDownload(callback=self._config_bytes, filename="jalebi_config.yaml",
                                                     button_type="primary", label="⬇ Export config YAML", sizing_mode="stretch_width")
         self.cfg_upload = pn.widgets.FileInput(accept=".yaml,.yml", sizing_mode="stretch_width")
@@ -945,10 +1051,20 @@ class JalebiApp:
         r = self.data_fig.scatter("w", "y", source=self.lineid_src, marker="inverted_triangle", size=7, color=PAL.pink, alpha=0.8)
         self.data_fig.add_tools(HoverTool(renderers=[r], tooltips=[("species", "@species"), ("λ", "@lam{0.0000} µm"), ("E_up", "@eu{0} K"), ("A_ul", "@a{0.000}")]))
         self.data_info = _html("", sizing_mode="stretch_width")
-        source_panel = _panel(
+        self.source_note = _html('<div class="sf-note">No source open: open one on the <b>Source</b> page (it is read once and '
+                                 'shared with Cube maps and Rotation diagram), or load another spectrum below.</div>', sizing_mode="stretch_width")
+        self.reload_btn = pn.widgets.Button(name="Use source spectrum", button_type="primary", width=170, margin=(22, 5, 5, 5))
+        self.reload_btn.on_click(lambda e: self.load_target(self.source.path) if self.source is not None else None)
+        self.other_card = pn.Card(
             pn.Row(self.root_input, self.scan_btn, sizing_mode="stretch_width"),
-            pn.Row(self.target_select, self.distance, self.rv, self.spike, self.load_btn, sizing_mode="stretch_width"),
+            pn.Row(self.target_select, self.load_btn, sizing_mode="stretch_width"),
             pn.Row(_html('<div class="sf-note" style="margin-top:8px">…or upload a CSV (wave, flux, err) / x1d FITS</div>'), self.upload),
+            title="Another spectrum (does not change the source)", collapsed=False, sizing_mode="stretch_width",
+            header_background=PAL.panel2, styles={"margin-top": "8px"})
+        source_panel = _panel(
+            self.source_note,
+            pn.Row(self.distance, self.rv, self.spike, self.reload_btn, sizing_mode="stretch_width"),
+            self.other_card,
             title="Target")
         extraction_panel = _panel(self.ex_source, self.ex_box, title="Extraction")
         self.data_tab = pn.Column(
@@ -993,64 +1109,90 @@ class JalebiApp:
                                 aperture_fwhm_scale=self.ex_scale.value, aperture_arcsec=self.ex_arcsec.value or None,
                                 annulus_arcsec=ann, apcorr=self.ex_apcorr.value)
 
-    def _cube_file(self):
+    def _preview_path(self):
+        """Folder whose cubes the Data tab previews: the open source, else the selected target."""
         from .examples import resolve_path
+        if self.source is not None and self.source.has_cubes and (self.target_select.value in (None, "", self.source.path)
+                                                                  or self.other_card.collapsed):
+            return self.source.path
         path = resolve_path(self.target_select.value or self.cfg.target.path)
-        if not path or not os.path.isdir(path):
+        return path if path and os.path.isdir(path) else None
+
+    def _preview_cube(self):
+        """The cube of the preview band, from the process-wide source cache (read once, kept in memory)."""
+        path = self._preview_path()
+        if path is None:
             return None
-        band = self.ex_band.value
-        tag = f"ch{band[0]}-{ {'A': 'short', 'B': 'medium', 'C': 'long'}[band[1]] }"
-        files = [f for f in glob.glob(os.path.join(path, "*s3d.fits")) if tag in f]
-        return files[0] if files else None
+        from .source import open_source
+        try:
+            src = self.source if (self.source is not None and self.source.path == path) else open_source(path)
+            if not src.has_cubes:
+                return None
+            band = self.ex_band.value
+            cs = src.cubes
+            if band in cs.bands:
+                return cs.cube(band)
+            return cs.load(cs.info[0].path)
+        except Exception:
+            return None
+
+    def _cube_file(self):
+        c = self._preview_cube()
+        return c.path if c is not None else None
 
     def _fill_radec(self, which: str):
         """Fill the RA/Dec boxes from the cube header target position or the brightest pixel."""
-        f = self._cube_file()
-        if f is None:
-            pn.state.notifications.warning("no s3d cube found for this target/band"); return
-        from jalebi.data import extract_s3d
-        r = extract_s3d(f, center="wcs" if which == "header" else "peak", apcorr="none")
-        self.ex_ra.value = f"{r['center_radec'][0]:.6f}"; self.ex_dec.value = f"{r['center_radec'][1]:.6f}"
+        c = self._preview_cube()
+        if c is None:
+            self._notify("warning", "no s3d cube found for this target/band"); return
+        from .data import peak_position
+        if which == "header":
+            rd = c.target_radec
+            if rd is None:
+                self._notify("warning", "the cube header has no TARG_RA/TARG_DEC"); return
+            ra, dec = rd
+        else:
+            x, y = peak_position(c.image())
+            ra, dec = c.pix_to_world(x, y)
+        self.ex_ra.value = f"{float(ra):.6f}"; self.ex_dec.value = f"{float(dec):.6f}"
 
     @_bokeh_safe
     def _show_cube(self):
-        """Median-collapsed image of the preview cube with the aperture at the given RA/Dec."""
+        """Median-collapsed image of the preview cube with the aperture at the given RA/Dec (from memory)."""
         self.cube_pane.visible = self.ex_source.value == "s3d"
-        f = self._cube_file()
-        if self.ex_source.value != "s3d" or f is None:
+        if self.ex_source.value != "s3d":
+            return
+        c = self._preview_cube()
+        if c is None:
             return
         try:
-            from astropy.io import fits
-            from jalebi.data import extract_s3d, parse_radec
-            with fits.open(f) as h:
-                sci = h["SCI"].data; hd = h["SCI"].header
-            img = np.nanmedian(sci, axis=0)
+            from jalebi.data import parse_radec
+            img = c.image()
             img = np.where(np.isfinite(img), img, np.nanmin(img))
             lo, hi = np.nanpercentile(img, 5), np.nanpercentile(img, 99.7)
             img = np.log10(np.clip(img - lo, 1e-3 * max(hi - lo, 1e-9), None))   # log stretch shows faint companions
             self.cube_src.data = dict(image=[img], x=[-0.5], y=[-0.5], dw=[img.shape[1]], dh=[img.shape[0]])
             ex = self.extraction_config()
+            name = os.path.basename(c.path)
             if ex.ra is None or ex.dec is None:
                 self.cube_mark.data = dict(x=[], y=[], r=[])
-                self.cube_fig.title.text = f"{os.path.basename(f)}: enter RA/Dec (or tap the source)"; return
+                self.cube_fig.title.text = f"{name}: enter RA/Dec (or tap the source)"; return
             radec = parse_radec(ex.ra, ex.dec)
-            r = extract_s3d(f, center_radec=radec, aperture_fwhm_scale=ex.aperture_fwhm_scale, aperture_arcsec=ex.aperture_arcsec, apcorr="none")
-            xc, yc = r["center_pix"]
-            lam = hd["CRVAL3"] + hd["CDELT3"] * (sci.shape[0] / 2)
-            rad = (ex.aperture_arcsec or ex.aperture_fwhm_scale * float(mrs_psf_fwhm(lam))) / r["pixscale"]
+            xc, yc = (float(v) for v in c.world_to_pix(*radec))
+            lam = float(c.wave[len(c.wave) // 2])
+            rad = (ex.aperture_arcsec or ex.aperture_fwhm_scale * float(mrs_psf_fwhm(lam))) / c.pixscale
             self.cube_mark.data = dict(x=[xc], y=[yc], r=[rad])
-            self.cube_fig.title.text = f"{os.path.basename(f)}: RA {radec[0]:.5f} Dec {radec[1]:.5f} -> px ({xc:.1f}, {yc:.1f}), r = {rad:.1f} px at {lam:.1f} µm"
+            self.cube_fig.title.text = f"{name}: RA {radec[0]:.5f} Dec {radec[1]:.5f} -> px ({xc:.1f}, {yc:.1f}), r = {rad:.1f} px at {lam:.1f} µm"
         except Exception as ex_:
             self.cube_fig.title.text = f"cube preview failed: {ex_}"
 
     def _tap_cube(self, event):
         """A tap on the image converts the pixel to RA/Dec through the cube's WCS and fills the boxes."""
-        f = self._cube_file()
-        if f is None:
+        c = self._preview_cube()
+        if c is None:
             return
-        from jalebi.data import extract_s3d
-        r = extract_s3d(f, center=(float(event.x), float(event.y)), apcorr="none")
-        self.ex_ra.value = f"{r['center_radec'][0]:.6f}"; self.ex_dec.value = f"{r['center_radec'][1]:.6f}"
+        ra, dec = c.pix_to_world(float(event.x), float(event.y))
+        self.ex_ra.value = f"{float(ra):.6f}"; self.ex_dec.value = f"{float(dec):.6f}"
 
     @_bokeh_safe
     def load_target(self, path: str):
@@ -1058,15 +1200,23 @@ class JalebiApp:
             return
         t0 = time.time()
         ex = self.extraction_config()
+        if ex.source == "s3d" and (ex.ra is None or ex.dec is None) and self.source is not None and self.source.has_cubes:
+            ra, dec, _ = self.source.position()
+            self.ex_ra.value, self.ex_dec.value = f"{ra:.6f}", f"{dec:.6f}"
+            ex = self.extraction_config()
         if ex.source == "s3d" and (ex.ra is None or ex.dec is None):
             pn.state.notifications.warning("s3d extraction needs RA and Dec: type them, use 'header target position', or tap the source in the cube image")
             self._show_cube(); return
         ext = {"ra": ex.ra, "dec": ex.dec, "aperture_fwhm_scale": ex.aperture_fwhm_scale, "aperture_arcsec": ex.aperture_arcsec,
                "annulus_arcsec": tuple(ex.annulus_arcsec) if ex.annulus_arcsec else None, "apcorr": ex.apcorr}
         try:
-            spec = load_spectrum(path, source=ex.source, extraction=ext, distance_pc=self.distance.value)
+            src = self.source if (self.source is not None and os.path.abspath(path) == os.path.abspath(self.source.path)) else None
+            if src is not None:                 # from memory: the source read these files once
+                spec = src.spectrum("x1d" if ex.source == "x1d" else "s3d", extraction=ext, distance_pc=self.distance.value)
+            else:
+                spec = load_spectrum(path, source=ex.source, extraction=ext, distance_pc=self.distance.value)
         except Exception as e:
-            pn.state.notifications.error(f"load failed: {e}"); return
+            self._notify("error", f"load failed: {e}"); return
         self.cfg.target.extraction = ex
         self._show_cube()
         self._set_spectrum(spec, path, t0)
@@ -2147,10 +2297,10 @@ class JalebiApp:
 
 
 def make_app(data_root: str | None = None, config_path: str | None = None, start_tab: str = "data", cube_path: str | None = None,
-             start_module: str | None = None, rotdiag_config: str | None = None):
+             start_module: str | None = None, rotdiag_config: str | None = None, source_path: str | None = None):
     return JalebiApp(data_root=data_root, config_path=config_path, start_tab=start_tab, cube_path=cube_path,
-                     start_module=start_module, rotdiag_config=rotdiag_config).servable()
+                     start_module=start_module, rotdiag_config=rotdiag_config, source_path=source_path).servable()
 
 
 if __name__.startswith("bokeh"):
-    make_app(data_root=os.environ.get("JALEBI_DATA_ROOT")).servable()
+    make_app(data_root=os.environ.get("JALEBI_DATA_ROOT"), source_path=os.environ.get("JALEBI_SOURCE")).servable()

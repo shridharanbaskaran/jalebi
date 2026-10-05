@@ -319,10 +319,11 @@ class CubeWorkspace:
     # ------------------------------------------------------------------ actions
     @_bokeh_safe
     def open(self):
-        from .io import CubeSet
+        from ..source import open_source
         rk = self._read_kw()
         new_target = self._opened is None or self._opened[0] != self.path.value
-        self.cs = CubeSet(self.path.value, **rk)
+        src = open_source(self.path.value, **rk)       # process-wide cache: the cubes are read from disk once
+        self.cs = src.cubes
         self._opened = (self.path.value, rk["dq_mask"], rk["zero_is_nan"])
         if new_target:                       # maps, ratio and PV of another target must not be mixed with this one
             self.lm = None; self.lc = None; self.ratio = None; self.ratio_of = None; self.pvd = None; self.made = None
@@ -339,13 +340,27 @@ class CubeWorkspace:
         self.ratio_line.options = singles
         if singles:
             self.ratio_line.value = keep_r if keep_r in singles else next((o for o in singles if "Ne II" in o), singles[-1])
-        c0 = self.cs.load(self.cs.info[0].path)
-        ra, dec, _, _ = c0.find_source()
+        ra, dec, _ = src.position()
         self.center = (ra, dec)
         self.info.object = (f'<div class="sf-kv"><b>{self.cs.name}</b> · {len(self.cs.info)} cubes '
                             f'({", ".join(self.cs.bands)}) · source RA {ra:.6f} Dec {dec:.6f} · '
                             f'{len(cov)} catalogue lines covered</div>')
         self.update_code()
+
+    def use_source(self, src, distance_pc: float | None = None, rv_kms: float | None = None):
+        """The source opened on the Source page: its cubes (already in memory) become this module's cubes."""
+        if distance_pc:
+            self.dist.value = float(distance_pc)
+        if rv_kms is not None:
+            self.rv.value = float(rv_kms)
+        if not src.has_cubes:
+            self.info.object = (f'<div class="sf-note">◉ {src.name} has no s3d cubes: type a cube folder above, '
+                                'or open a source with cubes on the Source page.</div>')
+            return
+        self.dq.value = bool(src.read_kw["dq_mask"])
+        self.classic.value = not src.read_kw["zero_is_nan"]
+        self.path.value = src.path
+        self.open()
 
     def _start(self, work, done, label):
         if self._job is not None and self._job["thread"].is_alive():

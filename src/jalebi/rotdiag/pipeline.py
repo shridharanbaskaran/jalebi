@@ -69,37 +69,55 @@ def region_from_config(s, center_radec):
     raise ValueError(f"unknown region kind '{k}' (circle | ellipse | annulus | polygon | all)")
 
 
-def load_cube_spectrum(cfg: RotDiagConfig):
-    """Sum the s3d cubes over the configured region -> Spectrum (Jy) with meta['extraction'] (area, Ω)."""
+def load_cube_spectrum(cfg: RotDiagConfig, source=None):
+    """Sum the s3d cubes over the configured region -> Spectrum (Jy) with meta['extraction'] (area, Ω).
+    `source`: a jalebi.source.Source whose cubes are already in memory (the web app passes the open source);
+    its position is used when the config gives no RA/Dec, and the region spectrum is memoised there."""
     from ..cube import CubeSet, offset_region, region_spectrum
     from ..data import parse_radec
     from ..examples import resolve_path
     s = cfg.spectrum
-    cs = CubeSet(resolve_path(s.path))
-    center = parse_radec(s.ra, s.dec) if (s.ra is not None and s.dec is not None) else cs.source_position()
+    cs = source.cubes if source is not None else CubeSet(resolve_path(s.path))
+    if s.ra is not None and s.dec is not None:
+        center = parse_radec(s.ra, s.dec)
+    elif source is not None:
+        center = source.position()[:2]
+    else:
+        center = cs.source_position()
     if s.region == "all":
         reg = offset_region("circle", center, 0.0, 0.0, 30.0)         # larger than any MRS field
     else:
         reg = region_from_config(s, center)
     bg = offset_region("annulus", center, 0.0, 0.0, s.background[0], s.background[1]) if s.background else None
     name = s.name or f"{cs.name}"
-    spec = region_spectrum(cs, reg, name=name, distance_pc=s.distance_pc or 140.0, background=bg)
+    if source is not None:
+        spec = source.region_spectrum(reg, background=bg, distance_pc=s.distance_pc or 140.0, name=name)
+    else:
+        spec = region_spectrum(cs, reg, name=name, distance_pc=s.distance_pc or 140.0, background=bg)
     spec.meta.setdefault("extraction", {})["center_radec"] = [float(center[0]), float(center[1])]
     if s.rv_kms:
         spec = spec.to_rest_frame(s.rv_kms)
     return spec
 
 
-def load_input_spectrum(cfg: RotDiagConfig):
+def load_input_spectrum(cfg: RotDiagConfig, source=None):
+    """The spectrum of the config.  `source` (a jalebi.source.Source at the same path) serves it from memory."""
     from ..data import load_spectrum
     from ..examples import resolve_path
     s = cfg.spectrum
     path = resolve_path(s.path)
+    if source is not None and os.path.abspath(resolve_path(source.path)) != os.path.abspath(path):
+        source = None
     src = s.source
     if src == "auto":
         src = "s3d" if _is_cube_folder(path) else ("csv" if path.lower().endswith((".csv", ".gz", ".txt", ".dat", ".h5", ".hdf5")) else "x1d")
     if src == "s3d":
-        return load_cube_spectrum(cfg)
+        return load_cube_spectrum(cfg, source=source)
+    if source is not None and source.has_1d:
+        spec = source.x1d(distance_pc=s.distance_pc or None)
+        if s.name:
+            spec.name = s.name
+        return spec.to_rest_frame(s.rv_kms) if s.rv_kms else spec
     kw = {}
     if s.distance_pc:
         kw["distance_pc"] = s.distance_pc

@@ -505,17 +505,43 @@ class RotDiagWorkspace:
             self._set_spectrum(self.app.spec.copy(), "LTE-fit target")
         elif s == "file":
             cfg = self.current_config()
-            spec = load_input_spectrum(cfg)
+            spec = load_input_spectrum(cfg, source=getattr(self.app, "source", None))
             self._set_spectrum(spec, self.path.value)
         elif s == "s3d":
+            from ..source import open_source
             cfg = self.current_config()
-            spec = load_input_spectrum(cfg)
+            src = getattr(self.app, "source", None)
+            from ..examples import resolve_path
+            import os
+            if src is None or os.path.abspath(resolve_path(src.path)) != os.path.abspath(resolve_path(self.cube_path.value)):
+                src = open_source(self.cube_path.value)        # cached per process: cubes read once
+            spec = load_input_spectrum(cfg, source=src)
             ex = spec.meta.get("extraction", {})
             self.geo.value = "aperture"
             self.omega.value = float(ex.get("area_arcsec2", 0.0)) * ARCSEC ** 2
             self._set_spectrum(spec, f"{self.reg_kind.value} region of the cubes, {ex.get('area_arcsec2', 0):.2f} arcsec²")
         elif s == "sent" and self.sent_spec is not None:
             self._set_spectrum(self.sent_spec, "sent spectrum")
+
+    def use_source(self, src, distance_pc: float | None = None, rv_kms: float | None = None):
+        """The source opened on the Source page: a 1″ circle on its cubes (from memory), or its x1d / table."""
+        if distance_pc:
+            self.dist.value = float(distance_pc)
+        if rv_kms is not None:
+            self.rv.value = float(rv_kms)
+        if src.has_cubes:
+            self.cube_path.value = src.path
+            self.src.value = "s3d"
+        elif src.has_1d:
+            self.path.value = src.path
+            self.src.value = "file"
+        else:
+            return
+        self._shown = True                    # on_show must not load the bundled example over the source
+        try:
+            self.load()
+        except Exception as ex:
+            self.info.object = f'<div class="sf-note">⚠ could not use {src.name}: {ex}</div>'
 
     def use_spectrum(self, spec, label: str | None = None):
         """A spectrum sent from another module (e.g. a Cube region)."""

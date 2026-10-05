@@ -873,7 +873,9 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
 | `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
-| `jalebi serve [--port 5006] [--data-root DIR] [--config FILE] [--show] [--module lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app, opened on a module (and a tab of the LTE slab fit) |
+| `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
+| `jalebi source list ROOT` · `jalebi source info PATH [--preload --workers N]` | target folders under a data root; what one contains (sub-bands, header facts, position; cube read time) |
+| `jalebi source set PATH [--distance] [--rv] [--ra --dec] [--name]` · `jalebi source spectrum PATH OUT.csv [--source x1d\|s3d]` | remember per-source settings (`jalebi_source.yaml`); write the 1-D spectrum the slab fit uses |
 | `jalebi cube info PATH` · `jalebi cube lines [PATH]` | cubes, bands, source position; the line catalogue (and what PATH covers) |
 | `jalebi cube maps PATH -l LINE … [--zero-point star] [--no-psf] [--n-mc N] [--rv] [--distance] [--out DIR]` | moment, extended-emission and centroid-velocity maps (FITS + PNG) |
 | `jalebi cube stack PATH -l LINE -l LINE … [--name H2]` | stack lines of one species in velocity space and map it |
@@ -896,18 +898,30 @@ R_constant: null                # a constant resolving power instead of R_model
 
 ## The web app
 
-`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh). The switcher in the header opens one of
-three **modules**, each with its own workflow: **LTE slab fit** (the six tabs below), **Cube maps** and **Rotation
-diagram** (`jalebi serve --module cube|rotdiag` opens it directly; modules are built when first opened). A cube
-region can be sent to the LTE slab fit or to the rotation diagram. Every setting maps onto a YAML config (the LTE
-fit's in the sidebar, the cube's and the rotation diagram's in their own panels). New modules plug in through
-`jalebi.modules.register_module`.
+`jalebi serve --show` opens a dark "observatory" interface (Panel + Bokeh). It starts on the **Source** page:
+
+1. **Find a source** — *Scan* a data root (e.g. `YSOs_MIRI_reduced_cube_data_Aug2026/disk_only`) and pick a target folder.
+2. **Open it once** — headers, the x1d spectrum and (optionally) *all* s3d cubes are read, the cubes in parallel threads;
+   the source position is found in the cubes. Distance, RV and position can be remembered per source
+   (`jalebi_source.yaml` next to the data).
+3. **Choose the analysis** — **LTE slab fit**, **Cube maps** or **Rotation diagram**. All three use the data already in
+   memory: the slab fit gets the x1d (or an aperture on the cubes), the cube maps get the cubes, the rotation diagram a 1″
+   region of the cubes. Switching between them, or opening the app in another browser tab, reads nothing again
+   (`jalebi.source` keeps the last `JALEBI_SOURCE_CACHE`=3 sources of the server process; cubes up to
+   `JALEBI_CUBE_CACHE_MB`=6000 MB are held in memory). `jalebi serve --source DIR` opens a source on start. See
+   [`docs/SOURCE.md`](docs/SOURCE.md).
+
+The header switcher moves between the Source page and the three **modules**, each with its own workflow (`jalebi serve
+--module lte|cube|rotdiag` opens one directly; modules are built when first opened). A cube region can be sent to the
+LTE slab fit or to the rotation diagram. Every setting maps onto a YAML config (the LTE fit's in the sidebar, the cube's
+and the rotation diagram's in their own panels). New modules plug in through `jalebi.modules.register_module`.
 
 <p align="center"><img src="docs/images/app_continuum.png" alt="the web app, Continuum tab, FZ Tau" width="900"></p>
 
 | Tab | What you can do |
 | --- | --- |
-| **Data** | pick a target under the data root (default: the bundled examples) or upload a CSV/FITS; set distance, RV and spike filter; x1d or cube extraction with a clickable cube image; molecular feature markers |
+| *page* **Source** | scan a data root, open a target folder once (x1d + all cubes, read in parallel), see its sub-band coverage, header facts (programme, jwst pipeline version, CRDS context), position and previews; remember distance / RV / position; launch an analysis |
+| **Data** | the open source's spectrum (x1d, or an aperture on the cubes in memory) with distance, RV and spike filter; x1d or cube extraction with a clickable cube image; *Another spectrum* loads any other target or CSV/FITS without changing the source; molecular feature markers |
 | **Continuum** | try every method live, click spline anchors, edit protected ranges and masks |
 | **Model** | one card per component with sliders for log N, T and log R, plus velocity, width, ties, groups and the line list. The model updates as you drag, and one slider re-evaluates only its own component. Sub-tabs: (log N, T) grid map, *Detect molecules* |
 | **Fit** | run grid → optimiser → MCMC in the background with live progress; stop at any time |
