@@ -3,6 +3,32 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-10-05 — the terminal shows what the web app is doing
+
+### Added
+- **Activity log** (`jalebi.activity`): `jalebi serve` prints everything the app does in its terminal — what the user
+  clicked, typed, chose or uploaded in the browser (widgets, tabs, buttons, plot taps, draw tools, table edits; amber
+  `👤` lines), every callback of the app modules with its duration, the steps of opening a source (headers, x1d, each
+  cube read with its size and time, cache hits, the source position), spectra loaded and their pixel counts, continuum
+  and masks, model rebuilds and χ² (≤ 1 line/s while dragging), line lists loaded, grid / optimiser / MCMC stages, molecule
+  detection, batch targets, cube maps, PV cuts, ratio maps, rotation-diagram measurement and fits, results written
+  (and the files in the folder), the browser notifications, the status texts of each module, warnings and errors with
+  their traceback (also from worker threads), and browser tabs connecting and closing.
+- Progress bars in the terminal for the long jobs: reading the cubes, each grid, the optimiser, MCMC (acceptance, ⟨lnP⟩),
+  molecule detection, batch, rotation-diagram MCMC (tqdm bars on a terminal, log lines kept above them; a line every
+  10 % when the output is redirected); jobs without a progress report print "still running" every 10 s.
+- Each line carries the browser session (`s1`, `s2` …; `s1·bg` for a background job started by that tab) and is
+  indented under the call it belongs to.
+- `jalebi serve --log-level trace|debug|info|warning|error` (default `debug`), `--log-file FILE`, `--quiet`; the server's
+  start-up facts (version, folders, caches, threads) are printed first. `JALEBI_LOG_LEVEL` / `JALEBI_LOG_FILE` or
+  `jalebi.activity.configure()` switch it on for `pn.serve(make_app)` and notebooks.
+- `tests/test_activity.py` (13 tests).
+
+### Changed
+- In the served app, the fit's messages (`RunResult.say`) and the grid / MCMC progress of batch runs go through the
+  activity log instead of `print` / separate tqdm bars. CLI and library use are unchanged (nothing is printed by the
+  new code unless the log is switched on).
+
 ## [0.14.0] — 2026-10-05 — open a source once: the Source page and `jalebi.source`
 
 ### Added

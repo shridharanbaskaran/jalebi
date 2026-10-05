@@ -3,6 +3,7 @@ runner and the web app so that every interface runs the same code from the same 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from . import activity as act
 from .config import ProjectConfig
 from .continuum import OH_PROMPT_RANGE, ContinuumSettings, default_mask, estimate_continuum, in_ranges, oh_prompt_ranges
 from .data import Spectrum, load_spectrum, spike_filter
@@ -40,7 +42,9 @@ def prepare(cfg: ProjectConfig, spec: Spectrum | None = None, gas_model: np.ndar
         if cfg.target.spike_filter:
             spec = spike_filter(spec)
     spec.distance_pc = cfg.target.distance_pc
+    t0 = time.perf_counter()
     spec.continuum = estimate_continuum(spec, continuum_settings(cfg), gas_model=gas_model)
+    act.debug("lte", "continuum %s estimated in %s", cfg.continuum.method, act.fmt_time(time.perf_counter() - t0))
     m = spec.mask.copy()
     extra = {k: tuple(v) for k, v in cfg.masks.extra.items()}
     if cfg.masks.default_lines:
@@ -51,6 +55,8 @@ def prepare(cfg: ProjectConfig, spec: Spectrum | None = None, gas_model: np.ndar
         if extra:
             m &= ~in_ranges(spec.wave, extra)
     spec.mask = m & np.isfinite(spec.continuum)
+    act.debug("lte", "masks: default lines %s, OH prompt %s, %d extra ranges → %d of %d px used", cfg.masks.default_lines,
+              cfg.masks.oh_prompt, len(extra), int(spec.mask.sum()), len(spec.mask))
     return spec
 
 
@@ -95,7 +101,10 @@ class RunResult:
 
     def say(self, msg):
         self.log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-        print(self.log[-1], flush=True)
+        if act.enabled(logging.INFO):          # `jalebi serve`: into the activity log
+            act.get_logger("fit").info("%s", msg)
+        else:
+            print(self.log[-1], flush=True)
 
 
 def run_grid_stage(run: RunResult, progress=None):
@@ -115,8 +124,10 @@ def run_grid_stage(run: RunResult, progress=None):
         if own:
             wins = [(max(w[0], a), min(w[1], b)) for w in wins for a, b in own if a <= w[1] and b >= w[0]] or wins
         run.say(f"grid: {name} on {wins}")
-        bar = None
-        if progress is None:
+        bar = abar = None
+        if progress is None and act.enabled(logging.INFO):
+            abar = act.Progress(f"grid {name}", total=len(logN) * len(T), unit="model", area="fit")
+        elif progress is None:
             try:
                 from tqdm import tqdm
                 bar = tqdm(total=100, desc=f"  grid {name}", unit="%", leave=False, dynamic_ncols=True)
@@ -125,11 +136,21 @@ def run_grid_stage(run: RunResult, progress=None):
         def gprog(f, n=name):
             if bar is not None:
                 bar.n = int(100 * f); bar.refresh()
+            if abar is not None:
+                abar.update(frac=f)
             if progress:
                 progress(n, f)
-        gr = prob.grid(name, logN=logN, T=T, windows=wins, n_jobs=g.n_jobs, base_theta=theta, progress=gprog)
-        if bar is not None:
-            bar.close()
+        try:
+            gr = prob.grid(name, logN=logN, T=T, windows=wins, n_jobs=g.n_jobs, base_theta=theta, progress=gprog)
+        except BaseException:
+            if abar is not None:
+                abar.close("failed", ok=False)
+            raise
+        finally:
+            if bar is not None:
+                bar.close()
+        if abar is not None:
+            abar.update(frac=1.0); abar.close()
         run.grids[name] = gr
         b = gr.best
         absorber = comp.kind == "absorption"
@@ -184,8 +205,10 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
     nwalkers = m.nwalkers or max(4 * run.problem.ndim, 32)
     run.say(f"mcmc: nwalkers={nwalkers}, nsteps={m.nsteps}, processes={m.processes} "
             f"({nwalkers * m.nsteps:,} likelihood calls; checkpoint {ckpt or 'off'})")
-    bar = None
-    if verbose and progress is None:
+    bar = abar = None
+    if verbose and progress is None and act.enabled(logging.INFO):
+        abar = act.Progress("mcmc", total=m.nsteps, unit="step", area="fit")
+    elif verbose and progress is None:
         try:
             from tqdm import tqdm
             bar = tqdm(total=m.nsteps, desc="  mcmc", unit="step", dynamic_ncols=True, leave=False)
@@ -201,6 +224,8 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
         lnp = float(np.nanmean(np.where(np.isfinite(lp[-1]), lp[-1], np.nan)))
         if bar is not None:
             bar.n = done; bar.set_postfix(acc=f"{acc:.2f}", lnp=f"{lnp:.1f}"); bar.refresh()
+        if abar is not None:
+            abar.update(n=done, extra=f"acc {acc:.2f} <lnP> {lnp:.1f}")
         pct = int(frac * 10)
         if verbose and pct > last["pct"] and (pct >= 1 or done == m.nsteps):
             last["pct"] = pct
@@ -226,6 +251,8 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
     finally:
         if bar is not None:
             bar.close()
+        if abar is not None:
+            abar.close()
     run.mcmc = res
     run.theta = res.median_theta()
     d = res.diagnostics()
@@ -365,6 +392,12 @@ def save_results(run: RunResult, outdir: str):
                 run.say(f"  plot {fn} failed: {e}")
     with open(os.path.join(outdir, "log.txt"), "w") as fh:
         fh.write("\n".join(run.log) + "\n")
+    if act.enabled(logging.DEBUG):
+        try:
+            files = sorted(os.listdir(outdir))
+            act.debug("fit", "%s now holds %d files: %s", outdir, len(files), ", ".join(files))
+        except OSError:
+            pass
 
 
 def target_config(cfg: ProjectConfig, row) -> ProjectConfig:

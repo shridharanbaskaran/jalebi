@@ -18,6 +18,7 @@ import panel as pn
 from bokeh.models import ColorBar, ColumnDataSource, EqHistColorMapper, HoverTool, LinearColorMapper, LogColorMapper, PolyDrawTool, Range1d, Span
 from bokeh.palettes import Cividis256, Inferno256, Magma256, RdBu11, Turbo256, Viridis256
 
+from .. import activity as act
 from ..app import PAL, PLOT_THEMES, _bokeh_safe, _fig, _html, _panel, _theme_fig
 from ..lines import C_KMS
 
@@ -30,6 +31,9 @@ WINDOWS = {"± velocity": None, "full (9 ch)": "full", "slow (5 ch)": "slow", "f
 BANDS = {"widest margin": None, "nominal (cube_maps)": "nominal"}
 
 
+@act.traced("cube", skip=("figures", "_build_figures", "_cfg_bytes", "_spec_bytes", "_ds9_bytes", "apply_theme"),
+            hot=("current_line", "_continuum", "_read_kw", "_rms_region", "settings", "map_settings", "update_code", "_geometry",
+                 "_north_up_image", "_offset_to_pix", "build_region", "update_region", "cube_config"))
 class CubeWorkspace:
     def __init__(self, app, cube_path: str | None = None):
         from ..examples import DATA_DIR
@@ -322,6 +326,7 @@ class CubeWorkspace:
         from ..source import open_source
         rk = self._read_kw()
         new_target = self._opened is None or self._opened[0] != self.path.value
+        act.info("cube", "cube module uses %s (%s)", self.path.value, "new target" if new_target else "same target")
         src = open_source(self.path.value, **rk)       # process-wide cache: the cubes are read from disk once
         self.cs = src.cubes
         self._opened = (self.path.value, rk["dq_mask"], rk["zero_is_nan"])
@@ -366,25 +371,29 @@ class CubeWorkspace:
         if self._job is not None and self._job["thread"].is_alive():
             pn.state.notifications.warning("still working on the previous request"); return
         job = {"result": None, "error": None}
+        alog = act.Job(label, "cube")
 
         def run():
             try:
                 job["result"] = work()
             except Exception as ex:
                 job["error"] = f"{ex}\n{traceback.format_exc(limit=3)}"
-        job["thread"] = threading.Thread(target=run, daemon=True)
+        job["thread"] = threading.Thread(target=act.thread_target(run), daemon=True, name="jalebi-cube")
         self._job = job
         self.info.object = f'<div class="sf-kv">⏳ {label} …</div>'
         job["thread"].start()
 
         def poll():
             if job["thread"].is_alive():
+                alog.tick()
                 return
             self._cb.stop(); self._cb = None
             if job["error"]:
+                alog.failed(job["error"])
                 self.info.object = f'<div class="sf-note">⚠ {label} failed: {job["error"].splitlines()[0]}</div>'
                 pn.state.notifications.error(f"{label} failed: {job['error'].splitlines()[0]}")
             else:
+                alog.done()
                 done(job["result"])
         if pn.state.curdoc is None:           # not served (tests, notebooks without a server): run inline
             job["thread"].join(); poll_inline = True
@@ -392,7 +401,9 @@ class CubeWorkspace:
             poll_inline = False
         if poll_inline:
             if job["error"]:
+                alog.failed(job["error"])
                 raise RuntimeError(job["error"])
+            alog.done()
             done(job["result"])
         else:
             self._cb = pn.state.add_periodic_callback(_bokeh_safe_fn(poll), period=300)
@@ -404,6 +415,8 @@ class CubeWorkspace:
             self.open()
         from .maps import line_maps, prepare_line, stack_lines
         kw = self.settings(); mk = self.map_settings()
+        act.info("cube", "maps of %s with %s", line, ", ".join(f"{k}={act.describe(v, 40)}" for k, v in {**kw, **mk}.items()
+                                                              if v not in (None, "", [], {})))
         self._pending = (line, kw, dict(mk))
 
         def work():
@@ -556,6 +569,7 @@ class CubeWorkspace:
         return float(x), float(y)
 
     def _tap(self, event):
+        act.debug("cube", "map tapped at Δα %.2f″, Δδ %.2f″", float(event.x), float(event.y))
         if self.lc is None:
             return
         if self.click_mode.value == "moves the region":

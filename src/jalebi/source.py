@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import activity as act
 from .data import BAND_ORDER, Spectrum, extract_cube, load_csv, parse_radec, read_x1d
 
 SOURCE_FILE = "jalebi_source.yaml"
@@ -190,6 +191,8 @@ class Source:
         self.settings: dict = {}
         self.settings_file: str | None = None
         self._load_settings()
+        act.debug("source", "found in %s: %d x1d, %d s3d cubes, %d tables%s", self.path, self.files.n_x1d, self.files.n_s3d,
+                  len(self.files.tables), f" · settings from {self.settings_file}: {self.settings}" if self.settings_file else "")
 
     # ---- identity ---------------------------------------------------------------------------
     @property
@@ -205,6 +208,7 @@ class Source:
             m = {}
             first = next(iter(self.files.x1d.values()), None) or (self.files.s3d[0] if self.files.s3d else None)
             if first is not None:
+                act.debug("source", "reading the primary header of %s", os.path.basename(first))
                 try:
                     h = fits.getheader(first, 0)
                     m = {k: h.get(k) for k in ("TARGNAME", "TARGPROP", "TARG_RA", "TARG_DEC", "PROGRAM", "OBSERVTN", "DATE-OBS",
@@ -281,8 +285,10 @@ class Source:
                     with open(p, "w") as fh:
                         fh.write(text)
                     self.settings_file = p
+                    act.info("source", "settings of %s written to %s: %s", self.name, p, self.settings)
                     return p
-                except OSError:
+                except OSError as ex:
+                    act.debug("source", "cannot write %s (%s); trying the next place", p, ex)
                     continue
         raise OSError("could not write the source settings anywhere")
 
@@ -305,9 +311,15 @@ class Source:
         with self._lock:
             if self._cubes is None:
                 from .cube.io import CubeSet
-                cs = CubeSet(self.files.s3d, name=self._name or self.settings.get("name"), **self.read_kw)
-                cs.root = self.path if os.path.isdir(self.path) else os.path.dirname(self.path)
-                cs.cache_size = len(cs.info) if self.fits_in_memory(cs) else max(3, int(len(cs.info) * _cache_mb() * 1e6 / max(cs.estimated_bytes(), 1)))
+                with act.step(f"reading the headers of {len(self.files.s3d)} cubes", "source") as st:
+                    cs = CubeSet(self.files.s3d, name=self._name or self.settings.get("name"), **self.read_kw)
+                    cs.root = self.path if os.path.isdir(self.path) else os.path.dirname(self.path)
+                    fits_mem = self.fits_in_memory(cs)
+                    cs.cache_size = len(cs.info) if fits_mem else max(3, int(len(cs.info) * _cache_mb() * 1e6 / max(cs.estimated_bytes(), 1)))
+                    st.note(f"{', '.join(cs.bands)} · {cs.wave_range[0]:.2f}–{cs.wave_range[1]:.2f} µm · "
+                            f"{cs.estimated_bytes() / 1e6:.0f} MB when loaded · "
+                            + (f"all {len(cs.info)} kept in memory" if fits_mem else
+                               f"> JALEBI_CUBE_CACHE_MB={_cache_mb():.0f}: the last {cs.cache_size} kept, the others re-read when needed"))
                 self._cubes = cs
             return self._cubes
 
@@ -324,6 +336,7 @@ class Source:
         if not self.has_cubes:
             return []
         if not self.fits_in_memory():
+            act.warning("source", "not preloading: the cubes need %.0f MB > JALEBI_CUBE_CACHE_MB=%.0f", self.cube_memory_mb(), _cache_mb())
             warnings.warn(f"{self.name}: the cubes need {self.cube_memory_mb():.0f} MB > JALEBI_CUBE_CACHE_MB={_cache_mb():.0f}; "
                           "they are read when needed instead")
             return []
@@ -338,7 +351,8 @@ class Source:
         k = ("image", c.path)
         with self._lock:
             if k not in self._memo:
-                self._memo[k] = c.image()
+                with act.step(f"median image of {c.band} ({os.path.basename(c.path)})", "source", level=act.DEBUG):
+                    self._memo[k] = c.image()
             return self._memo[k], c
 
     def position(self, band: str | None = None) -> tuple[float, float, str]:
@@ -352,9 +366,12 @@ class Source:
             with self._lock:
                 if k not in self._memo:
                     try:
-                        ra, dec = self.cubes.source_position(band=band)
+                        with act.step("locating the source (continuum peak near the header target)", "source") as st:
+                            ra, dec = self.cubes.source_position(band=band)
+                            st.note(f"RA {float(ra):.6f}, Dec {float(dec):.6f}")
                         self._memo[k] = (float(ra), float(dec), "continuum peak in the cubes")
-                    except Exception:
+                    except Exception as ex:
+                        act.warning("source", "could not locate the source in the cubes (%s); using the header position", ex)
                         self._memo[k] = None
                 if self._memo[k] is not None:
                     return self._memo[k]
@@ -376,11 +393,16 @@ class Source:
         with self._lock:
             if "x1d" not in self._memo:
                 if self.has_x1d:
-                    self._memo["x1d"] = self._read_x1d()
+                    with act.step(f"reading {len(self.files.x1d)} x1d files of {self.name}", "source") as st:
+                        self._memo["x1d"] = self._read_x1d()
+                        st.note(f"{len(self._memo['x1d'].wave)} px, {', '.join(self._memo['x1d'].bands)}")
                 elif self.has_table:
-                    self._memo["x1d"] = load_csv(self.files.tables[0])
+                    with act.step(f"reading the table {os.path.basename(self.files.tables[0])}", "source"):
+                        self._memo["x1d"] = load_csv(self.files.tables[0])
                 else:
                     raise FileNotFoundError(f"{self.name}: no x1d files (use spectrum('s3d') for an aperture on the cubes)")
+            else:
+                act.debug("source", "x1d of %s from memory", self.name)
             return self._finish(self._memo["x1d"], distance_pc)
 
     def _read_x1d(self) -> Spectrum:
@@ -414,7 +436,12 @@ class Source:
                None if not aperture_arcsec else round(float(aperture_arcsec), 4), ann, apcorr)
         with self._lock:
             hit = self._memo.get(key)
+        if hit is not None:
+            act.debug("source", "aperture spectrum at %.6f, %.6f from memory", radec[0], radec[1])
         if hit is None:
+            t_ap = time.perf_counter()
+            act.info("source", "aperture spectrum on %d cubes at RA %.6f, Dec %.6f (%s, apcorr %s) …", len(self.cubes.info), radec[0], radec[1],
+                     f"{aperture_arcsec}″" if aperture_arcsec else f"{aperture_fwhm_scale}×FWHM", apcorr)
             W, F, E, B = [], [], [], []
             meta = {}; centres = {}; scales = {}
             x1d = self.x1d() if (apcorr == "x1d" and self.has_x1d) else None
@@ -444,6 +471,7 @@ class Source:
                     hit.mask[i[(hit.wave[i] < lo - 0.02) | (hit.wave[i] > hi + 0.02)]] = False
             with self._lock:
                 self._memo[key] = hit
+            act.info("source", "✓ aperture spectrum: %d px in %s", len(hit.wave), act.fmt_time(time.perf_counter() - t_ap))
         return self._finish(hit, distance_pc)
 
     def region_spectrum(self, region, background=None, distance_pc: float | None = None, name: str | None = None,
@@ -454,9 +482,14 @@ class Source:
                tuple(bands) if bands else None)
         with self._lock:
             hit = self._memo.get(key)
+        if hit is not None:
+            act.debug("source", "region spectrum %s from memory", region.to_ds9())
         if hit is None:
-            hit = region_spectrum(self.cubes, region, name=name or self.name, distance_pc=self.distance_pc or 140.0,
-                                  bands=bands, min_coverage=min_coverage, background=background)
+            with act.step(f"region spectrum {region.to_ds9()}" + (f" − background {background.to_ds9()}" if background is not None else "")
+                          + f" on {len(self.cubes.info)} cubes", "source") as st:
+                hit = region_spectrum(self.cubes, region, name=name or self.name, distance_pc=self.distance_pc or 140.0,
+                                      bands=bands, min_coverage=min_coverage, background=background)
+                st.note(f"{len(hit.wave)} px")
             with self._lock:
                 self._memo[key] = hit
         s = self._finish(hit, distance_pc)
@@ -562,13 +595,17 @@ def open_source(path: str, dq_mask: bool = True, zero_is_nan: bool = True, refre
     with _SOURCES_LOCK:
         if not refresh and key in _SOURCES:
             _SOURCES.move_to_end(key)
-            return _SOURCES[key]
+            s = _SOURCES[key]
+            act.info("source", "%s is already open in this server (cache hit: nothing read again; %.0f MB in memory)", s.name, s.memory_mb())
+            return s
+    act.info("source", "opening %s (DQ mask %s, SCI = 0 → NaN %s)%s", key[0], dq_mask, zero_is_nan, " — re-reading from disk" if refresh else "")
     src = Source(path, dq_mask=dq_mask, zero_is_nan=zero_is_nan)
     with _SOURCES_LOCK:
         _SOURCES[key] = src
         _SOURCES.move_to_end(key)
         while len(_SOURCES) > _max_sources():
-            _SOURCES.popitem(last=False)
+            old = _SOURCES.popitem(last=False)[1]
+            act.info("source", "source cache full (JALEBI_SOURCE_CACHE=%d): dropped %s from memory", _max_sources(), old.name)
     return src
 
 
@@ -580,6 +617,7 @@ def loaded_sources() -> list[Source]:
 def forget_sources():
     """Drop every cached source (frees the memory of their cubes)."""
     with _SOURCES_LOCK:
+        act.info("source", "forgetting %d open sources", len(_SOURCES))
         _SOURCES.clear()
 
 

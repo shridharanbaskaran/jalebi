@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .. import activity as act
 from ..data import mrs_psf_fwhm, parse_radec
 from ..lines import C_KMS, Line, get_line
 
@@ -413,20 +414,27 @@ class CubeSet:
             with self._lock:
                 if path in self._cache:
                     self._cache.move_to_end(path)
+                    act.trace("cube", "cube %s from memory", os.path.basename(path))
                     return self._cache[path]
                 ev = self._loading.get(path)
                 if ev is None:
                     ev = self._loading[path] = threading.Event()
                     break
+            act.debug("cube", "waiting for another thread that is reading %s", os.path.basename(path))
             ev.wait()
         try:
+            import time as _time
+            t0 = _time.perf_counter()
             c = read_cube(path, **self._read_kw)
+            act.debug("cube", "read %s (%s on disk, %s planes × %s×%s px, %s) in %s", os.path.basename(path), act.file_size(path),
+                      c.sci.shape[0], c.sci.shape[1], c.sci.shape[2], c.band, act.fmt_time(_time.perf_counter() - t0))
             if self._name:
                 c.name = self._name
             with self._lock:
                 self._cache[path] = c
                 while len(self._cache) > self._ncache:
-                    self._cache.popitem(last=False)
+                    old, _ = self._cache.popitem(last=False)
+                    act.debug("cube", "cube cache holds %d: dropped %s from memory", self._ncache, os.path.basename(old))
             return c
         finally:
             with self._lock:
@@ -467,7 +475,10 @@ class CubeSet:
             progress(n_done, n_total, "")
         done = []
         if not todo:
+            act.debug("cube", "all %d cubes already in memory", n_total)
             return done
+        act.info("cube", "reading %d cubes with %d parallel readers (%.0f MB)", len(todo), max(1, min(int(workers), len(todo))),
+                 sum(c.nz * c.ny * c.nx for c in todo) * 8 / 1e6)
 
         def one(ci):
             if stop is not None and stop.is_set():

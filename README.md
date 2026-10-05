@@ -938,6 +938,40 @@ ready to be extracted and sent to the slab fit.</em></p>
 Remote machines: `jalebi serve --address 0.0.0.0 --allow-websocket-origin host:5006`, or use an SSH tunnel
 (`ssh -L 5006:localhost:5006 server`).
 
+### What the app is doing: the terminal log
+
+The terminal that runs `jalebi serve` prints everything the app does, so you always know what is happening in the
+background: what you clicked, typed or chose in the browser (amber `👤` lines), every step with its timing, the files
+read and whether data came from memory (cache hits), the model rebuilds and χ², each stage of a fit, warnings, errors
+with their traceback, the notifications shown in the browser, and a progress bar for each long job (reading cubes,
+grid, optimiser, MCMC, molecule detection, batch, maps, rotation-diagram MCMC).
+
+```
+14:02:07.208 INF source   s1   │ 👤 clicked '◉ Open source'
+14:02:07.211 INF source   s1   │   opening example:HV_Tau_C_cube (DQ mask True, SCI = 0 undefined True, read all cubes now, 6 readers)
+14:02:07.447 INF cube     s1·bg│ reading 12 cubes with 6 parallel readers (318 MB)
+s1·bg reading the cubes of HV-Tau-C:  58%|███████████▌        | 7/12 cube [00:01<00:01, ch3-medium]
+14:02:09.976 INF source   s1·bg│ ✓ HV-Tau-C ready in 2.77 s · 318 MB in memory
+14:02:21.590 INF model    s1   │ 👤 set 'H2O_hot · log N [cm⁻²]' = 18.3
+14:02:31.810 INF lte      s1   │ 👤 clicked '▶ Run fit'
+14:02:32.686 INF fit      s1·bg│   grid: H2O_hot on [(13.5, 16.5)]
+s1·bg fit FZ Tau · mcmc:  41%|████████▏           | 820/2000 step [01:12<01:44, acc 0.31 <lnP> 290.4]
+```
+
+Each line gives the time, the level, the part of the app, the browser session (`s1`, `s2` … one per tab; `·bg` = a
+background job started by that tab) and the message, indented under the call it belongs to.
+
+| option | prints |
+| --- | --- |
+| `--log-level debug` (default) | everything below: also every callback of the app (`→ JalebiApp.load_target(…)` / `← … 0.31 s`), cache hits, each file read, browser events |
+| `--log-level info` | your actions, the main steps with timings, results, notifications, warnings |
+| `--log-level trace` | also slider drags, typing, plot redraws, pan/zoom (very chatty) |
+| `--quiet` | warnings and errors only |
+| `--log-file serve.log` | the same log also in a file (no colours) |
+
+From Python or a notebook, `jalebi.activity.configure("info")` (or `JALEBI_LOG_LEVEL=info`) switches on the same log for
+`pn.serve(make_app)`; library and CLI use stay quiet otherwise.
+
 ---
 
 ## Python API

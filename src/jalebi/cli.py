@@ -477,18 +477,42 @@ def serve(port: int = 5006, data_root: Optional[str] = None, config: Optional[st
           cube_path: Optional[str] = typer.Option(None, "--cube", help="cube folder for the Cube module (default: bundled HV Tau C)"),
           rotdiag_config: Optional[str] = typer.Option(None, "--rotdiag-config", help="rotation-diagram YAML for the Rotation diagram module"),
           source: Optional[str] = typer.Option(None, "--source", "-s", help="open this target folder on start (the Source page; "
-                                                                            "the analyses then share its data in memory)")):
-    """Start the interactive web app (Panel): Source page, then LTE slab fit · Cube maps · Rotation diagram."""
+                                                                            "the analyses then share its data in memory)"),
+          log_level: str = typer.Option("debug", "--log-level", "-l",
+                                        help="how much of what the app does is printed in this terminal: trace (also slider drags, "
+                                             "typing, pan/zoom) | debug (default: every action, callback, file read, cache hit) | "
+                                             "info (actions, main steps, timings) | warning | error"),
+          log_file: Optional[str] = typer.Option(None, "--log-file", help="also write the activity log to this file"),
+          quiet: bool = typer.Option(False, "--quiet", "-q", help="only warnings and errors (same as --log-level warning)")):
+    """Start the interactive web app (Panel): Source page, then LTE slab fit · Cube maps · Rotation diagram.
+
+    The terminal shows what the app is doing: what you click and type in the browser, each step with its timing,
+    files read, cache hits, fit/map progress bars, warnings and errors (see --log-level)."""
+    from . import activity as act
+    if log_level.lower() not in act.LEVELS:
+        raise typer.BadParameter(f"{log_level!r}: use one of {', '.join(act.LEVELS)}", param_hint="--log-level")
+    act.configure("warning" if quiet else log_level.lower(), log_file=log_file)
     _use_cache(data_dir, config)
     import panel as pn
+    from . import __version__
     from .app import make_app
+    from .linedata import data_dir as _ld_dir
     kwargs = dict(port=port, show=show, address=address)
     if allow_websocket_origin:
         kwargs["websocket_origin"] = allow_websocket_origin.split(",")
     rprint(f"[bold]JALEBI web app[/bold] on http://{address}:{port}  (Ctrl+C to stop)")
+    act.install_web_hooks()
+    act.banner_lines(**{"jalebi": f"{__version__} (panel {pn.__version__})", "url": f"http://{address}:{port}",
+                        "log level": ("warning" if quiet else log_level) + (f" · also written to {log_file}" if log_file else ""),
+                        "data root": data_root or "(bundled examples)", "line lists": _ld_dir(),
+                        "start module": module or (tab if tab and tab.lower() != "data" else "source page"), "source": source, "config": config, "cube folder": cube_path,
+                        "source cache": f"{os.environ.get('JALEBI_SOURCE_CACHE', 3)} sources · cubes preloaded up to "
+                                        f"{os.environ.get('JALEBI_CUBE_CACHE_MB', 6000)} MB",
+                        "threads": f"{os.cpu_count()} CPUs; BLAS threads {os.environ.get('OMP_NUM_THREADS')}"})
     if source:
         from .source import open_source
-        open_source(source)                  # read the headers once, before the first browser session
+        with act.step(f"opening {source} before the first browser session", "server"):
+            open_source(source)              # read the headers once, before the first browser session
     pn.serve(lambda: make_app(data_root=data_root, config_path=config, start_tab=tab, cube_path=cube_path, start_module=module,
                               rotdiag_config=rotdiag_config, source_path=source), title="JALEBI", **kwargs)
 

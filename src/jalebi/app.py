@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import glob
 import io
+import logging
 import os
 import re
 import threading
@@ -46,6 +47,7 @@ from bokeh.models import BoxAnnotation, ColumnDataSource, HoverTool, Label, Lege
 from bokeh.palettes import Category20
 from bokeh.plotting import figure
 
+from . import activity as act
 from .config import ComponentConfig, ContinuumConfig, ExtractionConfig, ProjectConfig
 from .continuum import METHODS, in_ranges
 from .data import BAND_ORDER, Spectrum, estimate_noise, load_spectrum, spike_filter, mrs_psf_fwhm
@@ -411,6 +413,7 @@ def _df_html(df: pd.DataFrame) -> str:
 # Component card (inspector)
 # ----------------------------------------------------------------------------------------------
 
+@act.traced("model", hot=("refresh_head", "to_config", "colour"))
 class ComponentCard:
     """Widgets for one slab component, laid out as a compact inspector card."""
 
@@ -550,12 +553,26 @@ class ComponentCard:
 # App
 # ----------------------------------------------------------------------------------------------
 
+# the terminal activity log (jalebi.activity): every method call is logged at debug level, except those listed here;
+# "hot" ones run on every slider tick / poll and are logged at trace level only
+_HOT = ("_schedule", "_flush", "on_param_change", "update_model_plot", "_refresh_header", "noise", "components", "windows",
+        "_poll", "_detect_poll", "_batch_poll", "_emphasise_features", "current_config", "extraction_config",
+        "continuum_config", "_preview_cube", "_preview_path", "_cube_file", "workspace", "_lte_sync_source")
+_SKIP = ("_reg", "_all_figs", "_cat", "servable", "_notify", "_add_feature_marks", "_unique_name", "_default_windows",
+         "_config_bytes", "_activity_setup")
+
+
+@act.traced("lte", skip=_SKIP, hot=_HOT)
 class JalebiApp:
     TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch"]      # the tabs of the LTE slab-fit module
 
     def __init__(self, data_root: str | None = None, config_path: str | None = None, start_tab: str = "data",
                  cube_path: str | None = None, start_module: str | None = None, rotdiag_config: str | None = None,
                  source_path: str | None = None):
+        t_init = time.perf_counter()
+        act.configure_from_env()                # JALEBI_LOG_LEVEL=debug: the activity log also for pn.serve(make_app)
+        act.install_web_hooks()
+        act.info("app", "new browser tab: building the app%s", f" (config {config_path})" if config_path else "")
         self.cfg = ProjectConfig.load(config_path) if config_path else ProjectConfig()
         self.source = None                      # the jalebi.source.Source opened on the Source page (shared by all modules)
         self._source_kw: dict = {}              # distance / RV chosen on the Source page
@@ -625,6 +642,7 @@ class JalebiApp:
             theme="dark", theme_toggle=False, main_layout=None, sidebar_width=290,
             background_color=PAL.bg, accent_base_color=PAL.accent, header_background=PAL.bg, header_color=PAL.text,
             neutral_color="#8e97ad", corner_radius=8, shadow=False, font=FONT, font_url=FONT_URL)
+        self._activity_setup()
         if self.cfg.target.path:
             try:
                 self.load_target(self.cfg.target.path)
@@ -632,6 +650,36 @@ class JalebiApp:
                 self.status.object = f'<div class="sf-kv">⚠ could not load {self.cfg.target.path}: {e}</div>'
         if source_path:                         # `jalebi serve --source DIR`: open it straight away
             self.workspace("source").open(source_path)
+        act.info("app", "app ready in %s · module %s · data root %s", act.fmt_time(time.perf_counter() - t_init),
+                 self.module, self.data_root)
+
+    # ------------------------------------------------------------------ terminal activity log
+    _WATCH = {   # status panes whose text is echoed to the terminal: attribute -> (label, level)
+        "status": ("session", logging.INFO), "data_info": ("data", logging.INFO), "detect_status": ("detection", logging.INFO),
+        "batch_md": ("batch", logging.DEBUG), "source_note": ("source", logging.DEBUG), "out_resolved": ("output", logging.DEBUG),
+        "chi2_html": ("model χ²", act.TRACE), "res_md": ("results", logging.INFO),
+        # modules
+        "info": ("status", logging.INFO), "summary": ("source", logging.DEBUG), "coverage": ("coverage", logging.DEBUG),
+        "params_html": ("parameters", logging.INFO), "derived_html": ("derived", logging.INFO),
+        "compare_html": ("models", logging.INFO), "mol_note": ("molecule", logging.DEBUG),
+    }
+
+    def _activity_setup(self):
+        """Terminal activity log: tag the widgets with the part of the app they belong to (for the '👤 …' lines)
+        and echo the status texts (see jalebi.activity)."""
+        act.label_widgets(self, {"module_nav": "module", "cfg_upload": "config YAML upload", "upload": "spectrum upload",
+                                 "plot_theme_btn": "plot theme", "res_table": "results table", "batch_table": "batch targets"})
+        act.tag(self.module_nav, "app")
+        act.tag(self.sidebar, "session")
+        act.tag(self.tabs, "lte")
+        self.tabs._jalebi_area = "lte"
+        self._watch_panes(self, "lte")
+
+    def _watch_panes(self, obj, area: str):
+        for attr, (label, lv) in self._WATCH.items():
+            pane = getattr(obj, attr, None)
+            if pane is not None and hasattr(pane, "object") and hasattr(pane, "param"):
+                act.watch_text(pane, "session" if attr == "status" and obj is self else area, label, level=lv)
 
     # ------------------------------------------------------------------ modules
     def _build_modules(self, start: str):
@@ -660,10 +708,14 @@ class JalebiApp:
         """The workspace object of a module (built on first use)."""
         from .modules import MODULES
         if key not in self.workspaces:
-            cls = MODULES[key].load()
-            ws = cls(self, **{k: v for k, v in self._module_options.get(key, {}).items() if v is not None})
+            with act.step(f"building the {MODULES[key].label} module (first use)", "app"):
+                cls = MODULES[key].load()
+                ws = cls(self, **{k: v for k, v in self._module_options.get(key, {}).items() if v is not None})
             self.workspaces[key] = ws
             self._module_holders[key].objects = [ws.panel]
+            act.label_widgets(ws, {"product": "map product", "src": "input spectrum", "table": "line table"})
+            act.tag(ws.panel, key)
+            self._watch_panes(ws, key)
             if hasattr(ws, "apply_theme"):
                 ws.apply_theme(PLOT_THEMES[self.plot_theme])
             for f in (ws.figures() if hasattr(ws, "figures") else []):
@@ -688,7 +740,11 @@ class JalebiApp:
         """Show a module (and, for the LTE fit, one of its tabs)."""
         from .modules import resolve_module
         key = resolve_module(key) or "lte"
+        prev = self.module_keys[self.module_tabs.active] if hasattr(self, "module_tabs") else None
         ws = self.workspace(key)
+        if prev != key or tab:
+            from .modules import MODULES
+            act.info("app", "module → %s%s", MODULES[key].label, f" · {tab}" if tab else "")
         self.module_tabs.active = self.module_keys.index(key)
         if self.module_nav.value != key:
             self.module_nav.value = key
@@ -703,6 +759,8 @@ class JalebiApp:
 
     def send_spectrum(self, spec: Spectrum, module: str, label: str | None = None):
         """Hand a spectrum built in one module (e.g. a cube region) to another one."""
+        act.info("app", "spectrum '%s' (%d px, %s) sent to the %s module", label or spec.name, len(spec.wave),
+                 ", ".join(spec.bands[:3]) + (" …" if len(spec.bands) > 3 else ""), module)
         if module == "lte":
             return self.use_spectrum(spec, label=label)
         ws = self.switch_module(module)
@@ -718,6 +776,8 @@ class JalebiApp:
         (`use_source`), the others when they are first opened; the LTE fit loads its spectrum when it is shown.
         Nothing is read from disk again: the source keeps the cubes and spectra in memory."""
         same = self.source is not None and self.source.key == src.key
+        act.info("app", "source %s %s for every analysis (distance %s pc, RV %s km/s)", src.name,
+                 "re-applied" if same else "set", distance_pc or src.distance_pc or "?", rv_kms if rv_kms is not None else src.rv_kms)
         self.source = src
         self._source_kw = dict(distance_pc=distance_pc if distance_pc else (src.distance_pc or None),
                                rv_kms=rv_kms if rv_kms is not None else src.rv_kms)
@@ -777,8 +837,10 @@ class JalebiApp:
             return
         key = (src.key, self.ex_source.value, self.distance.value, self.rv.value)
         if self._lte_source_key == key:
+            act.debug("lte", "LTE fit already has the spectrum of %s (%s)", src.name, self.ex_source.value)
             return
         self._lte_source_key = key
+        act.info("lte", "LTE fit takes the %s spectrum of %s (from memory)", self.ex_source.value, src.name)
         self.load_target(src.path)
 
     # ------------------------------------------------------------------ plot theme
@@ -971,6 +1033,7 @@ class JalebiApp:
             sizing_mode="stretch_width")
 
     def _config_bytes(self):
+        act.info("session", "config YAML exported (download)")
         return io.BytesIO(self.current_config().to_yaml().encode())
 
     def _config_uploaded(self, e):
@@ -978,6 +1041,8 @@ class JalebiApp:
             import yaml
             d = yaml.safe_load(io.BytesIO(e.new).read().decode())
             self.cfg = ProjectConfig.model_validate(d)
+            act.info("session", "config YAML uploaded (%s, %s): %d components, target %s", self.cfg_upload.filename,
+                     act.fmt_bytes(len(e.new)), len(self.cfg.components), self.cfg.target.path or "—")
             self.apply_config(self.cfg)
             pn.state.notifications.success("config loaded")
         except Exception as ex:
@@ -1086,6 +1151,7 @@ class JalebiApp:
                     opts[os.path.relpath(d, root)] = d
                 elif os.path.isfile(d) and d.lower().endswith((".csv", ".txt")):
                     opts[os.path.relpath(d, root)] = d
+        act.info("lte", "scanned %s: %d targets with x1d files or tables", root, len(opts))
         self.target_select.options = opts
         if opts:
             self.target_select.value = list(opts.values())[0]
@@ -1096,6 +1162,7 @@ class JalebiApp:
         os.makedirs(os.path.dirname(tmp), exist_ok=True)
         with open(tmp, "wb") as fh:
             fh.write(e.new)
+        act.info("lte", "uploaded spectrum %s (%s) saved to %s", self.upload.filename, act.fmt_bytes(len(e.new)), tmp)
         self.load_target(tmp)
 
     def extraction_config(self) -> ExtractionConfig:
@@ -1154,6 +1221,8 @@ class JalebiApp:
         else:
             x, y = peak_position(c.image())
             ra, dec = c.pix_to_world(x, y)
+        act.info("lte", "aperture centre from the %s: RA %.6f, Dec %.6f (%s)", "cube header" if which == "header" else "brightest pixel",
+                 float(ra), float(dec), os.path.basename(c.path))
         self.ex_ra.value = f"{float(ra):.6f}"; self.ex_dec.value = f"{float(dec):.6f}"
 
     @_bokeh_safe
@@ -1192,6 +1261,7 @@ class JalebiApp:
         if c is None:
             return
         ra, dec = c.pix_to_world(float(event.x), float(event.y))
+        act.info("lte", "aperture centre from the tapped pixel (%.1f, %.1f): RA %.6f, Dec %.6f", float(event.x), float(event.y), float(ra), float(dec))
         self.ex_ra.value = f"{float(ra):.6f}"; self.ex_dec.value = f"{float(dec):.6f}"
 
     @_bokeh_safe
@@ -1211,10 +1281,15 @@ class JalebiApp:
                "annulus_arcsec": tuple(ex.annulus_arcsec) if ex.annulus_arcsec else None, "apcorr": ex.apcorr}
         try:
             src = self.source if (self.source is not None and os.path.abspath(path) == os.path.abspath(self.source.path)) else None
-            if src is not None:                 # from memory: the source read these files once
-                spec = src.spectrum("x1d" if ex.source == "x1d" else "s3d", extraction=ext, distance_pc=self.distance.value)
-            else:
-                spec = load_spectrum(path, source=ex.source, extraction=ext, distance_pc=self.distance.value)
+            what = ("x1d" if ex.source == "x1d" else f"s3d aperture {ex.aperture_arcsec or ex.aperture_fwhm_scale}"
+                    f"{'″' if ex.aperture_arcsec else '×FWHM'} at {ex.ra}, {ex.dec}, apcorr {ex.apcorr}")
+            with act.step(f"loading the spectrum of {act.short_path(path)} ({what}; "
+                          f"{'from the source in memory' if src is not None else 'from disk'})", "lte") as st:
+                if src is not None:                 # from memory: the source read these files once
+                    spec = src.spectrum("x1d" if ex.source == "x1d" else "s3d", extraction=ext, distance_pc=self.distance.value)
+                else:
+                    spec = load_spectrum(path, source=ex.source, extraction=ext, distance_pc=self.distance.value)
+                st.note(f"{len(spec.wave)} px in {len(spec.bands)} sub-bands")
         except Exception as e:
             self._notify("error", f"load failed: {e}"); return
         self.cfg.target.extraction = ex
@@ -1233,8 +1308,11 @@ class JalebiApp:
         path = os.path.join(folder, fname)
         try:
             spec.save(path)
-        except Exception:
+            act.debug("lte", "copy of the received spectrum written to %s", path)
+        except Exception as ex:
+            act.warning("lte", "could not write %s: %s", path, ex)
             path = label or spec.name
+        act.info("lte", "LTE fit received spectrum '%s' (%d px)", label or spec.name, len(spec.wave))
         self.distance.value = spec.distance_pc
         if switch_to and hasattr(self, "module_tabs"):
             self.switch_module("lte", switch_to)                    # switch first: the continuum + model take a moment
@@ -1244,8 +1322,11 @@ class JalebiApp:
 
     def _set_spectrum(self, spec: Spectrum, path: str, t0: float):
         spec = spec.to_rest_frame(self.rv.value)
+        act.debug("lte", "shifted to the rest frame with RV %g km/s", self.rv.value)
         if self.spike.value:
+            n0 = int((~spec.mask).sum())
             spec = spike_filter(spec)
+            act.debug("lte", "spike filter: %d more pixels masked", int((~spec.mask).sum()) - n0)
         self.raw_spec = spec.copy()
         self.spec = spec
         self.cfg.target.path = path; self.cfg.target.name = spec.name
@@ -1269,6 +1350,9 @@ class JalebiApp:
         hdr = ", ".join(f"{k}={v}" for k, v in spec.meta.items() if v and k != "extraction")
         self.data_info.object = (f'<div class="sf-note">Loaded <span class="sf-mono">{path}</span> in {time.time() - t0:.1f} s · bands {", ".join(spec.bands)}'
                                  + (f' · header: <span class="sf-mono">{hdr}</span>' if hdr else "") + "</div>")
+        act.info("lte", "spectrum %s: %d px, %.2f–%.2f µm, bands %s, %d masked, d = %g pc, RV %g km/s", spec.name, len(spec.wave),
+                 float(np.nanmin(spec.wave)), float(np.nanmax(spec.wave)), ", ".join(spec.bands), int((~spec.mask).sum()),
+                 spec.distance_pc, spec.rv_kms)
         self._update_lineids()
         self.estimate_continuum()
         self.on_structure_change()
@@ -1428,7 +1512,9 @@ class JalebiApp:
             return
         cfg = self.current_config(light=True)
         try:
-            spec = prepare(cfg, self.raw_spec.copy(), gas_model=gas_model)
+            with act.step(f"continuum ({cfg.continuum.method}{', gas model subtracted' if gas_model is not None else ''}) and masks", "lte") as st:
+                spec = prepare(cfg, self.raw_spec.copy(), gas_model=gas_model)
+                st.note(f"{int(spec.mask.sum())}/{len(spec.mask)} px used, {int((~spec.mask).sum())} masked")
         except Exception as ex:
             pn.state.notifications.error(f"continuum failed: {ex}")
             return
@@ -1584,6 +1670,9 @@ class JalebiApp:
 
     def add_component(self, cfg: ComponentConfig, rebuild=True):
         card = ComponentCard(self, cfg)
+        act.label_widgets(card, prefix=lambda c=card: c.name.value)
+        act.tag(card.panel, "model")
+        act.info("model", "component %s added (%s, %s, log N %.2f, T %.0f K)", cfg.name, cfg.molecule, cfg.kind, cfg.logN, cfg.T)
         self.cards.append(card)
         self.cards_col.append(card.panel)
         self.grid_comp.options = [c.name.value for c in self.cards]
@@ -1593,6 +1682,7 @@ class JalebiApp:
             self.on_structure_change()
 
     def remove_component(self, card):
+        act.info("model", "component %s removed", card.name.value)
         self.cards.remove(card)
         self.cards_col.remove(card.panel)
         self.grid_comp.options = [c.name.value for c in self.cards]
@@ -1632,9 +1722,12 @@ class JalebiApp:
                 card._tau_txt = None
                 card.refresh_head()
             self.grid_comp.options = [c.name.value for c in self.cards]
-            self.disp_model = build_model(comps, self.spec.wave[sel], self.spec.distance_pc, wins, oversample=4,
-                                          R_model=self.cfg.R_model, R_scale=self.cfg.R_scale,
-                                          continuum=self.spec.continuum[sel] if self.spec.continuum is not None else None)
+            with act.step(f"display model: {len(comps)} components "
+                          f"({', '.join(c.name for c in comps if c.enabled) or 'none enabled'}) on {int(sel.sum())} px in "
+                          f"{', '.join(f'{a:g}–{b:g}' for a, b in wins)} µm", "model", level=logging.DEBUG):
+                self.disp_model = build_model(comps, self.spec.wave[sel], self.spec.distance_pc, wins, oversample=4,
+                                              R_model=self.cfg.R_model, R_scale=self.cfg.R_scale,
+                                              continuum=self.spec.continuum[sel] if self.spec.continuum is not None else None)
             self.disp_model.unit_cache = {}
             for card, comp in zip(self.cards, comps):
                 try:
@@ -1668,6 +1761,7 @@ class JalebiApp:
             self.model_xr.start = lo - 0.02 * (hi - lo); self.model_xr.end = hi + 0.02 * (hi - lo)
             self.update_model_plot(refresh_data=True)
         except Exception as ex:
+            act.warning("model", "model build failed: %s", ex)
             self.chi2_html.object = f'<div class="sf-note">⚠ model build failed: {ex} (no pixels in the fit windows?)</div>'
 
     def on_param_change(self):
@@ -1684,7 +1778,11 @@ class JalebiApp:
         self.disp_model.components = comps
         P = {c.name: c.params() for c in comps}
         try:
+            t_ev = time.perf_counter()
             total, units, tmax = self.disp_model.evaluate(P, per_unit=True)
+            if act.enabled(act.TRACE):
+                act.trace("model", "model evaluated in %s (%s)", act.fmt_time(time.perf_counter() - t_ev),
+                          ", ".join(f"{c.name}: logN {c.logN:.2f} T {c.T:.0f}" for c in comps if c.enabled))
         except Exception as ex:
             self.chi2_html.object = f'<div class="sf-note">⚠ model evaluation failed: {ex}</div>'; return
         wave = spec.wave[sel]; y = spec.line_flux[sel]; mask = spec.mask[sel]
@@ -1708,6 +1806,12 @@ class JalebiApp:
                 chips.append(chip(f"{a:.2f}–{bb:.2f} µm · χ²<sub>red</sub> <b>{chi2:.2f}</b> · {w.sum()} px", tone))
         self.chi2_html.object = '<div style="margin-top:6px">' + "".join(chips) + "</div>"
         self._last_chi2 = "".join(chips[:3])
+        if act.enabled(logging.DEBUG) and time.perf_counter() - getattr(self, "_t_chi2_log", 0.0) > 1.0:   # ≤ 1 line/s while dragging
+            self._t_chi2_log = time.perf_counter()
+            act.debug("model", "model: %s · χ²_red %s", ", ".join(f"{c.name} log N {c.logN:.2f} T {c.T:.0f} K"
+                                                                   + (f" log R {c.logR:.2f}" if c.kind != "absorption" else f" f_c {c.fc:.2f}")
+                                                                   for c in comps if c.enabled and not c.tie_to) or "no component",
+                      ", ".join(act.strip_html(ch) for ch in chips) or "—")
         self._refresh_header()
         for card in self.cards:
             u = (card.group.value.strip() or card.name.value)
@@ -1724,7 +1828,9 @@ class JalebiApp:
         P = {c.name: c.params() for c in comps}
         noise = self.noise()[sel]
         sig = np.where(np.isfinite(noise) & (noise > 0), noise, np.nanmedian(spec.err[sel]))
-        logR, chi2 = self.disp_model.solve_areas(spec.line_flux[sel], sig, P, mask=spec.mask[sel])
+        with act.step("solving the emitting areas (NNLS)", "model") as st:
+            logR, chi2 = self.disp_model.solve_areas(spec.line_flux[sel], sig, P, mask=spec.mask[sel])
+            st.note(", ".join(f"{k}: log R {v:.2f}" for k, v in logR.items()) + f" · χ² {chi2:.0f}")
         self._busy = True
         try:
             for card in self.cards:
@@ -1746,11 +1852,16 @@ class JalebiApp:
             prob = build_problem(cfg, self.spec)
             g = cfg.fit.grid
             from .plots import plot_grid
+            g_txt = f"{int(g.logN[2])}×{int(g.T[2])} grid in log N {g.logN[0]:g}–{g.logN[1]:g}, T {g.T[0]:g}–{g.T[1]:g} K"
+            act.info("model", "grid search for %s: %s (%d pixels)", name, g_txt, len(prob.y))
+            t_g = time.perf_counter()
             gr = prob.grid(name, logN=np.linspace(g.logN[0], g.logN[1], int(g.logN[2])), T=np.linspace(g.T[0], g.T[1], int(g.T[2])),
                            windows=[w for w in prob.windows if any(a <= w[1] and b >= w[0] for a, b in DEFAULT_WINDOWS.get(next(c.molecule for c in cfg.components if c.name == name), []))] or None)
+            b = gr.best
+            act.info("model", "grid %s done in %s: best log N %.2f, T %.0f K, log R %.2f, χ²_red %.2f%s", name,
+                     act.fmt_time(time.perf_counter() - t_g), b["logN"], b["T"], b["logR"], b["chi2_red"], " (at the grid edge)" if b["at_edge"] else "")
             self.grid_pane.object = plot_grid(gr); self.grid_pane.visible = True; self._grid_paper.visible = True
             self._plot_tabs.active = 1
-            b = gr.best
             card = next(c for c in self.cards if c.name.value == name)
             self._busy = True
             try:
@@ -1773,22 +1884,31 @@ class JalebiApp:
         self._det_state = {"msg": "starting", "frac": 0.0, "done": False, "error": None, "result": None}
         cfg = self.current_config()
         spec = self.spec.copy()
+        d = cfg.fit.detect
+        act.info("lte", "molecule detection started on %s: threshold ΔBIC %s, mode %s, candidates %s", spec.name,
+                 self.detect_thr.value, d.mode, ", ".join(d.candidates) if d.candidates else "all with line lists")
 
         def worker():
             st = self._det_state
+            bar = act.Progress("detecting molecules", area="lte")
+
+            def prog(m, f):
+                st.update(msg=m, frac=f); bar.update(frac=f, extra=m)
             try:
                 from .detect import detect_molecules
-                d = cfg.fit.detect
                 st["result"] = detect_molecules(spec, candidates=d.candidates or None, threshold=float(self.detect_thr.value),
                                                 releases=cfg.linedata.releases, oversample=d.oversample, mode=d.mode,
-                                                R_model=cfg.R_model, R_scale=cfg.R_scale,
-                                                progress=lambda m, f: st.update(msg=m, frac=f))
+                                                R_model=cfg.R_model, R_scale=cfg.R_scale, progress=prog)
+                det = st["result"]
+                bar.close("detected " + (", ".join(f"{c.name} ({c.T:.0f} K)" for c in det.components) or "nothing"))
             except Exception:
                 st["error"] = traceback.format_exc()
+                bar.close("failed", ok=False)
+                act.log("lte", "molecule detection failed:\n%s", st["error"], level=logging.ERROR)
             finally:
                 st["done"] = True
 
-        self._det_worker = threading.Thread(target=worker, daemon=True); self._det_worker.start()
+        self._det_worker = threading.Thread(target=act.thread_target(worker), daemon=True, name="jalebi-detect"); self._det_worker.start()
         self._det_cb = pn.state.add_periodic_callback(self._detect_poll, period=400)
 
     @_bokeh_safe
@@ -1836,6 +1956,8 @@ class JalebiApp:
             new.components = cfg.components + [c for c in det.components if c.molecule not in have]
             if det.ordering and not new.fit.ordering:
                 new.fit.ordering = det.ordering
+        act.info("lte", "%s the detected components: %s", "replacing the components with" if replace else "adding",
+                 ", ".join(c.name for c in new.components))
         self._busy = True
         try:
             for card in list(self.cards):
@@ -2016,23 +2138,36 @@ class JalebiApp:
         self.lnp_panel.visible = False
         self.run_btn.disabled = True; self.stop_btn.disabled = False
         self._t_fit0 = time.time()
-        self._worker = threading.Thread(target=self._fit_worker, args=(cfg, self.spec.copy()), daemon=True)
+        f = cfg.fit
+        act.info("fit", "fit of %s started: stages %s · %d components (%s) · windows %s · grid %s×%s · %s maxiter %s · "
+                 "MCMC %s walkers × %s steps on %s processes · output %s", self.spec.name, " → ".join(f.stages),
+                 len(cfg.components), ", ".join(c.name for c in cfg.components if c.enabled),
+                 ", ".join(f"{a:g}–{b:g}" for a, b in f.windows), int(f.grid.logN[2]), int(f.grid.T[2]), f.optimise.method,
+                 f.optimise.maxiter, f.mcmc.nwalkers or "auto", f.mcmc.nsteps, f.mcmc.processes, cfg.output_dir(self.spec.name))
+        self._worker = threading.Thread(target=act.thread_target(self._fit_worker), args=(cfg, self.spec.copy()), daemon=True,
+                                        name="jalebi-fit")
         self._worker.start()
         self._refresh_header()
         self._cb = pn.state.add_periodic_callback(self._poll, period=1000)
 
     def _fit_worker(self, cfg, spec):
         pr = self._progress
+        bars = act.Stages(f"fit {spec.name}", area="fit")
+        self._fit_bars = bars
 
         def progress(stage, frac, extra):
             pr["stage"] = stage if extra is None else f"{stage} ({extra})"
             pr["frac"] = frac
+            bars.update(stage if extra is None else f"{stage} {extra}", frac=frac)
 
         def mcmc_progress(frac, sampler):
             pr["stage"] = "mcmc"; pr["frac"] = frac
             lp = sampler.get_log_prob()
             fin = np.where(np.isfinite(lp), lp, np.nan)
             pr["lnp"] = (np.arange(lp.shape[0]), np.nanmean(fin, axis=1), np.nanpercentile(fin, 16, axis=1), np.nanpercentile(fin, 84, axis=1))
+            if act.enabled(logging.INFO):
+                bars.update("mcmc", n=lp.shape[0], total=cfg.fit.mcmc.nsteps, unit="step",
+                            extra=f"acc {float(np.mean(sampler.acceptance_fraction)):.2f} <lnP> {float(np.nanmean(fin[-1])):.1f}")
 
         try:
             outdir = cfg.output_dir(spec.name if spec is not None else None)   # e.g. results/FZ_Tau
@@ -2053,6 +2188,7 @@ class JalebiApp:
                     run_grid_stage(run, progress=lambda n, f: progress("grid", f, n))
                 if "optimise" in stages:
                     pr["stage"] = "optimise"; pr["frac"] = 0.0
+                    bars.update("optimise", frac=0.0)
                     run_optimise_stage(run, callback=lambda *a, **k: bool(self._stop.is_set()),
                                        progress=lambda f: progress("optimise", f, None))
                 pr["run"] = run
@@ -2069,12 +2205,17 @@ class JalebiApp:
                     else:
                         run.say("  refinement did not improve chi2; keeping the previous continuum"); break
             if "mcmc" in stages and not self._stop.is_set():
+                bars.update("mcmc", n=0, total=cfg.fit.mcmc.nsteps, unit="step")
                 run_mcmc_stage(run, progress=mcmc_progress, stop_event=self._stop, outdir=outdir)
             pr["run"] = run
-            save_results(run, outdir)
+            bars.close(ok=not self._stop.is_set())
+            with act.step(f"writing the results to {outdir}", "fit"):
+                save_results(run, outdir)
             run.say(f"saved results to {outdir}")
         except Exception:
             pr["error"] = traceback.format_exc()
+            bars.close(ok=False)
+            act.log("fit", "fit failed:\n%s", pr["error"], level=logging.ERROR)
         finally:
             pr["done"] = True
 
@@ -2100,6 +2241,7 @@ class JalebiApp:
             else:
                 self.stage_html.object = f'<div class="sf-stage">finished<small>{el:.0f} s · results in the Results workspace</small></div>'
                 self.run = pr["run"]
+                act.info("fit", "fit %s in %s", "stopped by the user" if self._stop.is_set() else "finished", act.fmt_time(el))
                 self.finish_fit()
             self._refresh_header()
 
@@ -2160,6 +2302,7 @@ class JalebiApp:
     @_bokeh_safe
     def show_results(self, run: RunResult):
         from . import plots
+        act.info("fit", "drawing the results (fit, full spectrum%s)", ", corner, correlations, posterior predictive, traces" if run.mcmc is not None else "")
         prob = run.problem
         md = [f"## {run.spec.name}", f"{len(prob.y)} pixels, {prob.ndim} free parameters, output `{run.outdir or run.cfg.output}`"]
         if run.opt is not None:
@@ -2209,7 +2352,8 @@ class JalebiApp:
             return
         comps = self.corner_comps.value or None
         try:
-            self.res_corner.object = plots.plot_corner(self.run.mcmc, comps=comps); self.res_corner.visible = True
+            with act.step(f"corner plot of {', '.join(comps) if comps else 'all components'}", "fit"):
+                self.res_corner.object = plots.plot_corner(self.run.mcmc, comps=comps); self.res_corner.visible = True
         except Exception as ex:
             pn.state.notifications.error(f"corner failed: {ex}")
 
@@ -2245,6 +2389,7 @@ class JalebiApp:
         for d in sorted(glob.glob(os.path.join(root, "*"))) + sorted(glob.glob(os.path.join(root, "*", "*"))):
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*x1d.fits")):
                 rows.append({"name": os.path.basename(d), "path": d, "distance_pc": self.distance.value, "rv_kms": self.rv.value, "status": ""})
+        act.info("lte", "batch: %d targets with x1d files under %s", len(rows), root)
         self.batch_table.value = pd.DataFrame(rows, columns=["name", "path", "distance_pc", "rv_kms", "status"])
         self.batch_md.object = f'<div class="sf-note">{len(rows)} targets</div>'
 
@@ -2258,27 +2403,36 @@ class JalebiApp:
         self._batch_rows = []
         self._batch_state = {"i": 0, "n": len(sel), "done": False, "msgs": []}
 
+        act.info("lte", "batch of %d targets started: %s", len(sel), ", ".join(map(str, sel["name"])))
+
         def worker():
+            bar = act.Progress("batch", total=len(sel), unit="target", area="lte")
             for k, (_, row) in enumerate(sel.iterrows()):
                 if self._stop.is_set():
+                    act.info("lte", "batch stopped by the user after %d targets", k)
                     break
                 from .pipeline import target_config
                 c = target_config(cfg, row)          # own folder per target, e.g. results/DR_Tau
+                act.info("lte", "batch target %d/%d: %s (%s)", k + 1, len(sel), row["name"], row["path"])
                 try:
                     from .pipeline import run_pipeline
                     run = run_pipeline(c, stop_event=self._stop)
                     self._batch_rows.append(catalogue_row(run)); status = "done"
                 except Exception as ex:
                     self._batch_rows.append({"target": row["name"], "error": repr(ex)}); status = f"failed: {ex}"
+                    act.log("lte", "batch target %s failed: %s", row["name"], ex, level=logging.ERROR, exc_info=True)
                 self._batch_state["msgs"].append(f"{row['name']}: {status}")
                 self._batch_state["i"] = k + 1
+                bar.update(n=k + 1, extra=f"{row['name']}: {status}")
+            bar.close()
             if self._batch_rows:
                 root = cfg.output_root() if cfg.per_target_output() else cfg.output
                 os.makedirs(root, exist_ok=True)
                 pd.DataFrame(self._batch_rows).to_csv(os.path.join(root, "population.csv"), index=False)
+                act.info("lte", "batch catalogue written to %s", os.path.join(root, "population.csv"))
             self._batch_state["done"] = True
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=act.thread_target(worker), daemon=True, name="jalebi-batch").start()
         self._batch_cb = pn.state.add_periodic_callback(self._batch_poll, period=2000)
 
     @_bokeh_safe
