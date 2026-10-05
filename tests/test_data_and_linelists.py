@@ -73,18 +73,26 @@ def _configs():
     return sorted((src / "configs").glob("*.yaml")) if src else []
 
 
+def _require_data(src):
+    """Bundled example data must exist; local (machine-specific) data is skipped if absent, e.g. on CI."""
+    p = Path(resolve_path(src))
+    if str(src).startswith("example:"):
+        assert p.exists()
+    elif not p.exists():
+        pytest.skip(f"local data not on this machine: {p}")
+
+
 @pytest.mark.parametrize("path", _configs(), ids=lambda p: p.name)
 def test_example_configs_validate(path):
     if path.name.startswith("rotdiag_"):                 # rotation-diagram configs (jalebi rotdiag run)
         from jalebi.rotdiag import RotDiagConfig
         rc = RotDiagConfig.load(str(path))
-        src = rc.fluxes.path if rc.fluxes else rc.spectrum.path
-        assert Path(resolve_path(src)).exists()
+        _require_data(rc.fluxes.path if rc.fluxes else rc.spectrum.path)
         return
     cfg = ProjectConfig.load(str(path))
-    assert Path(resolve_path(cfg.target.path)).exists()
-    for c in cfg.components:
+    for c in cfg.components:                             # validate the config before any skip
         c.to_component()
+    _require_data(cfg.target.path)
 
 
 def test_copy_examples(tmp_path):
