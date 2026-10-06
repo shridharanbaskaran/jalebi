@@ -352,6 +352,9 @@ class SlabModel:
         # app so that moving one slider only re-evaluates that component).  Off by default: the
         # fitter changes every parameter at once, where a cache would only add hashing overhead.
         self.unit_cache: dict | None = None
+        # Optional precomputed tables (jalebi.emulator.EmulatorSet, fit.model_backend: emulator): units it
+        # covers are interpolated instead of computed; every other unit stays exact.
+        self.emulator = None
         self._omega_unit = (AU / (distance_pc * PC)) ** 2 * np.pi   # Omega for R = 1 au
         lam = self.grid.wave * 1e-6
         self._planck_c1 = 2.0 * H * C / lam**3
@@ -559,6 +562,12 @@ class SlabModel:
             if lead.kind == "absorption":
                 continue
             p0 = P[lead.name]
+            if self.emulator is not None and len(members) == 1:
+                hit = self.emulator.unit_flux(key, p0)
+                if hit is not None:
+                    flux[key], taumax[key] = hit
+                    logR[key] = p0["logR"]
+                    continue
             ck = None
             if self.unit_cache is not None:
                 # the 1-au flux does not depend on logR for slabs (only the annuli R_out does)
@@ -749,6 +758,20 @@ class SlabModel:
             if kp in out:
                 out[ku] = out[kp]
         return out, fc_out, chi2
+
+    def exact(self):
+        """Context manager: evaluate with the exact model even when an emulator is attached."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            em = self.emulator
+            self.emulator = None
+            try:
+                yield self
+            finally:
+                self.emulator = em
+        return _cm()
 
     def tau_flags(self, params=None) -> dict[str, float]:
         _, tmax, _ = self.unit_fluxes(params)

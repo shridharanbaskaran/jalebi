@@ -44,6 +44,8 @@ app = typer.Typer(add_completion=False, no_args_is_help=False, rich_markup_mode=
                        "Simultaneous LTE slab fitting of molecular emission in JWST/MIRI disk spectra.")
 linedata_app = typer.Typer(help="Line-list cache management.")
 app.add_typer(linedata_app, name="linedata")
+emulator_app = typer.Typer(help="Emulator tables of the slab model (fit.model_backend: emulator).")
+app.add_typer(emulator_app, name="emulator")
 from .cube.cli import cube_app  # noqa: E402  (light: typer + rich only; the cube code loads on use)
 app.add_typer(cube_app, name="cube")
 from .rotdiag.cli import rotdiag_app  # noqa: E402  (light as well)
@@ -281,12 +283,82 @@ def detect(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_
         rprint(f"wrote {write}")
 
 
+@emulator_app.command("build")
+def emulator_build(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+                   name: Optional[str] = typer.Option(None, help=_NAME_HELP),
+                   cache_dir: Optional[str] = typer.Option(None, "--cache-dir", help="table folder (default fit.emulator.cache_dir, "
+                                                           "$JALEBI_EMULATOR_DIR, ~/.jalebi/emulator)"),
+                   target_sigma: Optional[float] = typer.Option(None, "--target-sigma", help="max |emulator - exact| / sigma (default 0.1)"),
+                   rebuild: bool = typer.Option(False, "--rebuild", help="ignore cached tables"),
+                   auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first (as the fit would)")):
+    """Build (or verify in the cache) the emulator tables a fit of CONFIG will use: the spectrum is prepared
+    exactly as by `jalebi fit`, so the pixel grid, noise and line lists are the same.  The pipeline builds the
+    tables itself when fit.model_backend is emulator; this command does it ahead of time (e.g. once per disk
+    before a cluster run)."""
+    import time as _time
+    from .config import ProjectConfig
+    from .pipeline import build_problem, detect_and_apply, prepare
+    cfg = ProjectConfig.load(config)
+    _apply_target(cfg, target, name)
+    if cache_dir:
+        cfg.fit.emulator.cache_dir = cache_dir
+    if target_sigma:
+        cfg.fit.emulator.target_sigma = target_sigma
+    if rebuild:
+        cfg.fit.emulator.rebuild = True
+    spec = prepare(cfg)
+    if auto_detect or cfg.fit.auto_detect:
+        cfg, _ = detect_and_apply(cfg, spec)
+    t0 = _time.time()
+    prob = build_problem(cfg, spec, backend="emulator", say=lambda m: rprint(f"[dim]{m}[/dim]"))
+    em = prob.model.emulator
+    t = Table(title=f"{spec.name}: emulator tables ({len(prob.y)} px)")
+    for c in ("unit", "line list", "nodes T x log N", "pixels", "max err [σ]", "max flux err", "MB", "built [s]"):
+        t.add_column(c)
+    for k, tb in em.tables.items():
+        v = tb.meta.get("validation", {})
+        t.add_row(k, tb.linelist, f"{len(tb.lnT)} x {len(tb.logN)}", str(len(tb.pix)), f"{v.get('max_sigma', float('nan')):.3f}",
+                  f"{100 * v.get('max_flux', float('nan')):.3f} %", f"{tb.meta.get('file_bytes', 0) / 1e6:.1f}",
+                  "cache" if tb.meta.get("from_cache") else f"{tb.meta.get('build_s', 0):.0f}")
+    for k, why in em.exact_units.items():
+        t.add_row(k, "—", "exact", "", "", "", "", why)
+    rprint(t)
+    rprint(f"tables in [green]{em.info.get('cache_dir')}[/green] ({_time.time() - t0:.0f} s)")
+
+
+@emulator_app.command("list")
+def emulator_list(cache_dir: Optional[str] = typer.Option(None, "--cache-dir")):
+    """Tables in the emulator cache, with their size and what they cover."""
+    import glob
+    import json as _json
+    from .emulator import default_cache_dir
+    d = cache_dir or default_cache_dir()
+    t = Table(title=f"emulator cache {d}")
+    for c in ("file", "component", "line list", "T [K]", "log N", "nodes", "max err [σ]", "MB"):
+        t.add_column(c)
+    total = 0
+    for f in sorted(glob.glob(os.path.join(d, "*.npz"))):
+        try:
+            import numpy as _np
+            z = _np.load(f, allow_pickle=False)
+            info = _json.loads(str(z["info"])); m = info.get("meta", {})
+            sz = os.path.getsize(f); total += sz
+            t.add_row(os.path.basename(f)[:40], info["component"], info["linelist"], "{:.0f}-{:.0f}".format(*m.get("T_bounds", [0, 0])),
+                      "{:.2f}-{:.2f}".format(*m.get("logN_bounds", [0, 0])), "x".join(map(str, m.get("nodes", []))),
+                      f"{m.get('validation', {}).get('max_sigma', float('nan')):.3f}", f"{sz / 1e6:.1f}")
+        except Exception as e:      # pragma: no cover
+            t.add_row(os.path.basename(f), f"unreadable: {e}", "", "", "", "", "", "")
+    rprint(t)
+    rprint(f"{total / 1e6:.0f} MB")
+
+
 @app.command()
 def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
         name: Optional[str] = typer.Option(None, help=_NAME_HELP), stages: Optional[str] = None,
         out: Optional[str] = typer.Option(None, help=_OUT_HELP),
         processes: Optional[int] = None, nsteps: Optional[int] = None,
-        auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first and fit only those")):
+        auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first and fit only those"),
+        backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)")):
     """Run the fit stages from a config file."""
     from .config import ProjectConfig
     from .pipeline import run_pipeline
@@ -300,6 +372,8 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         cfg.fit.mcmc.processes = processes; cfg.fit.optimise.workers = processes
     if nsteps:
         cfg.fit.mcmc.nsteps = nsteps
+    if backend:
+        cfg.fit.model_backend = backend
     st = stages.split(",") if stages else None
     run = run_pipeline(cfg, stages=st)
     if run.mcmc is not None:

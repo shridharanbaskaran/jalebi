@@ -78,14 +78,28 @@ def free_params(cfg: ProjectConfig) -> list[Param]:
     return [p for p in free if (p.comp, p.name) not in fixed]
 
 
-def build_problem(cfg: ProjectConfig, spec: Spectrum) -> FitProblem:
+def build_problem(cfg: ProjectConfig, spec: Spectrum, backend: str | None = None, say=None) -> FitProblem:
+    """The fit problem of a config and a prepared spectrum.  `backend` (default `fit.model_backend`):
+    "emulator" builds or loads the emulator tables (jalebi.emulator) and attaches them to the model."""
     comps = cfg.components_list()
-    return FitProblem(spec, comps, cfg.windows(), free_params(cfg), area_param=cfg.fit.area_param,
+    prob = FitProblem(spec, comps, cfg.windows(), free_params(cfg), area_param=cfg.fit.area_param,
                       fit_noise_scale=cfg.fit.fit_noise_scale, ordering=[tuple(o) for o in cfg.fit.ordering],
                       window_weights=cfg.window_weights(), oversample=cfg.fit.oversample,
                       releases=cfg.linedata.releases, use_pipeline_err=cfg.fit.use_pipeline_err,
                       tvib_below_trot=cfg.fit.tvib_below_trot,
                       model_kwargs={"R_model": cfg.R_model, "R_scale": cfg.R_scale, "R_constant": cfg.R_constant})
+    backend = backend or cfg.fit.model_backend
+    if backend == "emulator":
+        say = say or (lambda m: act.info("fit", "%s", m))
+        t0 = time.time()
+        say("model backend: emulator (tables in " + (cfg.fit.emulator.cache_dir or "the default cache") + ")")
+        em = prob.use_emulator(cfg.fit.emulator.settings(), say=say)
+        for line in em.summary():
+            say("  " + line)
+        say(f"  emulator ready in {time.time() - t0:.0f} s")
+    elif backend != "exact":
+        raise ValueError(f"unknown fit.model_backend {backend!r}: exact | emulator")
+    return prob
 
 
 @dataclass
@@ -269,7 +283,8 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
         res = run.problem.mcmc(theta, nwalkers=m.nwalkers, nsteps=m.nsteps, processes=m.processes, seed=m.seed,
                                ball=m.ball, progress=prog, checkpoint=ckpt, stop_event=stop_event, thin_by=m.thin_by,
                                moves=m.moves, init=m.init, blocks=m.blocks, de_gamma=m.de_gamma,
-                               linear=linear, linear_prior=m.linear_prior, linear_prior_scale=m.linear_prior_scale)
+                               linear=linear, linear_prior=m.linear_prior, linear_prior_scale=m.linear_prior_scale,
+                               vectorize=m.vectorize)
     finally:
         if bar is not None:
             bar.close()
@@ -315,8 +330,9 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
     detection = None
     if cfg.fit.auto_detect:
         cfg, detection = detect_and_apply(cfg, spec)
-    prob = build_problem(cfg, spec)
-    run = RunResult(cfg, spec, prob)
+    run = RunResult(cfg, spec, None)
+    prob = build_problem(cfg, spec, say=run.say)
+    run.problem = prob
     run.detection = detection
     run.outdir = outdir if save else None
     if save:
@@ -351,10 +367,12 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
             chi2_before = prob.chi2(run.theta)
             run.say(f"continuum refinement pass {it + 1}")
             spec_new = prepare(cfg, spec.copy(), gas_model=gas)
-            prob_new = build_problem(cfg, spec_new)
+            prob_new = build_problem(cfg, spec_new, backend="exact")
             chi2_after = prob_new.chi2(run.theta)
             run.say(f"  chi2 with old continuum {chi2_before:.0f} -> with refined continuum {chi2_after:.0f}")
             if chi2_after < chi2_before:
+                if cfg.fit.model_backend != "exact":       # the tables are certified for this spectrum's noise
+                    prob_new = build_problem(cfg, spec_new, say=run.say)
                 spec, prob = spec_new, prob_new
                 run.spec, run.problem = spec, prob
             else:
@@ -369,6 +387,13 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
 
 
 def save_results(run: RunResult, outdir: str):
+    """Write every product.  With the emulator backend, the best-fit model, the detection test and the plots
+    use the exact model (the chain was sampled with the emulator)."""
+    with run.problem.model.exact():
+        _save_results(run, outdir)
+
+
+def _save_results(run: RunResult, outdir: str):
     from . import plots
     os.makedirs(outdir, exist_ok=True)
     cfg, prob = run.cfg, run.problem

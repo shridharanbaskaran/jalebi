@@ -1020,6 +1020,10 @@ class JalebiApp:
         self.plot_theme_btn.param.watch(lambda e: self.set_plot_theme(e.new), "value")
         self.features_cb = pn.widgets.Checkbox(name="molecular feature markers", value=True, margin=(8, 10, 0, 10))
         self.features_cb.param.watch(lambda e: self.set_feature_marks(e.new), "value")
+        # 0.18: the live model can interpolate precomputed tables (jalebi.emulator) instead of the full model
+        self.emu_cb = pn.widgets.Checkbox(name="fast model sliders (emulator tables)", value=False, margin=(8, 10, 0, 10))
+        self.emu_cb.param.watch(lambda e: self.set_emulator(e.new), "value")
+        self._emu_gen = 0
         self.sidebar = pn.Column(
             _panel(self.status, title="Session"),
             _panel(self.plot_theme_btn, _html('<div class="sf-note" style="margin-top:6px">Switch the figures to a white background '
@@ -1027,6 +1031,10 @@ class JalebiApp:
                    self.features_cb,
                    _html('<div class="sf-note" style="margin-top:2px">Shaded bands mark the Q-branches / band heads of each molecule '
                          '(no H₂O — its lines are everywhere), so you can see which components a spectrum needs.</div>'),
+                   self.emu_cb,
+                   _html('<div class="sf-note" style="margin-top:2px">Builds (T, log N) tables of each slab on these pixels in the '
+                         'background (cached on disk); sliders then cost ~0.1 ms. Outside the tables, and for groups, annuli and '
+                         'screens, the exact model is used.</div>'),
                    title="Display"),
             _panel(self.cfg_download, _html('<div class="sf-note" style="margin:8px 0 4px">Load a config YAML</div>'), self.cfg_upload, title="LTE-fit configuration"),
             _panel(self.linelist_info, title="Line lists"),
@@ -1729,6 +1737,8 @@ class JalebiApp:
                                               R_model=self.cfg.R_model, R_scale=self.cfg.R_scale,
                                               continuum=self.spec.continuum[sel] if self.spec.continuum is not None else None)
             self.disp_model.unit_cache = {}
+            if getattr(self, "emu_cb", None) is not None and self.emu_cb.value:
+                self._start_emulator()
             for card, comp in zip(self.cards, comps):
                 try:
                     ll = self.disp_model.linelist_for(comp)
@@ -1770,6 +1780,60 @@ class JalebiApp:
         self.update_model_plot()
 
     @_bokeh_safe
+    def set_emulator(self, on: bool):
+        """Display toggle: interpolate emulator tables in the live model (built in a background thread)."""
+        self._emu_gen += 1
+        if not on:
+            if self.disp_model is not None:
+                self.disp_model.emulator = None
+            act.info("lte", "live model: exact")
+            self.update_model_plot()
+            return
+        self._start_emulator()
+
+    def _start_emulator(self):
+        if self.spec is None or self.disp_model is None:
+            return
+        from .emulator import attach_emulator
+        from .fit import DEFAULT_BOUNDS
+        model, sel, gen = self.disp_model, self.disp_sel, self._emu_gen
+        cfgs = {c.name: c for c in self.current_config().components}
+        P = model.resolve_params()
+        bounds = {}
+        for key, members in model._units().items():
+            c = members[0]
+            par = cfgs.get(c.tie_to or c.name)
+            if par is None or c.kind != "slab":
+                continue
+            bT = tuple((par.bounds or {}).get("T") or self.cfg.fit.bounds_by_molecule.get(par.molecule, {}).get("T") or DEFAULT_BOUNDS["T"])
+            bN = tuple((par.bounds or {}).get("logN") or self.cfg.fit.bounds_by_molecule.get(par.molecule, {}).get("logN") or DEFAULT_BOUNDS["logN"])
+            if c.tie_to:
+                d = P[par.name]["logN"] - P[c.name]["logN"]
+                bN = (bN[0] - d, bN[1] - d)
+            bounds[key] = {"T": bT, "logN": bN}
+        sig = np.asarray(self.noise()[sel], float)
+        sig = np.where(np.isfinite(sig) & (sig > 0), sig, np.nanmedian(sig))
+        y = (self.spec.flux - (self.spec.continuum if self.spec.continuum is not None else 0.0))[sel]
+        f_ref = float(np.nanmax(np.abs(y))) if np.isfinite(y).any() else 1.0
+        settings = self.cfg.fit.emulator.settings()
+
+        def worker():
+            bar = act.Progress("emulator tables", area="lte")
+            try:
+                em = attach_emulator(model, bounds, sig, f_ref, settings, free_keys=set(),
+                                     say=lambda m: act.debug("lte", "%s", m.strip()))
+                if gen != self._emu_gen or model is not self.disp_model:
+                    model.emulator = None              # toggled off or the model was rebuilt meanwhile
+                    bar.close("superseded")
+                    return
+                bar.close("live model: emulator for " + (", ".join(em.tables) or "no unit") +
+                          (f"; exact: {', '.join(em.exact_units)}" if em.exact_units else ""))
+            except Exception:
+                model.emulator = None
+                bar.close("failed", ok=False)
+                act.log("lte", "emulator build failed:\n%s", traceback.format_exc(), level=logging.ERROR)
+        threading.Thread(target=act.thread_target(worker), daemon=True, name="jalebi-emulator").start()
+
     def update_model_plot(self, refresh_data: bool = False):
         if self.disp_model is None or self.spec is None:
             return

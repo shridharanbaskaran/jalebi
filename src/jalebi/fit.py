@@ -126,6 +126,54 @@ class FitProblem:
         self._base = {c.name: c.params() for c in components}
         self.ncall = 0
 
+    # ---- emulator (fit.model_backend: emulator) -----------------------------------------
+    def emulator_bounds(self) -> tuple[dict, dict]:
+        """Per unit: the (T, log N) box the sampler can reach (prior bounds of the free parameters, the fixed
+        value otherwise; a tied isotopologue's log N box shifted by its ratio range) and the largest area."""
+        free = {p.key: p for p in self.free}
+        comps = {c.name: c for c in self.components if c.enabled}
+
+        def rng(cname, par):
+            p = free.get(f"{cname}.{par}")
+            v = float(self._base[cname][par])
+            return (p.lo, p.hi) if p is not None else (v, v)
+        bounds, amax = {}, {}
+        for key, members in self.model._units().items():
+            c = members[0]
+            if c.kind != "slab":
+                continue
+            par = comps.get(c.tie_to) if c.tie_to else c
+            if par is None:
+                continue
+            T = rng(par.name, "T")
+            N = rng(par.name, "logN")
+            if c.tie_to:
+                r = free.get(f"{c.name}.ratio")
+                rv = float(self._base[c.name].get("ratio", 70.0))
+                rlo, rhi = (r.lo, r.hi) if r is not None else (rv, rv)
+                N = (N[0] - np.log10(rhi), N[1] - np.log10(rlo))
+            a = free.get(f"{par.name}.logR")
+            na = free.get(f"{par.name}.logNA")
+            if a is not None:
+                am = 10.0 ** (2.0 * a.hi)
+            elif na is not None:
+                am = 10.0 ** (na.hi - rng(par.name, "logN")[0] - LOG10PI)
+            else:
+                am = 10.0 ** (2.0 * float(self._base[par.name]["logR"]))
+            bounds[key] = {"T": T, "logN": N}
+            amax[key] = min(am, 10.0 ** (2.0 * DEFAULT_BOUNDS["logR"][1]))
+        return bounds, amax
+
+    def use_emulator(self, settings=None, say=None):
+        """Build or load the emulator tables for this problem (fit.model_backend: emulator) and attach them
+        to the model.  The accuracy is certified against this problem's noise (sigma / sqrt(weight)) at the
+        largest area the brightest pixel allows."""
+        from .emulator import attach_emulator
+        bounds, amax = self.emulator_bounds()
+        sig = self.sigma / np.sqrt(self.weights)
+        f_ref = float(np.nanmax(np.abs(self.y))) if len(self.y) else 1.0
+        return attach_emulator(self.model, bounds, sig, f_ref, settings, {p.key for p in self.free}, amax, say)
+
     # ---- parameter mapping ----------------------------------------------------------
     def theta0(self) -> np.ndarray:
         th = []
@@ -213,6 +261,44 @@ class FitProblem:
             return -np.inf
         ll = self.log_like(theta)
         return lp + ll if np.isfinite(ll) else -np.inf
+
+    # ---- vectorised over walkers (emcee vectorize=True) ------------------------------------
+    def unit_fluxes_many(self, thetas):
+        """(list of resolved parameter dicts, {unit: (nw, npix) 1-au flux}, {unit: (nw,) logR}) for many
+        parameter vectors: one table gather per unit when every unit is emulated, else a loop."""
+        Ps, ls = [], []
+        for t in thetas:
+            P, log_s = self.params_from_theta(t)
+            Ps.append(self.model.resolve_params(P)); ls.append(log_s)
+        em = getattr(self.model, "emulator", None)
+        got = em.unit_fluxes_many(self.model, Ps) if em is not None else None
+        if got is None:
+            per = [self.model.unit_fluxes(P) for P in Ps]
+            keys = list(per[0][0]) if per else []
+            F = {k: np.stack([u[0][k] for u in per]) for k in keys}
+            lR = {k: np.array([u[2][k] for u in per]) for k in keys}
+        else:
+            F, lR = got
+        return Ps, np.array(ls), F, lR
+
+    def log_prob_many(self, thetas) -> np.ndarray:
+        """ln P for an (nw, ndim) array of parameter vectors (same values as log_prob, one model pass)."""
+        thetas = np.atleast_2d(np.asarray(thetas, float))
+        out = np.full(len(thetas), -np.inf)
+        lp = np.array([self.log_prior(t) for t in thetas])
+        ok = np.flatnonzero(np.isfinite(lp))
+        if len(ok) == 0:
+            return out
+        _, ls, F, lR = self.unit_fluxes_many(thetas[ok])
+        M = np.zeros((len(ok), len(self.y)))
+        for k, f in F.items():
+            M += f * (10.0 ** (2.0 * lR[k]))[:, None]
+        s2 = 10.0 ** (2.0 * ls)
+        r2 = (self.y[None, :] - M) ** 2 / (self.sigma[None, :] ** 2 * s2[:, None])
+        ll = -0.5 * np.sum(self.weights[None, :] * (r2 + np.log(2 * np.pi * self.sigma[None, :] ** 2 * s2[:, None])), axis=1)
+        self.ncall += len(ok)
+        out[ok] = np.where(np.isfinite(ll), lp[ok] + ll, -np.inf)
+        return out
 
     # ---- detection test ------------------------------------------------------------------
     def component_significance(self, theta) -> pd.DataFrame:
@@ -542,7 +628,7 @@ class FitProblem:
              ball: float = 1e-2, progress=None, checkpoint: str | None = None, stop_event=None,
              thin_by: int = 1, chunk: int = 50, moves: str = "stretch", init: str = "ball",
              blocks: str = "joint", de_gamma: float = 1.0, linear: str = "sample", linear_prior: str = "log",
-             linear_prior_scale: float | None = None) -> "MCMCResult":
+             linear_prior_scale: float | None = None, vectorize: bool = False) -> "MCMCResult":
         """emcee run around theta0.
 
         moves  : "stretch" (emcee default, Goodman & Weare), "de" (80 % DEMove + 20 % DESnookerMove,
@@ -559,6 +645,7 @@ class FitProblem:
         linear : "sample" (the areas are MCMC parameters), "profile" (areas solved by bounded NNLS inside
                  ln L) or "marginalise" (analytic Gaussian marginal over the areas); see `jalebi.linear`.
                  The returned chain always has the full parameter vector (areas filled in per sample).
+        vectorize : one ln P call evaluates every walker (`log_prob_many`; emcee vectorize=True, no pool).
         `processes` > 1 uses a process pool with the problem sent once to every worker.
         `progress(fraction, sampler)` is called every `chunk` steps; `stop_event.is_set()` stops early."""
         import emcee
@@ -569,7 +656,7 @@ class FitProblem:
                                        nwalkers=nwalkers, nsteps=nsteps, processes=processes, seed=seed, ball=ball,
                                        progress=progress, checkpoint=checkpoint, stop_event=stop_event,
                                        thin_by=thin_by, chunk=chunk, moves=moves, init=init, blocks=blocks,
-                                       de_gamma=de_gamma)
+                                       de_gamma=de_gamma, vectorize=vectorize)
         rng = np.random.default_rng(seed)
         theta0 = np.asarray(theta0, float)
         groups = self.independent_blocks(theta0) if blocks == "auto" else [list(range(self.ndim))]
@@ -593,16 +680,19 @@ class FitProblem:
             mv = make_moves(moves, nd, de_gamma)
             pool = None
             try:
-                if len(groups) == 1:
+                if vectorize:
+                    fn = _target_many(self) if len(groups) == 1 else _BlockLogProbMany(self, theta0, idx)
+                    init_args = None
+                elif len(groups) == 1:
                     fn = _logprob_worker if processes > 1 else _target(self)
                     init_args = (_init_worker, (self,))
                 else:
                     fn = _block_logprob_worker if processes > 1 else _BlockLogProb(self, theta0, idx)
                     init_args = (_init_block_worker, (self, theta0, idx))
-                if processes > 1:
+                if processes > 1 and not vectorize:
                     ctx = mp.get_context("fork") if hasattr(os, "fork") else mp.get_context("spawn")
                     pool = ctx.Pool(processes, initializer=init_args[0], initargs=init_args[1])
-                sampler = emcee.EnsembleSampler(nw, nd, fn, pool=pool, backend=backend, moves=mv)
+                sampler = emcee.EnsembleSampler(nw, nd, fn, pool=pool, backend=backend, moves=mv, vectorize=vectorize)
                 state = p0
                 done = 0
                 while done < nsteps:
@@ -644,7 +734,7 @@ class FitProblem:
             acc = float(np.average(accs, weights=wts))
         res = MCMCResult(self, chain, lnp, acc, time.time() - t_start)
         res.blobs = blobs
-        res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "blocks": [[self.free[j].key for j in g] for g in groups],
+        res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "vectorize": bool(vectorize), "blocks": [[self.free[j].key for j in g] for g in groups],
                     "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results]}
         return res
 
@@ -653,6 +743,23 @@ def _target(problem):
     """The function the sampler calls: ln P, or (ln P, blob) for problems that carry per-sample extras
     (the solved areas of `jalebi.linear.LinearProblem`)."""
     return getattr(problem, "log_prob_blob", None) or problem.log_prob
+
+
+def _target_many(problem):
+    """Vectorised counterpart of `_target`: ln P of every walker, or a list of (ln P, blob)."""
+    return getattr(problem, "log_prob_blob_many", None) or problem.log_prob_many
+
+
+class _BlockLogProbMany:
+    """Vectorised `_BlockLogProb`."""
+
+    def __init__(self, problem, base, idx):
+        self.problem, self.base, self.idx = problem, np.asarray(base, float).copy(), np.asarray(idx)
+
+    def __call__(self, X):
+        T = np.repeat(self.base[None, :], len(X), axis=0)
+        T[:, self.idx] = X
+        return _target_many(self.problem)(T)
 
 
 def make_moves(name: str, ndim: int | None = None, gamma: float = 1.0):

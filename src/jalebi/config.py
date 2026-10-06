@@ -149,6 +149,28 @@ class MCMCConfig(BaseModel):
                                         # sample uses) | gaussian (broad Gaussian on R^2 only: pulls N-unconstrained
                                         # components to small N / large R -- CO on AS 209 went to log N 13.3)
     linear_prior_scale: float | None = None   # marginalise: sigma of the Gaussian prior on R^2 [au^2]; None = R_max^2
+    # 0.18: one ln P call for all walkers (emcee vectorize=True). Pays off with model_backend: emulator (no
+    # process pool then: processes is ignored)
+    vectorize: bool = False
+
+
+class EmulatorConfig(BaseModel):
+    """fit.emulator: precomputed (T, log N) tables of the slab fluxes on the data's pixels (jalebi.emulator)."""
+    target_sigma: float = 0.1           # max |emulator - exact| / sigma at the largest area the data allow
+    target_flux: float = 1e-3           # max relative error of the integrated flux
+    safety: float = 0.5                 # nodes are added until the checks are below safety x target
+    method: str = "cubic"               # cubic (4-point Lagrange per axis) | linear
+    n_start: list[int] = Field(default_factory=lambda: [9, 9])
+    max_nodes: list[int] = Field(default_factory=lambda: [257, 257])
+    n_validate: int = 200               # random (T, log N) checks after a build
+    cache_dir: str | None = None        # None = $JALEBI_EMULATOR_DIR, else ~/.jalebi/emulator
+    rebuild: bool = False               # ignore cached tables
+
+    def settings(self):
+        from .emulator import EmulatorSettings
+        d = self.model_dump()
+        d["n_start"] = tuple(d["n_start"]); d["max_nodes"] = tuple(d["max_nodes"])
+        return EmulatorSettings(**d)
 
 
 class DetectConfig(BaseModel):
@@ -196,6 +218,10 @@ class FitConfig(BaseModel):
     grid: GridConfig = GridConfig()
     optimise: OptimiseConfig = OptimiseConfig()
     mcmc: MCMCConfig = MCMCConfig()
+    # 0.18: exact (the full forward model at every call) | emulator (precomputed tables for the units that allow
+    # it, exact for the rest; built or loaded from the cache before the fit -- see jalebi.emulator)
+    model_backend: str = "exact"
+    emulator: EmulatorConfig = EmulatorConfig()
 
 
 class LineDataConfig(BaseModel):

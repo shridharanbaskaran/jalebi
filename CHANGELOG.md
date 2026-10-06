@@ -3,6 +3,50 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] — 2026-10-06 — a precomputed emulator of the slab model
+
+The exact model costs 8–80 ms per evaluation: an opacity basis on a fine ln λ grid, then the LSF and pixel
+integration of 12 sub-bands. `fit.model_backend: emulator` reads each slab's flux from a table built once on the
+data's own pixels. A ln P then costs 0.2–0.3 ms, and the posterior is unchanged.
+
+FZ Tau, one core (`runs/emulator_report.py`; details in docs/EMULATOR.md):
+
+| | exact | emulator |
+| --- | --- | --- |
+| ln P, FZ_Tau_quick fit (1674 px, 6 units) | 7.8 ms | 0.30 ms (0.18 ms per walker vectorised over 64) |
+| ln P, 4.9–27.5 µm (H2O hot + CO2 + ¹³CO2) | 78.7 ms | 0.17 ms |
+| MCMC, `linear: profile`, 8000 steps × 44 walkers | 1652 s | 112 s (+ 68 s to build the 60 MB of tables) |
+| posterior medians | — | within 0.018 dex and 1.0 K of exact (targets 0.05 dex, 20 K) |
+| accuracy, 9 components × 2000 random (T, log N), 4.9–27.5 µm | — | max 0.045σ (p99 ≤ 0.031σ), max 0.091 % in integrated flux |
+
+### Added
+- `fit.model_backend: exact | emulator` (default `exact`) and `fit.emulator` (`target_sigma` 0.1, `target_flux`
+  1e-3, `safety` 0.5, `method` cubic | linear, `n_start`, `max_nodes`, `n_validate`, `cache_dir`, `rebuild`).
+  New module `jalebi.emulator`.
+- Tables: ln(F + ε) of a 1-au slab per pixel, after the LSF and pixel integration of every sub-band, at the
+  component's fixed v_shift and width, with its own line list (e.g. `H2O:hitemp` for hot water, `H2O:hitran` for
+  cold water). They use 4-point Lagrange (cubic) interpolation in (ln T, log N) on an adaptive tensor grid:
+  interval midpoints and cell centres are checked against the exact model, and nodes are added until every check
+  is below half the target. The error is measured at the largest area the data allow, in σ of each pixel, and in
+  integrated flux (relative to the flux, or to its 1σ noise when the flux is weaker than that).
+- Emulated: plain slabs and tied isotopologues (each tied unit has its own table over its shifted log N range).
+  Exact: opacity groups with several members, annuli, absorption screens, any `covers: all` screen, T_vib
+  components, free rv / fwhm, and any call outside a table. One model mixes both; the reasons are logged.
+- Cache: `.npz` files in `$JALEBI_EMULATOR_DIR` or `~/.jalebi/emulator`. The key covers the line-list content and
+  file SHA-256, the pixel grid, the LSF matrix and version, the fine grid, R(λ), the distance, v_shift, width,
+  windows, the (T, log N) box, the certification noise and reference flux, the targets and the jalebi version.
+  Identical tables are shared.
+- `jalebi emulator build CONFIG` (prepares the spectrum exactly as `jalebi fit` does) and `jalebi emulator list`;
+  `jalebi fit --backend`. The pipeline builds or loads the tables when the backend is `emulator`. All written
+  products (best fit, model.csv, ΔBIC test, plots) use the exact model (`SlabModel.exact()`).
+- `fit.mcmc.vectorize`: one ln P call for all walkers (`FitProblem.log_prob_many`,
+  `LinearProblem.log_prob_blob_many`, emcee `vectorize=True`), also with `blocks: auto`.
+- Web app: the "fast model sliders (emulator tables)" checkbox in the sidebar's Display panel builds tables for
+  the components on screen in the background; the live model then uses them. The layout is otherwise unchanged.
+- `tests/test_emulator.py` (10 tests, among them 2000 random points per unit for CO2, ¹³CO2 and HCN on FZ Tau; the full
+  9-component FZ Tau campaign runs with `JALEBI_EMULATOR_FULL=1`) and
+  `runs/emulator_report.py` (accuracy | posterior | timing).
+
 ## [0.17.0] — 2026-10-06 — the emitting areas can leave the MCMC
 
 The slab flux is linear in the emitting area R², and that area is strongly correlated with log N and T.

@@ -648,6 +648,36 @@ the least converged parameter in all runs: water ≤ 0.01 dex / ≤ 3 K; HCN ≤
 31–38 K. The bare Gaussian prior is the exception: it moves CO to log N 13.3 and HCN T to 731 K, see above.
 `python runs/bench_linear.py results/<run>/<disk>` repeats this on any finished disk.
 
+#### A precomputed emulator of the model (`model_backend`, 0.18)
+
+```yaml
+fit:
+  model_backend: emulator      # exact (default) | emulator
+  emulator: {target_sigma: 0.1, target_flux: 0.001, cache_dir: null}
+  mcmc: {vectorize: false}     # true: one ln P call for all walkers
+```
+
+Each slab's flux for a 1-au radius is tabulated on the data's own pixels, after the LSF and pixel integration
+of every sub-band, at the component's velocity, with its own line list (HITEMP or HITRAN per component). It is
+read back by cubic interpolation of ln F in (ln T, log N). Nodes are added until the error is below the target
+everywhere it is checked. Opacity groups, annuli, absorption screens, T_vib components and free velocities or
+widths stay on the exact model; one fit mixes both. The tables are cached on disk under a hash of the line list,
+the pixels, the LSF, the velocity, the bounds and the jalebi version, so a stale table is never used.
+`jalebi emulator build config.yaml` builds them ahead of time; the pipeline builds them itself otherwise. The
+written products (`model.csv`, `best_fit.json`, the ΔBIC test, the plots) always come from the exact model.
+The web app's sidebar has a toggle for the live sliders. Details and the error measure: [docs/EMULATOR.md](docs/EMULATOR.md).
+
+FZ Tau (`runs/emulator_report.py`, one core):
+
+* Accuracy, 2000 random points per component (H2O hot/warm/cold, CO, CO2 + ¹³CO2, C2H2, HCN, OH; 4.9–27.5 µm):
+  max 0.045σ (p99 ≤ 0.031σ), max 0.091 % in integrated flux.
+* Tables: 140 MB in total, built once in 20 min; the 6 tables of the FZ_Tau_quick fit take 60 MB, built in 68 s
+  and loaded in 0.12 s.
+* Speed: one ln P costs 0.30 ms with the emulator against 7.8 ms exact (13.45–17.5 µm), and 0.18 ms per walker
+  vectorised over 64. On 4.9–27.5 µm it is 0.17 ms against 79 ms.
+* Posterior (`linear: profile`, 8000 steps): medians agree with the exact run within 0.018 dex and 1 K;
+  the MCMC took 112 s against 1652 s.
+
 ### Is a component needed? The ΔBIC test
 
 After the fit, each unit is removed in turn ($\log N \to -30$) and
@@ -924,7 +954,11 @@ fit:
   optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0}   # method de | nelder
   mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true,
          moves: stretch, de_gamma: 1.0, init: ball, blocks: joint,    # moves stretch | de | de+stretch; init ball | scaled; blocks joint | auto
-         linear: sample, linear_prior: log, linear_prior_scale: null}   # linear sample | profile | marginalise (docs/LINEAR.md)
+         linear: sample, linear_prior: log, linear_prior_scale: null,   # linear sample | profile | marginalise (docs/LINEAR.md)
+         vectorize: false}                                              # one ln P call for all walkers (no pool)
+  model_backend: exact            # exact | emulator (docs/EMULATOR.md)
+  emulator: {target_sigma: 0.1, target_flux: 0.001, safety: 0.5, method: cubic, n_start: [9, 9],
+             max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false}
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
 output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023
@@ -945,7 +979,8 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi init FILE --example fz_tau\|synthetic\|water_hot_cold\|blank` | write a config to start from |
 | `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
-| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
+| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
+| `jalebi emulator build CONFIG [--cache-dir DIR] [--target-sigma S] [--rebuild] [--auto-detect]` / `jalebi emulator list` | build or verify the emulator tables of a fit; list the cache |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
 | `jalebi source list ROOT` · `jalebi source info PATH [--preload --workers N]` | target folders under a data root; what one contains (sub-bands, header facts, position; cube read time) |

@@ -223,6 +223,9 @@ class LinearProblem(FitProblem):
         """Linear solve at `theta`: ln L, the areas (profile: bounded NNLS; marginalise: conditional mean),
         a draw of the areas, and whether a conditional mean was <= 0."""
         y, M, log_s = self.design(theta)
+        return self._solve_design(theta, y, M, log_s, draw_rng)
+
+    def _solve_design(self, theta, y, M, log_s, draw_rng=None) -> dict:
         s2 = 10.0 ** (2.0 * log_s)
         sw = self._sw
         yw = y * sw
@@ -301,6 +304,33 @@ class LinearProblem(FitProblem):
         if not np.isfinite(s["lnL"]):
             return -np.inf, np.full(self.blob_size(), np.nan)
         return lp + s["lnL"], np.concatenate([s["a"], s["draw"], s["neg"].astype(float)])
+
+    def log_prob_blob_many(self, thetas):
+        """Vectorised `log_prob_blob`: the unit fluxes of all walkers in one pass (emulator), the small linear
+        solves per walker."""
+        thetas = np.atleast_2d(np.asarray(thetas, float))
+        bad = (-np.inf, np.full(self.blob_size(), np.nan))
+        out = [bad] * len(thetas)
+        lp = np.array([self.log_prior(t) for t in thetas])
+        ok = np.flatnonzero(np.isfinite(lp))
+        if len(ok) == 0:
+            return out
+        _, ls, F, lR = self.unit_fluxes_many(thetas[ok])
+        F = self.model.fold_tied(F)
+        lin = set(self.lin_units)
+        Y = np.repeat(self.y[None, :], len(ok), axis=0)
+        for key, f in F.items():
+            if key not in lin:
+                Y -= f * (10.0 ** (2.0 * lR[key]))[:, None]
+        for j, i in enumerate(ok):
+            th = thetas[i]
+            M = np.column_stack([F[u][j] for u in self.lin_units]) if self.k else np.zeros((len(self.y), 0))
+            rng = np.random.default_rng(np.frombuffer(np.ascontiguousarray(th).tobytes(), np.uint32)) \
+                if self.mode == "marginalise" else None
+            sres = self._solve_design(th, Y[j], M, ls[j], rng)
+            if np.isfinite(sres["lnL"]):
+                out[i] = (lp[i] + sres["lnL"], np.concatenate([sres["a"], sres["draw"], sres["neg"].astype(float)]))
+        return out
 
     def blob_owner(self, groups) -> np.ndarray:
         """Block (index into `groups`) whose sampler provides each blob column: the block that samples the
