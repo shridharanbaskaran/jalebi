@@ -550,8 +550,8 @@ unit $u$'s flux for $R = 1$ au (with any tied isotopologue's flux added in, sinc
 components are the exception: they keep their outer radius as an ordinary parameter. For the grid and the global optimiser, JALEBI therefore solves the
 areas by **non-negative least squares** (Lawson & Hanson 1974) at every step. This profiles out one
 parameter per component, and it makes the optimiser's search space smaller and better conditioned. The
-MCMC samples the areas like any other parameter, so their uncertainties and correlations are in the
-posterior.
+MCMC samples the areas like any other parameter by default, so their uncertainties and correlations are in the
+posterior; since 0.17 it can also profile or marginalise them (`fit.mcmc.linear`, below).
 
 ### The three stages
 
@@ -599,6 +599,54 @@ same posterior medians (CHANGELOG 0.16.0). `blocks: auto` is exact because the l
 components whose fluxes never overlap above 0.02 σ cannot change each other's χ². Only the noise scale is shared:
 it is sampled with the block that has the most pixels. The blocks used are listed in the fit log and in
 `diagnostics.json`.
+
+#### Taking the emitting areas out of the MCMC (`linear`, 0.17)
+
+Each slab's flux is linear in its emitting area R², and that area is strongly correlated with log N and T.
+As in DuCKLinG (Kaeufer et al. 2024), the areas can be removed from the sampled vector:
+
+```yaml
+fit:
+  mcmc:
+    linear: profile        # sample (default) | profile | marginalise
+    linear_prior: log      # marginalise only: log (default) | gaussian
+```
+
+* `profile`: at every likelihood call the areas are solved by non-negative least squares (bounded to the old
+  logR / logNA prior range), so only T, log N (and log s, v, Δv, …) are sampled.
+* `marginalise`: the areas are integrated out analytically under a broad Gaussian prior (log-determinant
+  Occam term and the noise scale included). Positivity is not part of the integral. It is imposed on the area
+  draws, and samples whose conditional mean area is ≤ 0 are counted and reported. The default `linear_prior: log`
+  adds the Jacobian of a prior uniform in log R, the prior `sample` uses. With `linear_prior: gaussian` (the bare
+  Gaussian marginal), a component whose N is not measured (only N·A) is pulled to small N and large areas. On
+  AS 209, CO went to log N 13.3 and R 11 au.
+* What is linear: slab areas, one per opacity group (tied isotopologues ride on the parent's area). Annuli radii,
+  covering fractions, ratios, and areas that are fixed or carry a Gaussian prior stay in the sampler. There are
+  no continuum offsets in the likelihood. Full audit: [docs/LINEAR.md](docs/LINEAR.md).
+* The chain keeps every column. The areas are filled in per sample (NNLS solution, or a draw from the conditional
+  Gaussian), so `summary.csv` (R_au, logNA, logNmol), the corner plots and the QA notebook work as before.
+  `chain.npz` gains the keys `linear` and `sampled`.
+* Works with `moves: de`, `init: scaled` and `blocks: auto`.
+
+AS 209 (13 parameters, 2000 steps, `moves: de`, `init: scaled`, `blocks: auto`):
+
+| `linear` | sampled dims | max τ | median τ | max R̂ | acceptance | wall time (s) | ms per independent sample |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `sample` | 13 | 125 | 72 | 1.31 | 0.10 | 1268 | 2476 |
+| `profile` | 9 | 94 | 35 | 1.06 | 0.15 | 1184 | 1745 |
+| `marginalise` (`log`) | 9 | 83 | 33 | 1.06 | 0.16 | 1210 | 1570 |
+| `marginalise` (`gaussian`) | 9 | 90 | 28 | 1.09 | 0.18 | 1067 | 1507 |
+| `sample`, stretch / ball / joint (0.15 sampler) | 13 | 192 | 138 | 1.75 | 0.27 | 1469 | 2716 |
+| `profile`, stretch / ball / joint | 9 | 142 | 107 | 1.46 | 0.33 | 946 | 1860 |
+
+Each run used 2 blocks × 32 walkers, on one core of a cloud sandbox, at 11–15 ms per call. "ms per independent sample"
+is wall × τ_max / (steps × walkers). The water and HCN parameters mix 2.5–4× faster (H2O_hot τ 52 → 19, HCN
+88 → 25). CO stays slowest (τ ≈ 90, against 125 in `sample`) because of its own log N–T degeneracy. That gives
+≈ 1.4–1.6× per independent sample and median τ halved, not DuCKLinG's 80×: that figure also includes
+their samplers and model. The posterior medians agree with `sample` for every parameter except CO, which is
+the least converged parameter in all runs: water ≤ 0.01 dex / ≤ 3 K; HCN ≤ 0.02 dex / ≤ 9 K; CO 0.12–0.14 dex /
+31–38 K. The bare Gaussian prior is the exception: it moves CO to log N 13.3 and HCN T to 731 K, see above.
+`python runs/bench_linear.py results/<run>/<disk>` repeats this on any finished disk.
 
 ### Is a component needed? The ΔBIC test
 
@@ -875,7 +923,8 @@ fit:
   grid: {logN: [14, 20, 25], T: [150, 1200, 22], order: [], n_jobs: 1}          # [lo, hi, n]
   optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0}   # method de | nelder
   mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true,
-         moves: stretch, de_gamma: 1.0, init: ball, blocks: joint}   # moves stretch | de | de+stretch; init ball | scaled; blocks joint | auto
+         moves: stretch, de_gamma: 1.0, init: ball, blocks: joint,    # moves stretch | de | de+stretch; init ball | scaled; blocks joint | auto
+         linear: sample, linear_prior: log, linear_prior_scale: null}   # linear sample | profile | marginalise (docs/LINEAR.md)
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
 output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023

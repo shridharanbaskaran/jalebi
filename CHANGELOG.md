@@ -3,6 +3,67 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] — 2026-10-06 — the emitting areas can leave the MCMC
+
+The slab flux is linear in the emitting area R², and that area is strongly correlated with log N and T.
+DuCKLinG (Kaeufer et al. 2024, A&A 687, A209) removes such linear parameters from the Bayesian run. jalebi already
+profiled them in the grid and the optimiser; now the MCMC can do the same.
+
+| AS 209, 2000 steps, `de` / `scaled` / `blocks: auto` | dims | max τ | median τ | max R̂ | wall (s) | ms / independent sample |
+| --- | --- | --- | --- | --- | --- | --- |
+| `linear: sample` (0.16) | 13 | 125 | 72 | 1.31 | 1268 | 2476 |
+| `linear: profile` | 9 | 94 | 35 | 1.06 | 1184 | 1745 |
+| `linear: marginalise` (prior `log`) | 9 | 83 | 33 | 1.06 | 1210 | 1570 |
+| `linear: marginalise` (prior `gaussian`) | 9 | 90 | 28 | 1.09 | 1067 | 1507 |
+| stretch / ball / joint: `sample` → `profile` | 13 → 9 | 192 → 142 | 138 → 107 | 1.75 → 1.46 | 1469 → 946 | 2716 → 1860 |
+
+Water and HCN mix 2.5–4× faster; CO (its own log N–T degeneracy) stays the slowest parameter. The medians agree
+with `sample` for every parameter except CO (≤ 0.02 dex, ≤ 9 K; CO, the least converged, 0.12–0.14 dex and 31–38 K),
+except for the bare Gaussian prior (see Changed).
+
+### Added
+- `fit.mcmc.linear`: `sample` (default, unchanged), `profile` (areas solved by NNLS at every likelihood call, bounded
+  to the old logR / logNA range by BVLS when needed) or `marginalise` (analytic Gaussian marginal over the areas:
+  log-determinant Occam term, noise scale s inside it). `fit.mcmc.linear_prior` (`log` | `gaussian`) and
+  `linear_prior_scale` (σ of the Gaussian on R², default R_max²). New module `jalebi.linear`
+  (`LinearProblem`, `linear_audit`, `run_linear_mcmc`); hook in `FitProblem.mcmc(linear=...)`.
+- Linear audit (docs/LINEAR.md, and in the fit log): slab areas are linear, with one area per opacity group;
+  tied isotopologues are folded into the parent's column. Annuli radii, covering fractions, ratios, and areas
+  that are fixed or carry a Gaussian prior stay in the sampler. There are no continuum offsets in the likelihood.
+  With `area_param: logNA`, `logNA` is removed and log N is sampled; `logNA` is rebuilt per sample.
+- Area posteriors: profile stores the NNLS areas per sample, and marginalise stores one draw from the conditional
+  Gaussian truncated to a > 0 (emcee blobs). Both are written into the chain, so `summary.csv` (R_au, logNA,
+  logNmol), corner plots and the QA notebook work unchanged.
+- `chain.npz` keeps its layout and gains `linear`, `sampled` and `area_mean`; old files read as `sample`.
+  `diagnostics.json` adds `linear`, `linear_prior`, `linear_units`, `linear_params`, `sampled`, `tau_sampled`,
+  `linear_neg_frac` (samples with a conditional mean area ≤ 0, warned above 1 %) and `linear_outside_bounds_frac`.
+- Works with `moves: de`, `init: scaled`, `blocks: auto`, process pools and HDF5 checkpoints. A block left with no
+  nonlinear parameter is dropped, and its area is still solved and taken from block 0.
+- `runs/bench_linear.py`: rebuilds a finished disk from config.yaml + model.csv + best_fit.json and times the modes.
+- `tests/test_linear.py` (13 tests), including: the analytic marginal against quadrature; ln L(profile) equals the
+  full ln L with ties, groups, annuli and screens; two-molecule recovery within 1σ; agreement with `sample` to
+  ≤ 30 K and ≤ 0.1 dex on converged runs.
+
+### Changed
+- `linear_prior` defaults to `log`, which adds −ln â, the Jacobian of the uniform-in-log-R prior that `sample`
+  uses. The bare Gaussian marginal (`gaussian`) pulled AS 209's CO, whose N is barely measured, to log N 13.3 and
+  R 11 au.
+- `runs/validation_blind.yaml`, `runs/survey_300_autodetect.yaml` (still in sync) and `validation_known.yaml`:
+  the option is present, commented out. The configs keep `sample`, so the planned validation_blind_v2 run is
+  unchanged.
+- QA notebook: the convergence table shows `linear` and `n_sampled`.
+
+### Fixed
+- Continuum with pybaselines 1.1 under NumPy 2 (`irsqr`/`asls`/`aspls` failed with "Unable to avoid copy while
+  creating an array as requested": pybaselines 1.1 calls `np.array(x, dtype=float, copy=False)` on the integer
+  `x_data` jalebi passed). jalebi now passes native float64 arrays (also in `jalebi.cube`), and the minimum is
+  pybaselines ≥ 1.2 (pyproject, requirements.txt, environment.yml, `jalebi doctor`), because 1.1 also lacks
+  `aspls(asymmetric_coef=...)`.
+
+### Not done
+- A vectorised likelihood (`emcee vectorize=True`): a batched model evaluation gave only 1.24× (23.7 → 19.1 ms per
+  walker) on AS 209, at ≈ 60 MB per unit and with a second code path. The process pool gains more.
+
 ## [0.16.0] — 2026-10-06 — a sampler that converges on multi-molecule fits
 
 The blind validation run with 0.15 (17 disks, 5000 steps) converged nowhere: the integrated autocorrelation

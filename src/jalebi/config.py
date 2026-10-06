@@ -139,6 +139,16 @@ class MCMCConfig(BaseModel):
     de_gamma: float = 1.0               # DE step relative to 2.38/sqrt(2 ndim); < 1 raises the acceptance
     init: str = "ball"                  # ball: theta0 + ball x prior range; scaled: theta0 + local posterior widths
     blocks: str = "joint"               # joint | auto: sample groups of components that share no pixel separately
+    # linear parameters (0.17): the emitting areas R^2 of slab units enter the model linearly
+    #   sample      = MCMC parameters like the others (default, the 0.16 behaviour)
+    #   profile     = solved by bounded NNLS at every likelihood call (DuCKLinG, Kaeufer+2024)
+    #   marginalise = integrated out analytically under a broad Gaussian prior
+    # The chain still holds every parameter (areas filled in per sample); see jalebi.linear
+    linear: str = "sample"
+    linear_prior: str = "log"           # marginalise: log (Gaussian marginal + Jacobian of a uniform-in-log R prior, as
+                                        # sample uses) | gaussian (broad Gaussian on R^2 only: pulls N-unconstrained
+                                        # components to small N / large R -- CO on AS 209 went to log N 13.3)
+    linear_prior_scale: float | None = None   # marginalise: sigma of the Gaussian prior on R^2 [au^2]; None = R_max^2
 
 
 class DetectConfig(BaseModel):

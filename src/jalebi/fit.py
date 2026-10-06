@@ -3,7 +3,8 @@
 Stages
   1. grid      chi^2 over (log N, T) for one component with its area solved by NNLS
   2. optimise  joint global optimiser (differential evolution, areas by NNLS) + Nelder-Mead polish
-  3. mcmc      emcee (parallel over a process pool), convergence diagnostics, summaries
+  3. mcmc      emcee (parallel over a process pool), convergence diagnostics, summaries; the emitting
+               areas can be profiled or marginalised out of it (fit.mcmc.linear, jalebi.linear)
 
 Parameterisation
   per component: logN [cm^-2], T [K], logR [au] (or logNA = log10(N * A[au^2]) when
@@ -540,7 +541,8 @@ class FitProblem:
     def mcmc(self, theta0, nwalkers: int | None = None, nsteps: int = 2000, processes: int = 1, seed: int = 0,
              ball: float = 1e-2, progress=None, checkpoint: str | None = None, stop_event=None,
              thin_by: int = 1, chunk: int = 50, moves: str = "stretch", init: str = "ball",
-             blocks: str = "joint", de_gamma: float = 1.0) -> "MCMCResult":
+             blocks: str = "joint", de_gamma: float = 1.0, linear: str = "sample", linear_prior: str = "log",
+             linear_prior_scale: float | None = None) -> "MCMCResult":
         """emcee run around theta0.
 
         moves  : "stretch" (emcee default, Goodman & Weare), "de" (80 % DEMove + 20 % DESnookerMove,
@@ -554,9 +556,20 @@ class FitProblem:
                  groups, so this is exact except for the shared noise scale, which is sampled with the
                  largest group and held at theta0 by the others. The chains are merged into one result
                  (walker j of a smaller group is reused for walker j mod n).
+        linear : "sample" (the areas are MCMC parameters), "profile" (areas solved by bounded NNLS inside
+                 ln L) or "marginalise" (analytic Gaussian marginal over the areas); see `jalebi.linear`.
+                 The returned chain always has the full parameter vector (areas filled in per sample).
         `processes` > 1 uses a process pool with the problem sent once to every worker.
         `progress(fraction, sampler)` is called every `chunk` steps; `stop_event.is_set()` stops early."""
         import emcee
+        if linear and linear != "sample":
+            from .linear import normalise_mode, run_linear_mcmc
+            if normalise_mode(linear) != "sample":
+                return run_linear_mcmc(self, theta0, linear, prior=linear_prior, prior_scale=linear_prior_scale,
+                                       nwalkers=nwalkers, nsteps=nsteps, processes=processes, seed=seed, ball=ball,
+                                       progress=progress, checkpoint=checkpoint, stop_event=stop_event,
+                                       thin_by=thin_by, chunk=chunk, moves=moves, init=init, blocks=blocks,
+                                       de_gamma=de_gamma)
         rng = np.random.default_rng(seed)
         theta0 = np.asarray(theta0, float)
         groups = self.independent_blocks(theta0) if blocks == "auto" else [list(range(self.ndim))]
@@ -581,7 +594,7 @@ class FitProblem:
             pool = None
             try:
                 if len(groups) == 1:
-                    fn = _logprob_worker if processes > 1 else self.log_prob
+                    fn = _logprob_worker if processes > 1 else _target(self)
                     init_args = (_init_worker, (self,))
                 else:
                     fn = _block_logprob_worker if processes > 1 else _BlockLogProb(self, theta0, idx)
@@ -604,27 +617,42 @@ class FitProblem:
             finally:
                 if pool is not None:
                     pool.close(); pool.join()
-            results.append((idx, sampler.get_chain(), sampler.get_log_prob(), float(np.mean(sampler.acceptance_fraction)), nw))
+            blobs = sampler.get_blobs() if hasattr(self, "log_prob_blob") else None
+            results.append((idx, sampler.get_chain(), sampler.get_log_prob(), float(np.mean(sampler.acceptance_fraction)), nw, blobs))
             if stop_event is not None and stop_event.is_set():
                 break
         if len(results) == 1 and len(groups) == 1:
-            idx, chain, lnp, acc, nw = results[0]
+            idx, chain, lnp, acc, nw, blobs = results[0]
         else:                                   # merge the groups into one (steps, walkers, ndim) chain
             ns = min(r[1].shape[0] for r in results)
             nw = max(r[4] for r in results)
             chain = np.repeat(np.repeat(theta0[None, None, :], ns, axis=0), nw, axis=1)
             lnp = np.full((ns, nw), -(len(results) - 1) * lp0)
+            blobs = None
+            if results[0][5] is not None:      # linear modes: each blob column comes from its unit's block
+                owner = self.blob_owner(groups)
+                blobs = np.full((ns, nw, len(owner)), np.nan)
             accs, wts = [], []
-            for idx, ch, lp_, acc, n_ in results:
+            for gi, (idx, ch, lp_, acc, n_, bl) in enumerate(results):
                 take = np.arange(nw) % n_
                 chain[:, :, idx] = ch[:ns][:, take, :]
                 lnp += lp_[:ns][:, take]
+                if blobs is not None:
+                    cols = np.flatnonzero(owner == gi)
+                    blobs[:, :, cols] = bl[:ns][:, take][:, :, cols]
                 accs.append(acc); wts.append(len(idx))
             acc = float(np.average(accs, weights=wts))
         res = MCMCResult(self, chain, lnp, acc, time.time() - t_start)
+        res.blobs = blobs
         res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "blocks": [[self.free[j].key for j in g] for g in groups],
                     "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results]}
         return res
+
+
+def _target(problem):
+    """The function the sampler calls: ln P, or (ln P, blob) for problems that carry per-sample extras
+    (the solved areas of `jalebi.linear.LinearProblem`)."""
+    return getattr(problem, "log_prob_blob", None) or problem.log_prob
 
 
 def make_moves(name: str, ndim: int | None = None, gamma: float = 1.0):
@@ -652,7 +680,7 @@ class _BlockLogProb:
     def __call__(self, x):
         t = self.base.copy()
         t[self.idx] = x
-        return self.problem.log_prob(t)
+        return _target(self.problem)(t)
 
 
 # module-level hooks for the process pool -------------------------------------------------------------
@@ -670,7 +698,7 @@ def _init_worker(problem):
 
 
 def _logprob_worker(theta):
-    return _PROBLEM.log_prob(theta)
+    return _target(_PROBLEM)(theta)
 
 
 _BLOCK: "_BlockLogProb | None" = None
@@ -765,6 +793,10 @@ class MCMCResult:
         self.names = [p.key for p in problem.free]
         self.labels = [p.label for p in problem.free]
         self.meta: dict = {}                # sampler settings (moves, init, blocks), written to diagnostics.json
+        self.blobs = None                   # per-sample extras of the sampler (linear modes: solved areas)
+        self.linear = "sample"              # sample | profile | marginalise (jalebi.linear)
+        self.sampled = np.ones(chain.shape[2], bool)   # columns the sampler moved (areas are filled in otherwise)
+        self.area_mean = None               # linear modes: NNLS areas / conditional means a = R^2 per sample
 
     @property
     def nsteps(self):
@@ -887,8 +919,15 @@ class MCMCResult:
         return np.percentile(M, 50, axis=0), np.percentile(M, 16, axis=0), np.percentile(M, 84, axis=0)
 
     def save(self, path: str):
+        # layout unchanged since 0.9 (chain = every free parameter, so readers of `chain`/`names` keep working);
+        # 0.17 adds `linear` (sample | profile | marginalise) and `sampled` (False for the areas that were
+        # profiled / marginalised and filled in per sample) -- old files lack them: treat as sample / all True
+        extra = {}
+        if self.area_mean is not None:
+            extra["area_mean"] = self.area_mean
         np.savez_compressed(path, chain=self.chain, log_prob=self.log_prob, acceptance=self.acceptance,
-                            runtime_s=self.runtime_s, names=np.array(self.names), labels=np.array(self.labels))
+                            runtime_s=self.runtime_s, names=np.array(self.names), labels=np.array(self.labels),
+                            linear=np.array(self.linear), sampled=np.asarray(self.sampled, bool), **extra)
 
 
 # ------------------------------------------------------------------------------------

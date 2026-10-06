@@ -205,9 +205,22 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
             run.say("  h5py not installed: MCMC checkpointing is off (pip install h5py)")
             ckpt = None
     nwalkers = m.nwalkers or max(4 * run.problem.ndim, 32)
+    from .linear import linear_audit, normalise_mode
+    linear = normalise_mode(m.linear)
+    if linear != "sample":
+        aud = linear_audit(run.problem)
+        nlin = int(aud.linear.sum())
+        nwalkers = m.nwalkers or max(4 * (run.problem.ndim - nlin), 32)
     run.say(f"mcmc: nwalkers={nwalkers}, nsteps={m.nsteps}, processes={m.processes}, moves={m.moves}{f' (gamma x{m.de_gamma:g})' if m.moves != 'stretch' else ''}, init={m.init}, "
-            f"blocks={m.blocks} ({nwalkers * m.nsteps:,} likelihood calls for a joint run; checkpoint {ckpt or 'off'})")
-    if m.blocks == "auto":
+            f"blocks={m.blocks}, linear={linear}{f' (prior {m.linear_prior})' if linear == 'marginalise' else ''} "
+            f"({nwalkers * m.nsteps:,} likelihood calls for a joint run; checkpoint {ckpt or 'off'})")
+    if linear != "sample":
+        run.say(f"  {nlin} linear area(s) {'profiled (NNLS)' if linear == 'profile' else 'marginalised'}: "
+                + ", ".join(aud.parameter[aud.linear]) + f"; sampled: {run.problem.ndim - nlin} parameters")
+        kept = aud[~aud.linear & aud.parameter.str.endswith(("logR", "logNA"))]
+        for r in kept.itertuples():
+            run.say(f"  {r.parameter} stays in the sampler: {r.reason}")
+    if m.blocks == "auto" and linear == "sample":
         groups = run.problem.independent_blocks(run.theta if run.theta is not None else run.problem.theta0())
         if len(groups) > 1:
             run.say("  independent parameter groups (sampled one after the other): " + " | ".join(
@@ -255,7 +268,8 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
     try:
         res = run.problem.mcmc(theta, nwalkers=m.nwalkers, nsteps=m.nsteps, processes=m.processes, seed=m.seed,
                                ball=m.ball, progress=prog, checkpoint=ckpt, stop_event=stop_event, thin_by=m.thin_by,
-                               moves=m.moves, init=m.init, blocks=m.blocks, de_gamma=m.de_gamma)
+                               moves=m.moves, init=m.init, blocks=m.blocks, de_gamma=m.de_gamma,
+                               linear=linear, linear_prior=m.linear_prior, linear_prior_scale=m.linear_prior_scale)
     finally:
         if bar is not None:
             bar.close()
@@ -264,6 +278,13 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
     run.mcmc = res
     run.theta = res.median_theta()
     d = res.diagnostics()
+    if linear != "sample":
+        if m.blocks == "auto" and len(d.get("blocks", [])) > 1:
+            run.say("  independent parameter groups (sampled one after the other): " + " | ".join(", ".join(g) for g in d["blocks"]))
+        neg = {u: f for u, f in d.get("linear_neg_frac", {}).items() if f > 0.01}
+        if neg:
+            run.say("  warning: conditional mean area <= 0 in " + ", ".join(f"{u} ({100 * f:.0f} % of samples)" for u, f in neg.items())
+                    + ": not detected; positivity is only imposed on the draws (use linear: profile or sample)")
     run.say(f"  done: acceptance={d['acceptance']:.2f} max tau={np.nanmax(d['tau']):.0f} steps/tau={d['steps_over_tau']:.0f} "
             f"{'(converged length)' if d['converged_length'] else '(need >= 50 tau)'} max Rhat={np.nanmax(d['rhat']):.3f} "
             f"burn-in {d['burn']} ({res.runtime_s:.0f}s)")
