@@ -133,6 +133,12 @@ class MCMCConfig(BaseModel):
     ball: float = 0.01
     thin_by: int = 1
     checkpoint: bool = True
+    # sampler (0.16): "stretch" = emcee default; "de" = 80 % DEMove + 20 % DESnookerMove (shorter
+    # autocorrelation times for 15-30 correlated parameters); "de+stretch" = 60/20/20
+    moves: str = "stretch"
+    de_gamma: float = 1.0               # DE step relative to 2.38/sqrt(2 ndim); < 1 raises the acceptance
+    init: str = "ball"                  # ball: theta0 + ball x prior range; scaled: theta0 + local posterior widths
+    blocks: str = "joint"               # joint | auto: sample groups of components that share no pixel separately
 
 
 class DetectConfig(BaseModel):
@@ -165,6 +171,9 @@ class FitConfig(BaseModel):
     fit_rv: bool = False
     fit_fwhm: bool = False
     ordering: list[list[str]] = Field(default_factory=list)   # [[hotter, colder], ...]
+    # prior bounds for every component of a molecule, e.g. {CO: {T: [100, 3000]}} (components written by the
+    # detection included); a component's own `bounds` still win.  Default bounds: jalebi.fit.DEFAULT_BOUNDS
+    bounds_by_molecule: dict[str, dict[str, list[float]]] = Field(default_factory=dict)
     window_weights: dict[int, float] = Field(default_factory=dict)
     use_pipeline_err: bool = False
     oversample: int = 6

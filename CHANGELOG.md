@@ -3,6 +3,48 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] — 2026-10-06 — a sampler that converges on multi-molecule fits
+
+The blind validation run with 0.15 (17 disks, 5000 steps) converged nowhere: the integrated autocorrelation
+time was τ ≈ 330 steps for *every* parameter (noise scale included), so the chains were only 10–15 τ long and
+split-R̂ was 1.45–2.0. A τ that is the same for all parameters is the signature of emcee's stretch move in
+13–26 dimensions, not of one degeneracy. On AS 209 (13 parameters, 2000 steps) the new options give:
+
+| sampler | max τ | median τ | acceptance |
+| --- | --- | --- | --- |
+| 0.15: stretch move, 1 % ball (5000-step run) | 427 | 290 | 0.21 |
+| `moves: de`, `init: scaled` | 151 | 113 | 0.08 |
+| `moves: de`, `de_gamma: 0.5` | 143 | 101 | 0.26 |
+| `moves: de+stretch` | 142 | 105 | 0.12 |
+| `moves: de`, `init: scaled`, `blocks: auto` | 131 | 61 | 0.10 |
+
+Posterior medians agree with the 0.15 run to ≤ 0.1 dex and ≤ 30 K. The slowest parameters left are CO's, whose
+temperature sat at the 1500 K prior bound; hence `bounds_by_molecule`.
+
+### Added
+- `fit.mcmc.moves`: `stretch` (default, unchanged), `de` (80 % `DEMove` + 20 % `DESnookerMove`, ter Braak &
+  Vrugt 2008) or `de+stretch` (60/20/20); `fit.mcmc.de_gamma` scales the DE step (2.38/√(2 ndim) × this).
+- `fit.mcmc.init`: `ball` (default, unchanged: 1 % of each prior range) or `scaled`: walkers start at the local
+  posterior width of each parameter, measured from the curvature of ln P around the optimum
+  (`FitProblem.local_widths`, ~2 × 12 × ndim likelihood calls).
+- `fit.mcmc.blocks`: `joint` (default, unchanged) or `auto`: components that share no fitted pixel (flux above
+  0.02 σ at the optimum; ties, opacity groups and `ordering` also link components) are sampled by separate
+  samplers with the other blocks held at the optimum, then merged into one chain (`FitProblem.independent_blocks`).
+  The likelihood is a sum over blocks, so this is exact except for the shared noise scale, which is sampled with
+  the block that has the most pixels. Typically CO + ro-vibrational water (4.9–8 µm) and the 12–27.5 µm
+  components split; C₂H₂ (7.5 µm ν4+ν5 band) links them again. 9 of the 17 validation disks split.
+- `fit.bounds_by_molecule`, e.g. `{CO: {T: [100, 3000]}}`: prior bounds for every component of a molecule,
+  including those written by the auto-detection (a component's own `bounds` still win). CO HITEMP pruned at
+  1500 K keeps 99.7 % of the 3000 K opacity.
+- `diagnostics.json` records `moves`, `de_gamma`, `init`, the parameter `blocks`, and per-block acceptance and
+  walker numbers. The fit log names the blocks.
+- `tests/test_sampler.py` (6 tests).
+
+### Changed
+- `runs/validation_blind.yaml` and `runs/survey_300_autodetect.yaml` (in sync): `moves: de`, `init: scaled`,
+  `blocks: auto`, `nsteps: 6000`, CO / ¹³CO T up to 3000 K. The blind validation now writes to
+  `results/validation_blind_v2/`, so the 0.15 run stays for comparison.
+
 ## [0.15.0] — 2026-10-05 — the terminal shows what the web app is doing
 
 ### Added

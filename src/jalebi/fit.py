@@ -408,53 +408,251 @@ class FitProblem:
                          self.model.tau_flags(self.params_from_theta(th)[0]))
 
     # ---- stage 3: MCMC ------------------------------------------------------------------------------
+    def local_widths(self, theta, target: float = 0.5, max_iter: int = 12) -> np.ndarray:
+        """Per-parameter width of the posterior around `theta` from the curvature of ln P along each axis:
+        the step h at which ln P drops by about `target` on average over +h and -h gives
+        sigma = h / sqrt(2 * drop).  These are conditional widths (the other parameters held fixed), so
+        they underestimate the marginal widths along degeneracies; used to start the walkers at the
+        right scale instead of in a fixed fraction of the prior range.  Costs ~2 x max_iter x ndim calls."""
+        theta = np.asarray(theta, float)
+        span = self.hi - self.lo
+        f0 = self.log_prob(theta)
+        out = np.empty(self.ndim)
+        for i in range(self.ndim):
+            h = 1e-3 * span[i]
+            drop = np.nan
+            for _ in range(max_iter):
+                vals = []
+                for sgn in (1.0, -1.0):
+                    t = theta.copy(); t[i] = theta[i] + sgn * h
+                    v = self.log_prob(t) if self.lo[i] < t[i] < self.hi[i] else -np.inf
+                    vals.append(v)
+                fin = [v for v in vals if np.isfinite(v)]
+                drop = f0 - np.mean(fin) if fin else np.inf
+                if drop < 0.2 * target and h < 0.1 * span[i]:
+                    h *= 3.0
+                elif drop > 4.0 * target and h > 1e-6 * span[i]:
+                    h /= 2.5
+                else:
+                    break
+            sig = h / np.sqrt(2.0 * drop) if np.isfinite(drop) and drop > 0 else 1e-3 * span[i]
+            out[i] = float(np.clip(sig, 1e-5 * span[i], 0.1 * span[i]))
+        return out
+
+    def independent_blocks(self, theta=None, frac: float = 0.02) -> list[list[int]]:
+        """Indices of the free parameters split into groups that share no pixel.
+
+        A component's support is the set of fitted pixels where its flux at `theta` exceeds `frac` x the
+        noise (without `theta`: pixels within ~2 resolution elements of any of its lines, inside its own
+        `windows`, which links far more).  Two components are linked when their supports overlap, when
+        one is tied to the other, when they share an opacity group, or when `ordering` relates them.
+        Where no component of one group is above `frac` sigma, a change of its parameters cannot move
+        the other group's likelihood by more than ~frac^2 per pixel, so the likelihood is (to that
+        accuracy) a sum over groups and each group can be sampled on its own.  Global parameters (the
+        noise scale) go to the group with the most pixels.  Absorbing screens that cover everything make a
+        single group."""
+        comps = [c for c in self.components if c.enabled]
+        names = [c.name for c in comps]
+        if any(c.kind == "absorption" and c.covers == "all" for c in comps):
+            return [list(range(self.ndim))]
+        parent = {n: n for n in names}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            if a in parent and b in parent:
+                parent[find(a)] = find(b)
+        sup = {}
+        if theta is not None:
+            P, log_s = self.params_from_theta(np.asarray(theta, float))
+            _, per, _ = self.model.evaluate(P, per_unit=True)
+            thr = frac * self.sigma * (10.0 ** log_s)
+            for key, members in self.model._units().items():
+                f = per.get(key)
+                m = np.abs(f) > thr if f is not None else np.zeros(len(self.wave), bool)
+                for c in members:
+                    sup[c.name] = m
+        tol = self.wave / 1500.0
+        for c in comps:
+            if c.name in sup:
+                if c.tie_to:
+                    union(c.name, c.tie_to)
+                continue
+            try:
+                w = np.sort(self.model.linelist_for(c).wave)
+            except KeyError:
+                w = np.array([])
+            m = np.zeros(len(self.wave), bool)
+            if len(w):
+                i = np.searchsorted(w, self.wave)
+                left = w[np.clip(i - 1, 0, len(w) - 1)]; right = w[np.clip(i, 0, len(w) - 1)]
+                m = np.minimum(np.abs(self.wave - left), np.abs(right - self.wave)) < tol
+            wm = self.model.window_mask(c)
+            if wm is not None:
+                m &= wm
+            sup[c.name] = m
+            if c.tie_to:
+                union(c.name, c.tie_to)
+        for c in comps:
+            if c.group:
+                for d in comps:
+                    if d.group == c.group:
+                        union(c.name, d.name)
+        for hot, cold in self.ordering:
+            union(hot, cold)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                if np.any(sup[a] & sup[b]):
+                    union(a, b)
+        roots = {}
+        for n in names:
+            roots.setdefault(find(n), []).append(n)
+        groups = list(roots.values())
+        npix = [int(np.any([sup[n] for n in g], axis=0).sum()) for g in groups]
+        order = np.argsort(npix)[::-1]
+        groups = [groups[k] for k in order]
+        blocks = [[j for j, p in enumerate(self.free) if p.comp in set(g)] for g in groups]
+        glob = [j for j, p in enumerate(self.free) if p.comp == "global"]
+        blocks[0] = sorted(blocks[0] + glob)
+        return [b for b in blocks if b]
+
+    def initial_walkers(self, theta0, nwalkers, rng, init: str = "ball", ball: float = 1e-2, widths=None):
+        """Starting positions: "ball" = theta0 + ball x (prior range) x N(0,1) (the old behaviour);
+        "scaled" = theta0 + local posterior width x N(0,1) (see `local_widths`)."""
+        theta0 = np.asarray(theta0, float)
+        scale = ball * (self.hi - self.lo) if init == "ball" else \
+            (self.local_widths(theta0) if widths is None else np.asarray(widths, float))
+        eps = 1e-6 * (self.hi - self.lo)
+        p0 = np.clip(theta0 + scale * rng.standard_normal((nwalkers, self.ndim)), self.lo + eps, self.hi - eps)
+        for i in range(nwalkers):            # every walker inside the prior (ordering constraints) and finite
+            k = 0
+            while not np.isfinite(self.log_prob(p0[i])) and k < 100:
+                f = 0.5 ** (k // 10)
+                p0[i] = np.clip(theta0 + f * scale * rng.standard_normal(self.ndim), self.lo + eps, self.hi - eps); k += 1
+            if not np.isfinite(self.log_prob(p0[i])):
+                p0[i] = theta0
+        return p0, scale
+
     def mcmc(self, theta0, nwalkers: int | None = None, nsteps: int = 2000, processes: int = 1, seed: int = 0,
              ball: float = 1e-2, progress=None, checkpoint: str | None = None, stop_event=None,
-             thin_by: int = 1, chunk: int = 50) -> "MCMCResult":
-        """emcee run started in a small ball around theta0.  `processes` > 1 uses a process pool with
-        the problem sent once to every worker.  `progress(fraction, sampler)` is called every `chunk`
-        steps; `stop_event.is_set()` stops early."""
+             thin_by: int = 1, chunk: int = 50, moves: str = "stretch", init: str = "ball",
+             blocks: str = "joint", de_gamma: float = 1.0) -> "MCMCResult":
+        """emcee run around theta0.
+
+        moves  : "stretch" (emcee default, Goodman & Weare), "de" (80 % DEMove + 20 % DESnookerMove,
+                 ter Braak & Vrugt 2008: much shorter autocorrelation times on the correlated 15-30
+                 parameter posteriors of multi-molecule fits), or "de+stretch" (60/20/20).
+        de_gamma : scale of the DE step relative to emcee's 2.38 / sqrt(2 ndim).
+        init   : "ball" (fixed fraction `ball` of the prior range) or "scaled" (local posterior widths).
+        blocks : "joint" (one sampler over all parameters) or "auto": groups of components that share no
+                 pixel (e.g. CO + ro-vibrational water at 4.9-8 um vs everything at 12-27.5 um) are sampled
+                 by separate samplers with the other groups held at theta0. The likelihood is a sum over
+                 groups, so this is exact except for the shared noise scale, which is sampled with the
+                 largest group and held at theta0 by the others. The chains are merged into one result
+                 (walker j of a smaller group is reused for walker j mod n).
+        `processes` > 1 uses a process pool with the problem sent once to every worker.
+        `progress(fraction, sampler)` is called every `chunk` steps; `stop_event.is_set()` stops early."""
         import emcee
         rng = np.random.default_rng(seed)
-        nwalkers = nwalkers or max(4 * self.ndim, 32)
         theta0 = np.asarray(theta0, float)
-        p0 = theta0 + ball * (self.hi - self.lo) * rng.standard_normal((nwalkers, self.ndim))
-        p0 = np.clip(p0, self.lo + 1e-6 * (self.hi - self.lo), self.hi - 1e-6 * (self.hi - self.lo))
-        # make sure every walker starts inside the prior (ordering constraints)
-        for i in range(nwalkers):
-            k = 0
-            while not np.isfinite(self.log_prior(p0[i])) and k < 100:
-                p0[i] = theta0 + ball * (self.hi - self.lo) * rng.standard_normal(self.ndim)
-                p0[i] = np.clip(p0[i], self.lo + 1e-6, self.hi - 1e-6); k += 1
-        backend = None
-        if checkpoint:
-            backend = emcee.backends.HDFBackend(checkpoint)
-            backend.reset(nwalkers, self.ndim)
+        groups = self.independent_blocks(theta0) if blocks == "auto" else [list(range(self.ndim))]
+        widths = self.local_widths(theta0) if init == "scaled" else None
+        nw_default = lambda n: max(4 * n, 32)
         t_start = time.time()
-        pool = None
-        try:
-            if processes > 1:
-                ctx = mp.get_context("fork") if hasattr(os, "fork") else mp.get_context("spawn")
-                pool = ctx.Pool(processes, initializer=_init_worker, initargs=(self,))
-                sampler = emcee.EnsembleSampler(nwalkers, self.ndim, _logprob_worker, pool=pool, backend=backend)
-            else:
-                sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_prob, backend=backend)
-            state = p0
-            done = 0
-            while done < nsteps:
-                n = min(chunk, nsteps - done)
-                state = sampler.run_mcmc(state, n, progress=False, thin_by=thin_by, skip_initial_state_check=True)
-                done += n
-                if progress:
-                    progress(done / nsteps, sampler)
-                if stop_event is not None and stop_event.is_set():
-                    break
-        finally:
-            if pool is not None:
-                pool.close(); pool.join()
-        chain = sampler.get_chain()
-        lnp = sampler.get_log_prob()
-        return MCMCResult(self, chain, lnp, float(np.mean(sampler.acceptance_fraction)), time.time() - t_start)
+        lp0 = self.log_prob(theta0)
+        results = []
+        total_steps = nsteps * len(groups)
+        done_all = 0
+        for gi, idx in enumerate(groups):
+            idx = np.asarray(idx)
+            nd = len(idx)
+            nw = nwalkers if (nwalkers and len(groups) == 1) else (nwalkers if nwalkers and nwalkers >= 2 * nd else nw_default(nd))
+            p0_full, _ = self.initial_walkers(theta0, nw, rng, init=init, ball=ball, widths=widths)
+            p0 = p0_full[:, idx]
+            backend = None
+            if checkpoint:
+                backend = emcee.backends.HDFBackend(checkpoint, name="mcmc" if len(groups) == 1 else f"mcmc_block{gi}")
+                backend.reset(nw, nd)
+            mv = make_moves(moves, nd, de_gamma)
+            pool = None
+            try:
+                if len(groups) == 1:
+                    fn = _logprob_worker if processes > 1 else self.log_prob
+                    init_args = (_init_worker, (self,))
+                else:
+                    fn = _block_logprob_worker if processes > 1 else _BlockLogProb(self, theta0, idx)
+                    init_args = (_init_block_worker, (self, theta0, idx))
+                if processes > 1:
+                    ctx = mp.get_context("fork") if hasattr(os, "fork") else mp.get_context("spawn")
+                    pool = ctx.Pool(processes, initializer=init_args[0], initargs=init_args[1])
+                sampler = emcee.EnsembleSampler(nw, nd, fn, pool=pool, backend=backend, moves=mv)
+                state = p0
+                done = 0
+                while done < nsteps:
+                    n = min(chunk, nsteps - done)
+                    state = sampler.run_mcmc(state, n, progress=False, thin_by=thin_by, skip_initial_state_check=True)
+                    done += n
+                    if progress:
+                        progress((done_all + done) / total_steps, sampler)
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                done_all += done
+            finally:
+                if pool is not None:
+                    pool.close(); pool.join()
+            results.append((idx, sampler.get_chain(), sampler.get_log_prob(), float(np.mean(sampler.acceptance_fraction)), nw))
+            if stop_event is not None and stop_event.is_set():
+                break
+        if len(results) == 1 and len(groups) == 1:
+            idx, chain, lnp, acc, nw = results[0]
+        else:                                   # merge the groups into one (steps, walkers, ndim) chain
+            ns = min(r[1].shape[0] for r in results)
+            nw = max(r[4] for r in results)
+            chain = np.repeat(np.repeat(theta0[None, None, :], ns, axis=0), nw, axis=1)
+            lnp = np.full((ns, nw), -(len(results) - 1) * lp0)
+            accs, wts = [], []
+            for idx, ch, lp_, acc, n_ in results:
+                take = np.arange(nw) % n_
+                chain[:, :, idx] = ch[:ns][:, take, :]
+                lnp += lp_[:ns][:, take]
+                accs.append(acc); wts.append(len(idx))
+            acc = float(np.average(accs, weights=wts))
+        res = MCMCResult(self, chain, lnp, acc, time.time() - t_start)
+        res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "blocks": [[self.free[j].key for j in g] for g in groups],
+                    "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results]}
+        return res
+
+
+def make_moves(name: str, ndim: int | None = None, gamma: float = 1.0):
+    """emcee move list for a name (see FitProblem.mcmc).  `gamma` scales the differential-evolution step
+    (emcee default 2.38 / sqrt(2 ndim)): below 1 raises the acceptance on curved, non-Gaussian posteriors."""
+    import emcee
+    name = (name or "stretch").lower()
+    if name == "stretch":
+        return None
+    g0 = None if (ndim is None or gamma == 1.0) else gamma * 2.38 / np.sqrt(2.0 * ndim)
+    de = emcee.moves.DEMove(gamma0=g0)
+    if name == "de":
+        return [(de, 0.8), (emcee.moves.DESnookerMove(), 0.2)]
+    if name in ("de+stretch", "mixed"):
+        return [(de, 0.6), (emcee.moves.DESnookerMove(), 0.2), (emcee.moves.StretchMove(), 0.2)]
+    raise ValueError(f"unknown MCMC moves {name!r}: stretch | de | de+stretch")
+
+
+class _BlockLogProb:
+    """ln P as a function of one group's parameters, the others held at `base`."""
+
+    def __init__(self, problem, base, idx):
+        self.problem, self.base, self.idx = problem, np.asarray(base, float).copy(), np.asarray(idx)
+
+    def __call__(self, x):
+        t = self.base.copy()
+        t[self.idx] = x
+        return self.problem.log_prob(t)
 
 
 # module-level hooks for the process pool -------------------------------------------------------------
@@ -473,6 +671,23 @@ def _init_worker(problem):
 
 def _logprob_worker(theta):
     return _PROBLEM.log_prob(theta)
+
+
+_BLOCK: "_BlockLogProb | None" = None
+
+
+def _init_block_worker(problem, base, idx):
+    global _BLOCK
+    _BLOCK = _BlockLogProb(problem, base, idx)
+    try:
+        import threadpoolctl
+        threadpoolctl.threadpool_limits(1)
+    except Exception:
+        pass
+
+
+def _block_logprob_worker(x):
+    return _BLOCK(x)
 
 
 _DE_STATE = None
@@ -549,6 +764,7 @@ class MCMCResult:
         self.runtime_s = runtime_s
         self.names = [p.key for p in problem.free]
         self.labels = [p.label for p in problem.free]
+        self.meta: dict = {}                # sampler settings (moves, init, blocks), written to diagnostics.json
 
     @property
     def nsteps(self):
@@ -593,7 +809,8 @@ class MCMCResult:
         rh = self.rhat(b)
         return {"acceptance": self.acceptance, "tau": tau, "steps_over_tau": self.nsteps / np.nanmax(tau) if np.isfinite(np.nanmax(tau)) else np.nan,
                 "converged_length": bool(ok_len), "rhat": rh, "rhat_ok": bool(np.nanmax(rh) < 1.05) if np.any(np.isfinite(rh)) else False,
-                "n_eff": n_eff, "burn": b, "acceptance_ok": 0.15 < self.acceptance < 0.6, "runtime_s": self.runtime_s}
+                "n_eff": n_eff, "burn": b, "acceptance_ok": 0.15 < self.acceptance < 0.6, "runtime_s": self.runtime_s,
+                **self.meta}
 
     def summary(self, burn: int | None = None) -> pd.DataFrame:
         """Median and 16/84 % of every free parameter plus derived log(N·A), N (molecules), R."""

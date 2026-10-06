@@ -559,7 +559,7 @@ posterior.
 | --- | --- | --- |
 | **grid** | χ² over (log N, T) for one component at a time (config order or `grid.order`), with the others held at their current values and the component's area from a 1-D NNLS. Maps show Δχ² contours (2.30, 6.17, 11.8 = 1, 2, 3σ for two parameters), the τ = 1 contour and an edge flag | the familiar MINDS-style view, and a good starting point |
 | **optimise** | `scipy` differential evolution (Storn & Price 1997) over all non-area parameters jointly, areas by NNLS, parallel population evaluation; then a Nelder–Mead polish of the full posterior | finds the global mode when bands overlap and components interact |
-| **mcmc** | `emcee` affine-invariant ensemble sampler (Goodman & Weare 2010; Foreman-Mackey et al. 2013). Walkers (default max(4·ndim, 32)) start in a ball of 1 % of each prior width around the optimum. The work is spread over a process pool, and chains are checkpointed to HDF5 | posterior uncertainties and degeneracies |
+| **mcmc** | `emcee` ensemble sampler (Goodman & Weare 2010; Foreman-Mackey et al. 2013). Walkers (default max(4·ndim, 32)) start in a ball of 1 % of each prior width around the optimum, or at the local posterior widths (`init: scaled`). Moves: emcee's stretch move (default) or differential evolution (`moves: de`, ter Braak & Vrugt 2008), and independent parts of the spectrum can be sampled as separate blocks (`blocks: auto`), see below. The work is spread over a process pool, and chains are checkpointed to HDF5 | posterior uncertainties and degeneracies |
 
 ### Convergence diagnostics (reported for every run)
 
@@ -576,6 +576,29 @@ The summary (`summary.csv`) gives the median and 16/84 % of every free parameter
 `logNmol` and `R_au`. The figures are `corner.png`, `correlation.png` (every parameter against every
 other, across molecules), `traces.png` and `posterior_predictive.png` (the 16–84 % band of 100 posterior
 draws over the data).
+
+### Choosing the sampler for many-molecule fits
+
+With 13–26 free parameters emcee's default stretch move mixes slowly: on the blind validation set (0.15,
+5000 steps) every parameter had τ ≈ 330 steps, so the chains were 10–15 τ long and R̂ ≈ 1.5–2. Three
+options (all off by default, so older configs give the same results) fix this:
+
+```yaml
+fit:
+  mcmc:
+    moves: de          # differential-evolution moves: ~3x shorter τ on these posteriors
+    init: scaled       # start the walkers at each parameter's local posterior width
+    blocks: auto       # sample components that share no pixel (e.g. CO + ro-vib water at 4.9-8 µm) separately
+    nsteps: 6000
+  bounds_by_molecule:
+    CO: {T: [100, 3000]}   # hot CO otherwise piles up at the 1500 K default bound
+```
+
+On AS 209 these cut the median τ from 290 to 61 steps (max 427 → 131) at the same cost per step, with the
+same posterior medians (CHANGELOG 0.16.0). `blocks: auto` is exact because the likelihood is a sum over pixels:
+components whose fluxes never overlap above 0.02 σ cannot change each other's χ². Only the noise scale is shared:
+it is sampled with the block that has the most pixels. The blocks used are listed in the fit log and in
+`diagnostics.json`.
 
 ### Is a component needed? The ΔBIC test
 
@@ -851,7 +874,9 @@ fit:
   detect: {threshold: 10, candidates: [], replace_windows: true, keep_undetected: false, oversample: 2}
   grid: {logN: [14, 20, 25], T: [150, 1200, 22], order: [], n_jobs: 1}          # [lo, hi, n]
   optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0}   # method de | nelder
-  mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true}
+  mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true,
+         moves: stretch, de_gamma: 1.0, init: ball, blocks: joint}   # moves stretch | de | de+stretch; init ball | scaled; blocks joint | auto
+  bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
 output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023
 R_scale: 1.0

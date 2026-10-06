@@ -63,7 +63,9 @@ def prepare(cfg: ProjectConfig, spec: Spectrum | None = None, gas_model: np.ndar
 def free_params(cfg: ProjectConfig) -> list[Param]:
     comps = cfg.components_list()
     bounds = dict(DEFAULT_BOUNDS)
-    for c in cfg.components:
+    for c in cfg.components:                 # per-molecule bounds (fit.bounds_by_molecule), then per component
+        for k, v in (cfg.fit.bounds_by_molecule.get(c.molecule) or {}).items():
+            bounds[f"{c.name}.{k}"] = tuple(v)
         for k, v in c.bounds.items():
             bounds[f"{c.name}.{k}"] = tuple(v)
     free = default_free_params(comps, area_param=cfg.fit.area_param, fit_rv=cfg.fit.fit_rv,
@@ -203,8 +205,13 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
             run.say("  h5py not installed: MCMC checkpointing is off (pip install h5py)")
             ckpt = None
     nwalkers = m.nwalkers or max(4 * run.problem.ndim, 32)
-    run.say(f"mcmc: nwalkers={nwalkers}, nsteps={m.nsteps}, processes={m.processes} "
-            f"({nwalkers * m.nsteps:,} likelihood calls; checkpoint {ckpt or 'off'})")
+    run.say(f"mcmc: nwalkers={nwalkers}, nsteps={m.nsteps}, processes={m.processes}, moves={m.moves}{f' (gamma x{m.de_gamma:g})' if m.moves != 'stretch' else ''}, init={m.init}, "
+            f"blocks={m.blocks} ({nwalkers * m.nsteps:,} likelihood calls for a joint run; checkpoint {ckpt or 'off'})")
+    if m.blocks == "auto":
+        groups = run.problem.independent_blocks(run.theta if run.theta is not None else run.problem.theta0())
+        if len(groups) > 1:
+            run.say("  independent parameter groups (sampled one after the other): " + " | ".join(
+                ", ".join(run.problem.free[j].key for j in g) for g in groups))
     bar = abar = None
     if verbose and progress is None and act.enabled(logging.INFO):
         abar = act.Progress("mcmc", total=m.nsteps, unit="step", area="fit")
@@ -247,7 +254,8 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
 
     try:
         res = run.problem.mcmc(theta, nwalkers=m.nwalkers, nsteps=m.nsteps, processes=m.processes, seed=m.seed,
-                               ball=m.ball, progress=prog, checkpoint=ckpt, stop_event=stop_event, thin_by=m.thin_by)
+                               ball=m.ball, progress=prog, checkpoint=ckpt, stop_event=stop_event, thin_by=m.thin_by,
+                               moves=m.moves, init=m.init, blocks=m.blocks, de_gamma=m.de_gamma)
     finally:
         if bar is not None:
             bar.close()
