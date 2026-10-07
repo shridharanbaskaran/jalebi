@@ -648,14 +648,35 @@ the least converged parameter in all runs: water ≤ 0.01 dex / ≤ 3 K; HCN ≤
 31–38 K. The bare Gaussian prior is the exception: it moves CO to log N 13.3 and HCN T to 731 K, see above.
 `python runs/bench_linear.py results/<run>/<disk>` repeats this on any finished disk.
 
-#### A precomputed emulator of the model (`model_backend`, 0.18)
+#### A precomputed emulator of the model (`model_backend`, 0.18; shared tables 0.21)
 
 ```yaml
 fit:
   model_backend: emulator      # exact (default) | emulator
-  emulator: {target_sigma: 0.1, target_flux: 0.001, cache_dir: null}
+  emulator: {cache: shared, target_sigma: 0.1, target_flux: 0.001, cache_dir: null,   # cache: shared (0.21) | per_disk (0.18)
+             ref_snr: 1000, points_per_fwhm: 8, read_only: false, spot_check: 200}
   mcmc: {vectorize: false}     # true: one ln P call for all walkers
 ```
+
+```bash
+jalebi emulator build --survey runs/survey_300_autodetect.yaml -j 16   # once per survey: every table the config could need
+jalebi emulator list runs/survey_300_autodetect.yaml                   # the cache, and what each component gets
+jalebi fit config.yaml --backend emulator                              # loads the shared tables, spot-checks, fits
+```
+
+**Shared tables (0.21, the default `cache: shared`).** The tables are built once for a whole survey and resampled
+onto every disk: what is tabulated is the LSF-convolved spectrum H = G_R ⊗ I of a 1-au slab at 1 pc on a dense
+rest-frame ln λ grid (one segment per MRS sub-band, 8 points per LSF FWHM, padded for |v| ≤ 150 km/s). Per disk a
+sparse operator averages the cubic interpolant of H over the disk's own pixel edges (shifted by −rv/c), scaled by
+(1 pc/d)², and the result is a 0.18 table on the disk's pixels, so the cost per ln P is the same. The tables are
+certified at build time against a reference S/N of 1000 (a pointwise error below 1e-4 of each node's peak) and
+spot-checked at fit time against the exact model on the disk's own pixels and noise (200 random points per unit;
+a unit that fails 0.1σ / 0.1 % uses the exact model, with a warning and an entry in `diagnostics.json`). The cache key
+holds the physics (line list hash, width, R, dense grid, box, ref S/N, targets, `EMULATOR_MODEL_VERSION`) and not
+the jalebi version, the pixels, v_shift, distance, windows or noise, so one file serves every disk and every
+release. Storage is memory-mapped `.npy` under `<cache_dir>/shared/`, with a lock file so that 300 cluster jobs
+sharing one cache build each table exactly once; `read_only: true` (or `JALEBI_EMULATOR_READONLY=1`) on compute
+nodes never builds. `cache: per_disk` keeps the 0.18 tables on the data's own pixels.
 
 Each slab's flux for a 1-au radius is tabulated on the data's own pixels, after the LSF and pixel integration
 of every sub-band, at the component's velocity, with its own line list (HITEMP or HITRAN per component). It is
@@ -665,9 +686,28 @@ widths stay on the exact model; one fit mixes both. The tables are cached on dis
 the pixels, the LSF, the velocity, the bounds and the jalebi version, so a stale table is never used.
 `jalebi emulator build config.yaml` builds them ahead of time; the pipeline builds them itself otherwise. The
 written products (`model.csv`, `best_fit.json`, the ΔBIC test, the plots) always come from the exact model.
-The web app's sidebar has a toggle for the live sliders. Details and the error measure: [docs/EMULATOR.md](docs/EMULATOR.md).
+The web app's sidebar has a toggle for the live sliders (shared tables when they exist, per-disk tables otherwise).
+Details and the error measure: [docs/EMULATOR.md](docs/EMULATOR.md).
 
-FZ Tau (`runs/emulator_report.py`, one core):
+Shared tables, FZ Tau and synthetic grids (`runs/emulator_report.py`, 0.21):
+
+* Build once: the six tables of the FZ Tau set (H2O HITEMP, CO 100–3000 K, CO2, ¹³CO2, C2H2, HCN; 100–1500 K,
+  log N 13–21) take 4.2 core-hours in the sandbox (1.9 h wall with 2 jobs; the H2O table is 1.7 GB and 2 h), 3.5 GB
+  in all, memory-mapped. The 15 tables of the survey config are an estimated 3–4 core-hours on a modern core.
+* Accuracy, FZ Tau 4.9–27.5 µm, 2000 random points per component (8 components): max 0.015σ (p99 0.014σ), max
+  0.007 % in flux — 3–13× better than the 0.18 per-disk tables (0.045σ / 0.091 %). Two synthetic grids with other
+  sub-bands, v_shift (+15, −60 km/s), distances and S/N: max 0.075σ / 0.005 %. The same file serves every disk
+  (FZ Tau and a synthetic disk with other pixels, rv and distance read the same keys).
+* Per disk: 10 s to load, project and spot-check the 6 units of the quick fit, 49 s for the 8 full-range units;
+  ln P costs 0.44 ms (0.34 ms per walker vectorised) against 0.40 / 0.31 ms per-disk and 15 / 18 ms exact (sandbox).
+* Posterior (FZ_Tau_quick, profile, 8000 steps): every median within 0.027 dex and 4.9 K of the exact run (0.05 / 20
+  targets), and within the seed-to-seed scatter of the chains of the per-disk run.
+* Survey: ~40 core-hours for 300 disks in sandbox units (≈ 20 on the benchmark machine) plus the one-time build,
+  against 132 (0.18 per-disk) and 670 (exact).
+* Three exact-model fixes fell out of the comparison (see the CHANGELOG): line profiles to 6σ, pixel edges per
+  sub-band, the whole pixel box next to masked regions, and one pruning rule for the line lists.
+
+Per-disk tables, FZ Tau (`runs/emulator_report.py`, 0.18, one core):
 
 * Accuracy, 2000 random points per component (H2O hot/warm/cold, CO, CO2 + ¹³CO2, C2H2, HCN, OH; 4.9–27.5 µm):
   max 0.045σ (p99 ≤ 0.031σ), max 0.091 % in integrated flux.
@@ -1000,8 +1040,9 @@ fit:
   sampler: emcee                  # emcee | dynesty (fit.dynesty below)
   dynesty: {nlive: 500, sample: rslice, bound: multi, dynamic: true, dlogz_init: 0.5, pfrac: 0.8, n_effective: null,
             maxcall: null, processes: 1, seed: 0, slices: null, walks: null, evidence_without: []}
-  emulator: {target_sigma: 0.1, target_flux: 0.001, safety: 0.5, method: cubic, n_start: [9, 9],
-             max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false}
+  emulator: {cache: shared, target_sigma: 0.1, target_flux: 0.001, safety: 0.5, method: cubic, n_start: [9, 9],
+             max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false,
+             ref_snr: 1000, points_per_fwhm: 8, table_oversample: 6, read_only: false, spot_check: 200}   # 0.21 shared tables
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
 output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023
@@ -1023,7 +1064,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
 | `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--sampler emcee\|dynesty] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
-| `jalebi emulator build CONFIG [--cache-dir DIR] [--target-sigma S] [--rebuild] [--auto-detect]` / `jalebi emulator list` | build or verify the emulator tables of a fit; list the cache |
+| `jalebi emulator build CONFIG [CONFIG ...] [--survey] [-j N] [--cache-dir DIR] [--ref-snr S] [--points-per-fwhm P] [--rebuild] [--per-disk [--auto-detect]]` / `jalebi emulator list [CONFIG]` | build or verify the shared emulator tables of a survey (0.21) or the per-disk tables of one fit; list the cache, and with a config what each component gets |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
 | `jalebi source list ROOT` · `jalebi source info PATH [--preload --workers N]` | target folders under a data root; what one contains (sub-bands, header facts, position; cube read time) |

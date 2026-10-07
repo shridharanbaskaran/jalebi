@@ -155,7 +155,7 @@ def full_spectrum_model(spec, problem, theta, oversample: int = 3):
     P, _ = problem.params_from_theta(theta)
     wmin, wmax = float(np.nanmin(spec.wave)), float(np.nanmax(spec.wave))
     m = build_model(problem.components, spec.wave, spec.distance_pc, [(wmin, wmax)],
-                    linelists=None, releases=None, oversample=oversample,
+                    linelists=None, releases=None, oversample=oversample, T_max=getattr(problem, "T_max", None),
                     R_model=problem.model.R_model, R_scale=problem.model.R_scale, continuum=spec.continuum)
     total, units, _ = m.evaluate(P, per_unit=True)
     return total, units

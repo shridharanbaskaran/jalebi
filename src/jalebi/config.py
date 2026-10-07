@@ -184,12 +184,32 @@ class EmulatorConfig(BaseModel):
     n_validate: int = 200               # random (T, log N) checks after a build
     cache_dir: str | None = None        # None = $JALEBI_EMULATOR_DIR, else ~/.jalebi/emulator
     rebuild: bool = False               # ignore cached tables
+    # 0.21: shared = one table per molecule for the whole survey (LSF-convolved spectrum on a dense grid, resampled
+    # onto each disk's pixels at load, spot-checked against the exact model; jalebi.emulator_shared) | per_disk =
+    # the 0.18 tables on the data's own pixels (rebuilt per disk and per release)
+    cache: str = "shared"
+    ref_snr: float = 1000.0             # shared: certified against sigma = (node's peak, scaled to f_ref) / ref_snr
+    points_per_fwhm: float = 8.0        # shared: dense-grid points per LSF FWHM
+    table_oversample: int = 6           # shared: fine-grid points per line FWHM when a table is built (independent of
+                                        # fit.oversample: at 3 the exact model's line profiles depend on the phase of
+                                        # its fine grid at the 1e-3 level, which no shared table can reproduce)
+    read_only: bool = False             # shared: never build (compute nodes; also $JALEBI_EMULATOR_READONLY=1)
+    spot_check: int = 200               # shared: random (T, log N) per unit checked on the disk at load (0 = off)
+    bands: list[str] | None = None      # shared: MRS sub-bands of the dense grid (null = all 12; tests and experiments)
 
-    def settings(self):
+    def settings(self, cfg=None):
+        """EmulatorSettings; with the ProjectConfig, the survey-wide (T, log N) boxes per molecule
+        (emulator_shared.molecule_boxes) are filled in so that a fit looks up the same shared tables a
+        `jalebi emulator build` of that config wrote."""
         from .emulator import EmulatorSettings
         d = self.model_dump()
         d["n_start"] = tuple(d["n_start"]); d["max_nodes"] = tuple(d["max_nodes"])
-        return EmulatorSettings(**d)
+        d["bands"] = tuple(d["bands"]) if d.get("bands") else None
+        s = EmulatorSettings(**d)
+        if cfg is not None and s.cache == "shared":
+            from .emulator_shared import molecule_boxes
+            s.boxes = molecule_boxes(cfg)
+        return s
 
 
 class DetectConfig(BaseModel):

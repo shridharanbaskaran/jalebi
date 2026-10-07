@@ -112,8 +112,18 @@ class FitProblem:
                 w[(self.wave >= a) & (self.wave <= b)] = ww
         self.weights = w
         cont = spec.continuum[used] if spec.continuum is not None else None
+        # highest T each molecule can reach (prior bound of a free T, else the fixed value): the line lists are
+        # pruned at that temperature too (0.21), so a 3000 K CO prior keeps the hot-band lines
+        self.T_max = {}
+        for c in components:
+            if not c.enabled:
+                continue
+            src = c.tie_to or c.name
+            p = next((q for q in free if q.comp == src and q.name == "T"), None)
+            t = float(p.hi) if p is not None else float(next((d.T for d in components if d.name == src), c.T))
+            self.T_max[c.molecule] = max(self.T_max.get(c.molecule, 0.0), t)
         self.model = build_model(components, self.wave, spec.distance_pc, windows, linelists=linelists,
-                                 releases=releases, oversample=oversample, continuum=cont, **(model_kwargs or {}))
+                                 releases=releases, oversample=oversample, continuum=cont, T_max=self.T_max, **(model_kwargs or {}))
         if self.model.absorbers() and (cont is None or not np.any(np.isfinite(cont) & (cont != 0))):
             import warnings
             warnings.warn("absorption components need a continuum (spec.continuum is empty): they will "
@@ -168,10 +178,17 @@ class FitProblem:
         """Build or load the emulator tables for this problem (fit.model_backend: emulator) and attach them
         to the model.  The accuracy is certified against this problem's noise (sigma / sqrt(weight)) at the
         largest area the brightest pixel allows."""
-        from .emulator import attach_emulator
+        from .emulator import EmulatorSettings, attach_emulator
+        settings = settings or EmulatorSettings()
         bounds, amax = self.emulator_bounds()
         sig = self.sigma / np.sqrt(self.weights)
         f_ref = float(np.nanmax(np.abs(self.y))) if len(self.y) else 1.0
+        if getattr(settings, "cache", "shared") == "shared":
+            # 0.21: survey-wide tables resampled onto this disk's pixels, spot-checked against the exact model
+            from .emulator_shared import attach_shared_emulator
+            return attach_shared_emulator(self.model, bounds, sig, f_ref, settings, {p.key for p in self.free}, amax, say)
+        if settings.cache != "per_disk":
+            raise ValueError(f"unknown fit.emulator.cache {settings.cache!r}: shared | per_disk")
         return attach_emulator(self.model, bounds, sig, f_ref, settings, {p.key for p in self.free}, amax, say)
 
     # ---- parameter mapping ----------------------------------------------------------

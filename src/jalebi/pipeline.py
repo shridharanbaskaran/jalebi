@@ -92,8 +92,8 @@ def build_problem(cfg: ProjectConfig, spec: Spectrum, backend: str | None = None
     if backend == "emulator":
         say = say or (lambda m: act.info("fit", "%s", m))
         t0 = time.time()
-        say("model backend: emulator (tables in " + (cfg.fit.emulator.cache_dir or "the default cache") + ")")
-        em = prob.use_emulator(cfg.fit.emulator.settings(), say=say)
+        say(f"model backend: emulator ({cfg.fit.emulator.cache} tables in " + (cfg.fit.emulator.cache_dir or "the default cache") + ")")
+        em = prob.use_emulator(cfg.fit.emulator.settings(cfg), say=say)
         for line in em.summary():
             say("  " + line)
         say(f"  emulator ready in {time.time() - t0:.0f} s")
@@ -479,11 +479,12 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
 def save_results(run: RunResult, outdir: str):
     """Write every product.  With the emulator backend, the best-fit model, the detection test and the plots
     use the exact model (the chain was sampled with the emulator)."""
+    em = getattr(run.problem.model, "emulator", None)          # stashed by exact(): the diagnostics report it
     with run.problem.model.exact():
-        _save_results(run, outdir)
+        _save_results(run, outdir, em)
 
 
-def _save_results(run: RunResult, outdir: str):
+def _save_results(run: RunResult, outdir: str, em=None):
     from . import plots
     os.makedirs(outdir, exist_ok=True)
     cfg, prob = run.cfg, run.problem
@@ -523,6 +524,10 @@ def _save_results(run: RunResult, outdir: str):
         res.save(os.path.join(outdir, "chain.npz"))
         summ = res.summary(); summ.to_csv(os.path.join(outdir, "summary.csv"), index=False)
         d = res.diagnostics()
+        if em is not None:                              # 0.21: which units were emulated, spot checks, fallbacks
+            d["emulator"] = {"cache": em.info.get("cache", "per_disk"), "units": sorted(em.tables),
+                             "exact_units": dict(em.exact_units), "spot_check": em.info.get("spot_check", {}),
+                             "fallback": em.info.get("fallback", {}), "timing": em.info.get("timing", {})}
         with open(os.path.join(outdir, "diagnostics.json"), "w") as fh:
             json.dump({k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in d.items()}, fh, indent=1, default=float)
         with open(os.path.join(outdir, "tau_flags.json"), "w") as fh:

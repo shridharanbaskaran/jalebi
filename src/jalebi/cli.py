@@ -284,56 +284,124 @@ def detect(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_
 
 
 @emulator_app.command("build")
-def emulator_build(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+def emulator_build(configs: List[str] = typer.Argument(..., help="config(s); with fit.emulator.cache: shared (the default) every "
+                                                        "shared table the configs could need is built, including all auto-detect candidates"),
+                   survey: bool = typer.Option(False, "--survey", help="build the shared survey tables (the default when "
+                                               "fit.emulator.cache is shared; given for clarity in run scripts)"),
+                   jobs: int = typer.Option(1, "-j", "--jobs", help="tables built in parallel (joblib)"),
+                   per_disk: bool = typer.Option(False, "--per-disk", help="the 0.18 per-disk tables of one config "
+                                                 "(fit.emulator.cache: per_disk): needs the spectrum"),
+                   target: Optional[str] = typer.Option(None, help=_TARGET_HELP + " (per-disk tables only)"),
                    name: Optional[str] = typer.Option(None, help=_NAME_HELP),
                    cache_dir: Optional[str] = typer.Option(None, "--cache-dir", help="table folder (default fit.emulator.cache_dir, "
-                                                           "$JALEBI_EMULATOR_DIR, ~/.jalebi/emulator)"),
+                                                           "$JALEBI_EMULATOR_DIR, ~/.jalebi/emulator; shared tables go to its shared/ subfolder)"),
                    target_sigma: Optional[float] = typer.Option(None, "--target-sigma", help="max |emulator - exact| / sigma (default 0.1)"),
+                   ref_snr: Optional[float] = typer.Option(None, "--ref-snr", help="shared: reference S/N of the certification (default 1000)"),
+                   points_per_fwhm: Optional[float] = typer.Option(None, "--points-per-fwhm", help="shared: dense-grid points per LSF FWHM (default 8)"),
                    rebuild: bool = typer.Option(False, "--rebuild", help="ignore cached tables"),
-                   auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first (as the fit would)")):
-    """Build (or verify in the cache) the emulator tables a fit of CONFIG will use: the spectrum is prepared
-    exactly as by `jalebi fit`, so the pixel grid, noise and line lists are the same.  The pipeline builds the
-    tables itself when fit.model_backend is emulator; this command does it ahead of time (e.g. once per disk
-    before a cluster run)."""
+                   auto_detect: bool = typer.Option(False, "--auto-detect", help="per-disk tables: detect the molecules first (as the fit would)")):
+    """Build (or verify in the cache) the emulator tables.
+
+    Shared tables (0.21, fit.emulator.cache: shared, the default): one table per molecule / line list / width /
+    (T, log N) box for the whole survey, from the union of the given configs (fit.bounds_by_molecule, the
+    components' bounds and every auto-detect candidate).  No spectrum is needed; the tables are resampled onto each
+    disk's pixels when a fit loads them.  Run it once before a cluster run: `jalebi emulator build --survey
+    runs/survey_300_autodetect.yaml -j 16`.
+
+    Per-disk tables (--per-disk, or fit.emulator.cache: per_disk): the 0.18 tables of one config on its own
+    pixels and noise, prepared exactly as by `jalebi fit`."""
     import time as _time
     from .config import ProjectConfig
-    from .pipeline import build_problem, detect_and_apply, prepare
-    cfg = ProjectConfig.load(config)
-    _apply_target(cfg, target, name)
-    if cache_dir:
-        cfg.fit.emulator.cache_dir = cache_dir
-    if target_sigma:
-        cfg.fit.emulator.target_sigma = target_sigma
-    if rebuild:
-        cfg.fit.emulator.rebuild = True
-    spec = prepare(cfg)
-    if auto_detect or cfg.fit.auto_detect:
-        cfg, _ = detect_and_apply(cfg, spec)
+    cfgs = [ProjectConfig.load(c) for c in configs]
+    for cfg in cfgs:
+        if cache_dir:
+            cfg.fit.emulator.cache_dir = cache_dir
+        if target_sigma:
+            cfg.fit.emulator.target_sigma = target_sigma
+        if ref_snr:
+            cfg.fit.emulator.ref_snr = ref_snr
+        if points_per_fwhm:
+            cfg.fit.emulator.points_per_fwhm = points_per_fwhm
+        if rebuild:
+            cfg.fit.emulator.rebuild = True
     t0 = _time.time()
-    prob = build_problem(cfg, spec, backend="emulator", say=lambda m: rprint(f"[dim]{m}[/dim]"))
-    em = prob.model.emulator
-    t = Table(title=f"{spec.name}: emulator tables ({len(prob.y)} px)")
-    for c in ("unit", "line list", "nodes T x log N", "pixels", "max err [σ]", "max flux err", "MB", "built [s]"):
+    if per_disk or (cfgs[0].fit.emulator.cache == "per_disk" and not survey):
+        from .pipeline import build_problem, detect_and_apply, prepare
+        if len(cfgs) != 1:
+            raise typer.BadParameter("per-disk tables are built for one config at a time")
+        cfg = cfgs[0]
+        cfg.fit.emulator.cache = "per_disk"
+        _apply_target(cfg, target, name)
+        spec = prepare(cfg)
+        if auto_detect or cfg.fit.auto_detect:
+            cfg, _ = detect_and_apply(cfg, spec)
+        prob = build_problem(cfg, spec, backend="emulator", say=lambda m: rprint(f"[dim]{m}[/dim]"))
+        em = prob.model.emulator
+        t = Table(title=f"{spec.name}: emulator tables ({len(prob.y)} px)")
+        for c in ("unit", "line list", "nodes T x log N", "pixels", "max err [σ]", "max flux err", "MB", "built [s]"):
+            t.add_column(c)
+        for k, tb in em.tables.items():
+            v = tb.meta.get("validation", {})
+            t.add_row(k, tb.linelist, f"{len(tb.lnT)} x {len(tb.logN)}", str(len(tb.pix)), f"{v.get('max_sigma', float('nan')):.3f}",
+                      f"{100 * v.get('max_flux', float('nan')):.3f} %", f"{tb.meta.get('file_bytes', 0) / 1e6:.1f}",
+                      "cache" if tb.meta.get("from_cache") else f"{tb.meta.get('build_s', 0):.0f}")
+        for k, why in em.exact_units.items():
+            t.add_row(k, "—", "exact", "", "", "", "", why)
+        rprint(t)
+        rprint(f"tables in [green]{em.info.get('cache_dir')}[/green] ({_time.time() - t0:.0f} s)")
+        return
+    from .emulator_shared import build_survey, shared_dir, survey_specs
+    settings = cfgs[0].fit.emulator.settings()
+    settings.cache = "shared"
+    specs = survey_specs(cfgs)
+    rprint(f"[dim]{len(specs)} shared table(s) for {len(cfgs)} config(s) in {shared_dir(settings)}; {jobs} job(s)[/dim]")
+    for sp in specs:
+        rprint(f"[dim]  {sp.label()}  (fwhm {sp.fwhm} km/s{', thermal' if sp.fwhm_thermal else ''}, R {sp.R_model})[/dim]")
+    rows = build_survey(specs, settings, n_jobs=jobs, say=lambda m: rprint(f"[dim]{m}[/dim]"))
+    t = Table(title="shared emulator tables")
+    for c in ("table", "status", "nodes T x log N", "support", "MB", "max err [σ]", "max flux err", "build [s]"):
         t.add_column(c)
-    for k, tb in em.tables.items():
-        v = tb.meta.get("validation", {})
-        t.add_row(k, tb.linelist, f"{len(tb.lnT)} x {len(tb.logN)}", str(len(tb.pix)), f"{v.get('max_sigma', float('nan')):.3f}",
-                  f"{100 * v.get('max_flux', float('nan')):.3f} %", f"{tb.meta.get('file_bytes', 0) / 1e6:.1f}",
-                  "cache" if tb.meta.get("from_cache") else f"{tb.meta.get('build_s', 0):.0f}")
-    for k, why in em.exact_units.items():
-        t.add_row(k, "—", "exact", "", "", "", "", why)
+    tot = 0.0
+    for r in rows:
+        tot += r.get("MB", 0.0)
+        ms, mf = r.get("max_sigma"), r.get("max_flux")
+        t.add_row(r["table"], r["status"], str(r.get("nodes", "")), str(r.get("support", "")), f"{r.get('MB', 0):.1f}",
+                  "" if ms is None else f"{ms:.3f}", "" if mf is None else f"{100 * mf:.3f} %",
+                  "" if r.get("build_s") is None else f"{r['build_s']:.0f}")
     rprint(t)
-    rprint(f"tables in [green]{em.info.get('cache_dir')}[/green] ({_time.time() - t0:.0f} s)")
+    rprint(f"{tot:.0f} MB in [green]{shared_dir(settings)}[/green] ({_time.time() - t0:.0f} s wall)")
 
 
 @emulator_app.command("list")
-def emulator_list(cache_dir: Optional[str] = typer.Option(None, "--cache-dir")):
-    """Tables in the emulator cache, with their size and what they cover."""
+def emulator_list(config: Optional[str] = typer.Argument(None, help="with a config: which of its components the "
+                                                         "shared tables serve, and which stay exact and why"),
+                  cache_dir: Optional[str] = typer.Option(None, "--cache-dir")):
+    """Tables in the emulator cache (shared and per-disk), with their key fields and sizes."""
     import glob
     import json as _json
-    from .emulator import default_cache_dir
+    from .emulator import EmulatorSettings, default_cache_dir
+    from .emulator_shared import list_tables
     d = cache_dir or default_cache_dir()
-    t = Table(title=f"emulator cache {d}")
+    st = EmulatorSettings(cache_dir=d)
+    shared = list_tables(st)
+    t = Table(title=f"shared emulator tables in {os.path.join(d, 'shared')}")
+    for c in ("file", "line list", "T [K]", "log N", "fwhm", "R", "nodes", "support", "max err [σ]", "max flux err", "ref S/N", "pts/FWHM", "MB"):
+        t.add_column(c)
+    total = 0.0
+    for r in shared:
+        if "error" in r:
+            t.add_row(r["file"], f"unreadable: {r['error']}", *[""] * 11); continue
+        total += r["MB"]
+        R = r.get("R") or ["", "", ""]
+        t.add_row(r["file"][:48], r["linelist"], "{:.0f}-{:.0f}".format(*r["T"]), "{:.2f}-{:.2f}".format(*r["logN"]),
+                  f"{r['fwhm']}", f"{R[0]}" + (f" x{R[1]}" if R[1] not in (1, 1.0, "") else "") + (f" ={R[2]}" if R[2] else ""),
+                  "x".join(map(str, r.get("nodes") or [])), str(r.get("support", "")),
+                  "" if r.get("max_sigma") is None else f"{r['max_sigma']:.3f}",
+                  "" if r.get("max_flux") is None else f"{100 * r['max_flux']:.3f} %", f"{r.get('ref_snr', '')}", f"{r.get('ppf', '')}",
+                  f"{r['MB']:.1f}" + ("" if r.get("complete") else " (incomplete)"))
+    rprint(t)
+    rprint(f"{total:.0f} MB shared")
+    t = Table(title=f"per-disk (0.18) tables in {d}")
     for c in ("file", "component", "line list", "T [K]", "log N", "nodes", "max err [σ]", "MB"):
         t.add_column(c)
     total = 0
@@ -349,7 +417,20 @@ def emulator_list(cache_dir: Optional[str] = typer.Option(None, "--cache-dir")):
         except Exception as e:      # pragma: no cover
             t.add_row(os.path.basename(f), f"unreadable: {e}", "", "", "", "", "", "")
     rprint(t)
-    rprint(f"{total / 1e6:.0f} MB")
+    rprint(f"{total / 1e6:.0f} MB per-disk")
+    if config:
+        from .config import ProjectConfig
+        from .emulator_shared import config_table_status
+        cfg = ProjectConfig.load(config)
+        if cache_dir:
+            cfg.fit.emulator.cache_dir = cache_dir
+        rows = config_table_status(cfg)
+        t = Table(title=f"{config}: shared tables per component / candidate")
+        for c in ("component", "molecule", "line list", "box T [K]", "box log N", "shared table", "status"):
+            t.add_column(c)
+        for r in rows:
+            t.add_row(r["component"], r["molecule"], r["linelist"], r["T"], r["logN"], r["file"], r["status"])
+        rprint(t)
 
 
 @app.command()

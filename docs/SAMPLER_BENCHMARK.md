@@ -106,6 +106,10 @@ A first attempt rebuilt the reduced fit from the config. The config chose its pi
 
 ## Recommendation for the 300-disk survey
 
+*0.21 note: with `fit.emulator.cache: shared` (the default since 0.21) the per-disk table build in the table below
+(4–6 min, 20 min for full-range fits) is replaced by a one-time survey build and ~1 min of load + spot check per
+disk; the projection is ~20 core-hours for 300 disks plus the build — see docs/EMULATOR.md, "Shared tables (0.21)".*
+
 **emcee (`moves: de`, `init: scaled`, `blocks: auto`) with `linear: profile` and `model_backend: emulator`, 8000
 steps.** It is the fastest way to a converged posterior: ~50 τ in 6000 steps on both disks, so 8000 gives margin,
 in 2–3 min of sampling per disk. Use **dynesty** (`sampler: dynesty`, profile, emulator) where the evidence is the

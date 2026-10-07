@@ -3,6 +3,110 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.21.0] — 2026-10-07 — shared emulator tables
+
+### Added
+- `fit.emulator.cache: shared | per_disk` (default **shared**). The shared tables are built **once for a whole
+  survey** and resampled onto every disk at load time, instead of one set of tables per disk and per release:
+  new module `jalebi.emulator_shared` (`DenseGrid`, `build_dense_lsf_operator`, `DenseGrid.pixel_operator`,
+  `TableSpec`, `SharedTable`, `build_shared_table`, `get_or_build`, `project_table`, `spot_check`,
+  `attach_shared_emulator`, `molecule_boxes`, `survey_specs`, `build_survey`, `list_tables`,
+  `config_table_status`). `per_disk` is the 0.18 behaviour, unchanged.
+  - **What is tabulated:** H = G_R ⊗ I, the LSF-convolved spectrum of a 1-au slab at 1 pc, on a survey-wide dense
+    rest-frame ln λ grid: one segment per MRS sub-band (4C extended to 28.8 µm), padded by the LSF wings,
+    |v| ≤ 150 km/s and a 0.3 % margin; 8 points per LSF FWHM (`points_per_fwhm`); a point-sampled Gaussian LSF
+    with R at each dense point (no pixel box), truncated at 6σ. Nodes, support, ε and log τ_max as in 0.18;
+    the node rows of the build are kept in float32 and `exact_rows` works in column chunks (memory).
+  - **Per disk:** a sparse operator P_disk averages the cubic (4-point Lagrange) interpolant of H over each
+    pixel's edges (the edges `instrument.build_lsf_operator` uses, shifted by −rv/c, clipped to the fit's fine
+    grid as the exact model's K is), with 3-point Gauss–Legendre per sub-segment. Pixel flux = P_disk @ H ×
+    (1 pc/d)² × window mask. The projected table on the disk's pixels is computed once at load (a 0.18
+    `UnitTable`), so the cost per ln P is unchanged.
+  - **Certification without a disk's noise:** each node scaled to a reference peak and compared against
+    σ_ref = peak / `ref_snr` (default 1000) with the 0.18 error measure, i.e. a pointwise error below 1e-4 of the
+    node's peak. **Spot check at fit time:** `spot_check` (default 200) random (T, log N) per unit, emulator vs
+    exact model on the disk's pixels and σ (against the exact model at the table's `table_oversample`); a unit
+    that fails 0.1σ / 0.1 % uses the exact model, with a warning, a log line and an entry in `diagnostics.json`
+    (`emulator.spot_check`, `emulator.fallback`, timings).
+  - **Cache key:** `EMULATOR_MODEL_VERSION` (bumped by hand only), `LSF_VERSION`, molecule + linelist_key, line-list
+    content hash + file SHA-256, eup_max, fwhm, fwhm_thermal, R model/scale/constant, the dense-grid spec, the
+    (T, log N) box, ref_snr, targets, method, node limits. Not the jalebi version, pixels, K, v_shift, distance,
+    windows, σ or f_ref. A readable JSON of the key sits next to each table. A disk whose bounds lie inside a
+    wider table's box (same physics key) uses that table.
+  - **Boxes:** one survey-wide (T, log N) box per molecule from the config(s): `fit.bounds_by_molecule` (else the
+    default prior box) for every component and auto-detect candidate, the components' own bounds, and for tied
+    isotopologues the parent's box shifted by the ratio (bounds or fixed value). Bounds outside the box → exact,
+    with the reason.
+  - **Storage and concurrency:** `<cache_dir>/shared/<linelist>_<physics key>_<full key>.npy` (float32, uncompressed,
+    memory-mapped at load so processes on one node share pages) + `.npz` + `.json`; temp file + `os.replace`;
+    a lock file (`fcntl.flock`, O_EXCL fallback) so exactly one process builds a table while the others wait.
+    `fit.emulator.read_only` or `JALEBI_EMULATOR_READONLY=1`: a missing table means exact fallback + warning.
+  - **Settings:** `fit.emulator.cache`, `ref_snr`, `points_per_fwhm`, `table_oversample` (6), `read_only`,
+    `spot_check`, `bands` (tests). `EmulatorConfig.settings(cfg)` fills the survey boxes.
+- CLI: `jalebi emulator build CONFIG [CONFIG ...] [--survey] [-j N]` builds every shared table the configs could
+  need (all auto-detect candidates included), in parallel with joblib; `--per-disk` keeps the 0.18 command.
+  `jalebi emulator list [CONFIG]` lists shared and per-disk tables with key fields and sizes and, with a config,
+  which components it serves and which stay exact and why. `runs/RUN_ME_build_emulator.sh`,
+  `runs/slurm_build_emulator.sh` for the one-time pre-build.
+- The app's "fast model sliders" toggle uses the shared tables when they exist (never builds them: a survey table
+  takes minutes) and the 0.18 per-disk tables for the rest.
+- `runs/emulator_report.py`: `accuracy --cache shared`, `grids`, `approximations`, `invariance`, `posterior
+  --mode all` (exact / per_disk / shared), `timing --cache both`, `survey`. `tests/test_emulator.py`: 13 new
+  tests (dense grid and operator, P_disk vs `build_lsf_operator`, shift accuracy, two disks from one file, key
+  invariance, JSON + memmap, wider box, bounds outside, read-only, spot-check fallback, two-process lock,
+  boxes/specs, CLI, app toggle); the full FZ Tau shared campaign behind `JALEBI_EMULATOR_FULL=1`.
+
+### Changed
+- **Line profiles are evaluated to 6σ instead of 4σ** (`OpacityBasis.LINE_TRUNCATE`). At log N ≳ 20 the 4σ cut
+  fell where τ was still ≫ 1, so the flux of a saturated line depended on where the cut landed on the fine grid:
+  0.5 % between two grid phases and 0.7 % between oversample 6 and 12 (CO2 at 254 K, log N 21); at 6σ these are
+  2e-5 and 1e-4 (8σ changes nothing more). The fluxes of thick lines grow by 1–3 % at log N 21, < 0.03 % at
+  log N 19, and not at all for thin gas. The exact model, the per-disk and the shared tables all use it (it is in
+  both cache keys). Found because a shared table cannot reproduce a phase-dependent "exact" model.
+- **`instrument.pixel_edges` takes the midpoint edges within each run of increasing wavelength.** The pixel array
+  of a MIRI spectrum is the concatenation of its sub-bands; across a junction (the last 3B pixel at 15.568 µm is
+  followed by the first 3C pixel at 15.410) the midpoint rule gave inverted edges, and `build_lsf_operator` then
+  put **no model flux at all** on the first and last pixel of every sub-band (22 pixels of a 12-band fit, 4 of
+  the FZ_Tau_quick fit, with data of 0.13 Jy against a model of 0). Found because the shared tables, which give
+  those pixels their proper average, disagreed with the "exact" model there by 2.7σ and shifted a flat posterior
+  (C2H2 log N) by 0.1 dex. Fits now see the proper pixel average there; the 0.18 per-disk keys (which hash K)
+  rebuild.
+- **`instrument.build_lsf_operator` integrates the whole pixel box.** The fine points of a pixel were taken within
+  x_pix ± (4σ + width/2), which is the box only when the centre sits midway between the edges; a pixel next to a
+  masked region (its far edge is the midpoint to the next unmasked pixel) lost the part of its box beyond that
+  window — K row sums of 0.5–0.6 throughout the OH-prompt-masked 9–13 µm region of FZ Tau, i.e. the model there
+  was 40 % low. Now [lo − 4σ, hi + 4σ]. Found because the shared tables, which average over the whole box,
+  disagreed with the "exact" model by 5σ at those pixels.
+- **Line lists are pruned with one rule for every window** (`model.prune_linelist`): keep the lines whose peak
+  opacity at 100 K, 1500 K or the molecule's upper T bound (`T_max`, from the fit's priors — a 3000 K CO prior
+  used to lose its hot-band lines to a cut at 1500 K) exceeds 1e-7 of the strongest line **in the MRS range**,
+  whatever the fit window. Until 0.20 the cut was relative to the strongest line inside the window and skipped
+  for lists shorter than 2000 lines, so the model depended on the window at the 1e-7 opacity level, which is 10 %
+  of a saturated line at log N 21 (0.3σ against the shared tables at S/N 250). Nothing changes for thin gas.
+- `SlabModel.planck` caches at 1e-4 K instead of 0.01 K (the old rounding was a 3e-5 relative jitter of B_ν that
+  a table certified to 1e-4 could not interpolate) and keeps 64 entries instead of 512 (each is one fine-grid
+  array: 2.8 GB in a full-range build).
+- `emulator.build_unit_table`: the refinement is incremental — only the checks whose stencil a new node touches
+  are recomputed, and a node row that exists gets only its new log N columns (the same node sets; a late pass
+  costs minutes instead of a full re-check: the last water pass went from 75 min to a few). `refine: both |
+  axis` (shared builds use `axis`: a failing cell centre refines only the axis whose own 1-D error is larger;
+  `both`, the 0.18 rule, stays the per-disk default); `row_dtype`, `row_dir`, `L_path` (memory-mapped rows and
+  table for dense-grid builds); `exact_rows` works in column chunks; `table_from_rows` factored out.
+- `EmulatorSettings` / `EmulatorConfig` carry the shared-table fields; `use_emulator` dispatches on `cache`.
+
+### Measured (see docs/EMULATOR.md, "Shared tables (0.21)")
+- Build: 6 FZ Tau tables = 3.5 GB, 4.2 core-h in the sandbox (H2O HITEMP 1.7 GB, 117 × 76 nodes, 112 min; CO
+  100–3000 K 780 MB, 99 min; the rest 3–22 min), certified to 0.022–0.045σ at ref S/N 1000.
+- Accuracy on FZ Tau (4.9–27.5 µm, 2000 points × 8 components): max 0.015σ / 0.007 % in flux (0.18 per-disk tables:
+  0.045σ / 0.091 %); synthetic grids with other bands, v_shift and distance: max 0.075σ / 0.005 %; the same files
+  serve every disk.
+- Per disk: load + projection 1–21 s, spot check 4–27 s; ln P 0.44 ms single / 0.34 ms per walker vectorised
+  (per-disk 0.40 / 0.31, exact 15 / 18 ms, sandbox).
+- Posterior (FZ_Tau_quick, profile, 8000 steps): shared vs exact within 0.027 dex / 4.9 K (20/20), shared vs per-disk
+  within the seed scatter (0.027 dex / 3.3 K; 15/20 inside 0.01 dex / 5 K).
+- Survey projection: ~40 core-h for 300 disks (sandbox units; ≈ 20 on the benchmark machine) + the build, against
+  132 (per-disk) and 670 (exact).
+
 ## [0.20.0] — 2026-10-06 — dynesty nested sampling, molecule evidences, sampler benchmark
 
 ### Added

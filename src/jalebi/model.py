@@ -122,11 +122,19 @@ class OpacityBasis:
     truncated at `truncate` sigma, scaled so that N[m^-2] * Phi @ kappa gives tau.
     """
 
-    def __init__(self, lines: LineList, grid: FineGrid, fwhm_kms: float = 4.7, truncate: float = 4.0,
+    # 0.21: profiles evaluated to 6 sigma (4 until 0.20).  At log N >~ 20 the 4-sigma cut fell where tau was still >> 1,
+    # so the flux of a saturated line depended on where the cut landed on the fine grid (0.5 % between two grid
+    # phases, 0.7 % between oversample 6 and 12); at 6 sigma that is 2e-5 / 1e-4.  The fluxes of thick lines grow
+    # by 1-3 % at log N 21, < 0.03 % at log N 19, nothing for thin gas.
+    LINE_TRUNCATE = 6.0
+
+    def __init__(self, lines: LineList, grid: FineGrid, fwhm_kms: float = 4.7, truncate: float | None = None,
                  margin_sigma: float = 6.0):
+        truncate = self.LINE_TRUNCATE if truncate is None else float(truncate)
         self.lines = lines
         self.grid = grid
         self.fwhm_kms = fwhm_kms
+        self.truncate = truncate
         sig = fwhm_kms * 1e3 / C * FWHM_TO_SIGMA
         self.sigma_x = sig
         xl_all = np.log(lines.wave)
@@ -347,6 +355,9 @@ class SlabModel:
         self.tau_min_line = tau_min_line
         self.logN_max = logN_max
         self._planck_cache: dict[float, np.ndarray] = {}
+        # entries kept (each one array of the fine grid: 5 MB for the full MRS range at oversample 6; 512 until 0.20,
+        # i.e. up to 2.8 GB in an emulator build that evaluates hundreds of temperatures)
+        self.planck_cache_max = 64
         self._winmask: dict[tuple, np.ndarray] = {}
         # Optional memo of per-unit fluxes keyed on the unit's parameters (used by the interactive
         # app so that moving one slider only re-evaluates that component).  Off by default: the
@@ -419,9 +430,11 @@ class SlabModel:
         return fw
 
     def planck(self, T: float) -> np.ndarray:
-        key = round(float(T), 2)
+        # cached per temperature; the key is rounded to 1e-4 K (0.01 K until 0.20: a 3e-5 relative jitter of B_nu
+        # that the 0.21 shared tables, certified to 1e-4, could not interpolate)
+        key = round(float(T), 4)
         if key not in self._planck_cache:
-            if len(self._planck_cache) > 512:
+            if len(self._planck_cache) >= self.planck_cache_max:
                 self._planck_cache.clear()
             self._planck_cache[key] = self._planck_c1 / np.expm1(np.minimum(self._planck_c2 / key, 700.0))
         return self._planck_cache[key]
@@ -783,17 +796,66 @@ def linelist_key(molecule: str, release: str, path: str | None = None) -> str:
     return f"{molecule}@{path}" if path else f"{molecule}:{release}"
 
 
+PRUNE_T = (100.0, 1500.0)       # temperatures at which build_model's strength cut keeps a line (rel 1e-7 of the strongest)
+
+
+def prune_temperatures(T_max: float | None = None) -> tuple:
+    """Temperatures of the strength cut: 100 and 1500 K, plus the molecule's upper T bound when it is higher
+    (0.21: a CO fit up to 3000 K lost its hot-band lines to a cut evaluated at 1500 K)."""
+    Ts = list(PRUNE_T)
+    if T_max is not None and float(T_max) > max(Ts):
+        Ts.append(float(T_max))
+    return tuple(Ts)
+
+
+PRUNE_REFERENCE_RANGE = (4.78, 29.0)   # um: the strength cut is relative to the strongest line in the MRS range
+
+
+def strength_cut_at(ll, Ts, rel: float = 1e-7, ref=None):
+    """LineList.strength_cut over several temperatures; `ref` = the reference peak opacity per temperature
+    (default: the list's own maximum)."""
+    import numpy as _np
+    keep = _np.zeros(len(ll), bool)
+    for i, T in enumerate(Ts):
+        k = ll.kappa(float(T))
+        r = k.max() if ref is None else ref[i]
+        keep |= k > rel * r
+    return ll.__class__(ll.molecule, ll.table[keep].reset_index(drop=True), ll.partition, ll.source, ll.release)
+
+
+def prune_linelist(ll_full, wlo: float, whi: float, eup_max: float | None = None, T_max: float | None = None,
+                   rel: float = 1e-7):
+    """The lines of a fit: `ll_full` restricted to [wlo, whi] (and E_up <= eup_max), keeping the lines whose peak
+    opacity at 100 K, 1500 K or T_max exceeds `rel` times that of the strongest line **in the MRS range**
+    (PRUNE_REFERENCE_RANGE), whatever the window.  The same rule for every window and for the shared emulator
+    tables (0.21): until 0.20 the cut was relative to the strongest line inside the window and applied only to
+    lists longer than 2000 lines, so the model of a molecule depended on the fit window at the 1e-7 opacity level
+    -- which is 10 % of a saturated line at log N 21."""
+    import numpy as _np
+    ll = ll_full.select(eup_max=eup_max) if eup_max is not None else ll_full
+    Ts = prune_temperatures(T_max)
+    ref_list = ll.select(*PRUNE_REFERENCE_RANGE)
+    ref = [float(ref_list.kappa(float(T)).max()) if len(ref_list) else _np.inf for T in Ts]
+    sel = ll.select(wlo, whi)
+    if len(sel) == 0 or not _np.all(_np.isfinite(ref)):
+        return sel
+    return strength_cut_at(sel, Ts, rel=rel, ref=ref)
+
+
 def build_model(components: list[Component], wave_pix, distance_pc, windows=None, linelists=None,
-                releases: dict | None = None, oversample=6, prune=True, **kw) -> SlabModel:
+                releases: dict | None = None, oversample=6, prune=True, T_max: dict | None = None, **kw) -> SlabModel:
     """Convenience constructor: loads the line lists each component needs (from the cache),
     restricts them to the windows and prunes weak lines.
 
     Each component may use its own release (e.g. a hot H2O component on HITEMP and a cold one on
     HITRAN); `releases` gives the per-molecule default for components that do not set one.
+    T_max: {molecule: highest T the fit can reach}; the strength cut (prune_linelist) keeps the lines that
+    matter at 100 K, 1500 K and that temperature, relative to the strongest line in the MRS range.
     Pass `continuum=` (Jy on wave_pix) when the model has absorption components."""
     from .linedata import load_linelist
     linelists = dict(linelists or {})
     releases = dict(releases or {})
+    T_max = dict(T_max or {})
     if windows is None:
         windows = [(float(np.min(wave_pix)), float(np.max(wave_pix)))]
     wlo = min(w[0] for w in windows) - 0.1
@@ -804,8 +866,9 @@ def build_model(components: list[Component], wave_pix, distance_pc, windows=None
         if key in linelists or (c.molecule in linelists and not c.linelist_release):
             continue
         ll = load_linelist(c.molecule, release=rel, path=c.linelist_path, fetch=False)
-        ll = ll.select(wlo, whi, eup_max=c.eup_max)
-        if prune and len(ll) > 2000:
-            ll = ll.strength_cut(T_hi=1500.0, T_lo=100.0, rel=1e-7)
+        if prune:
+            ll = prune_linelist(ll, wlo, whi, eup_max=c.eup_max, T_max=T_max.get(c.molecule))
+        else:
+            ll = ll.select(wlo, whi, eup_max=c.eup_max)
         linelists[key] = ll
     return SlabModel(components, linelists, wave_pix, distance_pc, windows, oversample=oversample, releases=releases, **kw)

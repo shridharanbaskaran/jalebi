@@ -53,6 +53,7 @@ from .constants import C, JY
 FORMAT_VERSION = 1
 LSF_VERSION = "erf-pixel-gauss-v1"      # instrument.build_lsf_operator: Gaussian LSF x pixel box, erf form
 LOG10PI = np.log10(np.pi)
+CACHE_MODES = ("shared", "per_disk")    # fit.emulator.cache (0.21): survey-wide tables | the 0.18 per-disk tables
 
 
 def default_cache_dir() -> str:
@@ -72,6 +73,22 @@ class EmulatorSettings:
     cache_dir: str | None = None
     rebuild: bool = False
     seed: int = 0
+    refine: str = "both"               # a failing cell centre refines both axes (0.18) | "axis": only the axis whose
+                                       # own 1-D error is larger (0.21 shared builds: far fewer log N nodes)
+    # 0.21 shared tables (jalebi.emulator_shared): one table per molecule for the whole survey, resampled onto
+    # each disk's pixels at load time.  per_disk = the 0.18 tables on the data's own pixels.
+    cache: str = "shared"
+    ref_snr: float = 1000.0            # shared: certified against sigma = (node's peak, scaled to f_ref) / ref_snr
+    points_per_fwhm: float = 8.0       # shared: dense-grid points per LSF FWHM
+    table_oversample: int = 6          # shared: fine-grid points per line FWHM when a table is built (see emulator_shared)
+    read_only: bool = False            # shared: never build (compute nodes); also $JALEBI_EMULATOR_READONLY=1
+    spot_check: int = 200              # shared: random (T, log N) per unit checked on the disk's pixels at load (0 = off)
+    boxes: dict | None = None          # shared: {molecule: {"T": (lo, hi), "logN": (lo, hi)}} survey-wide boxes
+                                       # (emulator_shared.molecule_boxes); None = the unit's bounds widened to the defaults
+    bands: tuple | None = None         # shared: MRS sub-bands of the dense grid (None = all 12; tests use fewer)
+
+    def is_read_only(self) -> bool:
+        return bool(self.read_only) or os.environ.get("JALEBI_EMULATOR_READONLY", "").strip().lower() in ("1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -103,11 +120,16 @@ def exact_rows(model, comp, p: dict, T: float, logNs) -> tuple[np.ndarray, np.nd
         return np.zeros((len(logNs), len(model.wave_pix))), np.zeros(len(logNs))
     base = basis.phi @ basis.kappa(float(T))                       # tau / (N [m^-2])
     N = 10.0 ** logNs * 1e4
-    tau = base[:, None] * N[None, :]
-    tmax = tau.max(axis=0)
-    I = model.planck(float(T))[:, None] * (-np.expm1(-tau))
-    I = _shift_matrix(model, I, float(pp.get("rv", 0.0)))
-    F = (model.K @ I).T * model._omega_unit / JY
+    B = model.planck(float(T))
+    F = np.empty((len(logNs), len(model.wave_pix)))
+    tmax = np.empty(len(logNs))
+    step = max(1, int(2e6 // max(len(base), 1)))                    # columns per pass: ~16 MB of tau at a time
+    for a in range(0, len(logNs), step):
+        tau = base[:, None] * N[None, a:a + step]
+        tmax[a:a + step] = tau.max(axis=0)
+        I = B[:, None] * (-np.expm1(-tau))
+        I = _shift_matrix(model, I, float(pp.get("rv", 0.0)))
+        F[a:a + step] = (model.K @ I).T * model._omega_unit / JY
     wm = model.window_mask(comp)
     if wm is not None:
         F = F * wm[None, :]
@@ -276,7 +298,8 @@ def linelist_hash(model, comp, fwhm: float) -> str:
 def table_key(model, comp, p: dict, bounds: dict, sigma, f_ref: float, a_max: float, settings: EmulatorSettings) -> str:
     from . import __version__
     fw = model.line_fwhm(comp, {**p, "T": 500.0}) if not comp.fwhm_thermal else float(p["fwhm"])
-    d = {"format": FORMAT_VERSION, "jalebi": __version__, "lsf": LSF_VERSION,
+    from .model import OpacityBasis
+    d = {"format": FORMAT_VERSION, "jalebi": __version__, "lsf": LSF_VERSION, "line_truncate": float(OpacityBasis.LINE_TRUNCATE),
          "linelist": linelist_hash(model, comp, fw), "linelist_key": model.linelist_key(comp),
          "pixels": _arr_sha(model.wave_pix), "lsf_matrix": _arr_sha(model.K.indptr, model.K.indices, model.K.data),
          "fine_grid": _arr_sha(model.grid.x), "R": [model.R_model, model.R_scale, model.R_constant],
@@ -310,10 +333,43 @@ def errors(F_emu, F_ex, sigma, f_ref, a_max, return_floor: bool = False):
     return (es, ef, tot < floor) if return_floor else (es, ef)
 
 
+def table_from_rows(Fn, tm, lnT, logN, sigma, f_ref: float, a_max: float, unit: str, component: str,
+                    molecule: str, linelist: str, npix: int, rv: float, fwhm: float, method: str = "cubic",
+                    L_path: str | None = None) -> UnitTable:
+    """UnitTable from the node fluxes Fn (nT, nN, npix) and peak optical depths tm (nT, nN): the support
+    (pixels where some node exceeds 1e-4 sigma at the largest allowed area), the floor eps and ln(F + eps).
+    L_path: write ln(F + eps) to a memory-mapped .npy there instead of RAM (dense-grid builds: up to ~1 GB)."""
+    sigma = np.asarray(sigma, float)
+    nT = len(Fn)                                       # Fn: array (nT, nN, npix) or a list of nT (nN, npix) rows
+    peak = np.stack([np.max(Fn[i], axis=1) for i in range(nT)])
+    a = np.minimum(a_max, f_ref / np.maximum(peak, 1e-300))
+    amax = float(np.max(a))
+    sup_max = np.zeros(Fn[0].shape[1])
+    for i in range(nT):                                # row by row: the rows may be large (dense-grid builds)
+        sup_max = np.maximum(sup_max, np.max(Fn[i] * a[i][:, None], axis=0))
+    sup = np.flatnonzero(sup_max / sigma > 1e-4)
+    eps = 1e-4 * sigma[sup] / amax
+    if L_path:
+        L = np.lib.format.open_memmap(L_path, mode="w+", dtype=np.float32, shape=(nT, Fn[0].shape[0], len(sup)))
+    else:
+        L = np.empty((nT, Fn[0].shape[0], len(sup)), np.float32)
+    for i in range(nT):
+        L[i] = np.log(np.maximum(Fn[i][:, sup], 0.0) + eps[None, :])
+    ltau = np.log10(np.maximum(tm, 1e-30))
+    return UnitTable(unit, component, molecule, linelist, np.asarray(lnT, float).copy(), np.asarray(logN, float).copy(),
+                     sup, L, eps.astype(np.float32), ltau, int(npix), float(rv), float(fwhm), method)
+
+
 def build_unit_table(model, comp, p: dict, T_bounds, logN_bounds, sigma, f_ref: float, a_max: float,
-                     settings: EmulatorSettings, unit: str | None = None, say=None) -> UnitTable:
-    """Adaptive tensor grid in (ln T, log N) for one unit (see the module docstring)."""
+                     settings: EmulatorSettings, unit: str | None = None, say=None, row_dtype=np.float64,
+                     L_path: str | None = None, row_dir: str | None = None) -> UnitTable:
+    """Adaptive tensor grid in (ln T, log N) for one unit (see the module docstring).  row_dtype: storage type
+    of the node rows kept between passes (float32 halves the memory of a dense-grid build); L_path: keep the
+    table itself in a memory-mapped file there (see table_from_rows); row_dir: keep the node rows in memory-mapped
+    files there (the folder is emptied when the build ends)."""
     t0 = time.time()
+    if row_dir is not None:
+        os.makedirs(row_dir, exist_ok=True)
     say = say or (lambda m: None)
     sigma = np.asarray(sigma, float)
     tol_s = settings.safety * settings.target_sigma
@@ -331,66 +387,127 @@ def build_unit_table(model, comp, p: dict, T_bounds, logN_bounds, sigma, f_ref: 
         n_exact[0] += len(np.atleast_1d(Ns))
         return F, tm
 
+    def keep_row(lt, F):
+        """Node rows between passes: in RAM, or memory-mapped files under `row_dir` (a dense-grid H2O build holds
+        ~1.7 GB of them; mapped pages are reclaimable, the process stays small)."""
+        F = F.astype(row_dtype, copy=False)
+        if row_dir is None:
+            return F
+        fn = os.path.join(row_dir, f"row_{lt:.12f}.npy")
+        np.save(fn, F)
+        return np.load(fn, mmap_mode="r")
+
     def node_rows():
+        """Exact rows at every (T node, log N node); a row that exists gets only its new log N columns computed."""
         for lt in lnT:
             have = rows.get(lt)
-            if have is None or have[0].shape[0] != len(logN):
-                rows[lt] = ex(lt, logN)
-        return np.stack([rows[lt][0] for lt in lnT]), np.stack([rows[lt][1] for lt in lnT])
+            if have is not None and have[0].shape[0] == len(logN) and np.array_equal(have[2], logN):
+                continue
+            if have is not None and len(have[2]) < len(logN) and np.all(np.isin(have[2], logN)):
+                new = ~np.isin(logN, have[2])                             # merge the new columns into the old row
+                Fnew, tnew = ex(lt, logN[new])
+                F = np.empty((len(logN), Fnew.shape[1]), row_dtype); tm = np.empty(len(logN))
+                F[~new] = have[0]; F[new] = Fnew
+                tm[~new] = have[1]; tm[new] = tnew
+            else:
+                F, tm = ex(lt, logN)
+            rows[lt] = (keep_row(lt, F), tm, logN.copy())
+        return [rows[lt][0] for lt in lnT], np.stack([rows[lt][1] for lt in lnT])      # no copy of the rows
 
     def make_table(Fn, tm):
-        peak = Fn.max(axis=2)
-        a = np.minimum(a_max, f_ref / np.maximum(peak, 1e-300))
-        amax = float(np.max(a))
-        scaled = (Fn * a[:, :, None]) / sigma[None, None, :]
-        sup = np.flatnonzero(np.max(scaled, axis=(0, 1)) > 1e-4)
-        eps = 1e-4 * sigma[sup] / amax
-        L = np.log(np.maximum(Fn[:, :, sup], 0.0) + eps[None, None, :]).astype(np.float32)
-        ltau = np.log10(np.maximum(tm, 1e-30))
-        return UnitTable(unit or comp.name, comp.name, comp.molecule, model.linelist_key(comp), lnT.copy(), logN.copy(),
-                         sup, L, eps.astype(np.float32), ltau, len(model.wave_pix), float(p.get("rv", 0.0)), fw,
-                         settings.method)
+        return table_from_rows(Fn, tm, lnT, logN, sigma, f_ref, a_max, unit or comp.name, comp.name, comp.molecule,
+                               model.linelist_key(comp), len(model.wave_pix), float(p.get("rv", 0.0)), fw, settings.method,
+                               L_path=L_path)
 
-    def check(tab, lts, Ns):
-        """errors at (each lt in lts) x Ns"""
-        es, ef = [], []
-        for lt in lts:
-            F, _ = ex(lt, Ns)
-            E = np.stack([tab.flux(float(np.exp(lt)), n)[0] for n in Ns])
-            a, b = errors(E, F, sigma, f_ref, a_max)
-            es.append(a); ef.append(b)
-        return np.array(es), np.array(ef)
+    def err_row(tab, lt, Ns):
+        """Normalised errors max(e_sigma / tol_s, e_flux / tol_f) at one ln T for the columns Ns."""
+        F, _ = ex(lt, Ns)
+        E = np.stack([tab.flux(float(np.exp(lt)), n)[0] for n in Ns])
+        a, b = errors(E, F, sigma, f_ref, a_max)
+        return np.maximum(a / tol_s, b / tol_f)
+
+    def stale_intervals(old_nodes, new_nodes, n_int_new):
+        """Intervals of the new node set whose 4-point stencil can contain an inserted node."""
+        st = np.zeros(n_int_new, bool)
+        ins = np.flatnonzero(~np.isin(new_nodes, old_nodes))
+        for k in ins:
+            st[max(k - 3, 0):min(k + 3, n_int_new)] = True
+        return st, ins
+
+    def carry(old, new_shape, row_ok, col_ok, row_map, col_map):
+        """New error array: old values where both the row and the column are unchanged, NaN (to compute) elsewhere."""
+        out = np.full(new_shape, np.nan)
+        if old is None:
+            return out
+        ri = np.flatnonzero(row_ok); ci = np.flatnonzero(col_ok)
+        if len(ri) and len(ci):
+            out[np.ix_(ri, ci)] = old[np.ix_(row_map[ri], col_map[ci])]
+        return out
+
+    def fill(tab, E, lts, cols):
+        """Compute the NaN entries of E (len(lts) x len(cols)): one exact row per ln T that has any."""
+        for i in np.flatnonzero(np.any(np.isnan(E), axis=1)) if E.size else []:
+            j = np.flatnonzero(np.isnan(E[i]))
+            E[i, j] = err_row(tab, lts[i], cols[j])
+        return E
 
     it = 0
+    eT = eN = eC = None                       # errors of the previous pass, carried over where nothing changed
+    prev_T, prev_N = None, None
     while True:
         it += 1
         Fn, tm = node_rows()
         tab = make_table(Fn, tm)
-        badT = np.zeros(max(len(lnT) - 1, 0), bool)
-        badN = np.zeros(max(len(logN) - 1, 0), bool)
+        nT, nN = len(lnT), len(logN)
         Nm = 0.5 * (logN[1:] + logN[:-1])
         Tm = 0.5 * (lnT[1:] + lnT[:-1])
-        if len(Tm):          # T midpoints at every log N node and cell centre
-            es, ef = check(tab, Tm, logN)
-            badT |= np.any((es > tol_s) | (ef > tol_f), axis=1)
-            if len(Nm):
-                es, ef = check(tab, Tm, Nm)
-                c = (es > tol_s) | (ef > tol_f)
+        if prev_T is None:
+            okTi = np.zeros(max(nT - 1, 0), bool); okNi = np.zeros(max(nN - 1, 0), bool)
+            okTn = np.zeros(nT, bool); okNn = np.zeros(nN, bool)
+            mTi = mNi = mTn = mNn = None
+        else:
+            stT, _ = stale_intervals(prev_T, lnT, max(nT - 1, 0)); stN, _ = stale_intervals(prev_N, logN, max(nN - 1, 0))
+            okTi, okNi = ~stT, ~stN
+            okTn, okNn = np.isin(lnT, prev_T), np.isin(logN, prev_N)
+            # index of a kept new interval / node in the old arrays (intervals: by the old index of the node below)
+            mTn = np.searchsorted(prev_T, lnT); mNn = np.searchsorted(prev_N, logN)
+            mTi = mTn[:-1] if nT > 1 else np.zeros(0, int); mNi = mNn[:-1] if nN > 1 else np.zeros(0, int)
+            # an interval is "unchanged" only if both its end nodes are old: a kept interval keeps its old index
+            okTi &= okTn[:-1] & okTn[1:]; okNi &= okNn[:-1] & okNn[1:]
+        eT = carry(eT, (max(nT - 1, 0), nN), okTi, okNn, mTi, mNn) if len(Tm) else None       # T mids x N nodes
+        eN = carry(eN, (nT, max(nN - 1, 0)), okTn, okNi, mTn, mNi) if len(Nm) else None       # T nodes x N mids
+        eC = carry(eC, (max(nT - 1, 0), max(nN - 1, 0)), okTi, okNi, mTi, mNi) if len(Tm) and len(Nm) else None
+        badT = np.zeros(max(nT - 1, 0), bool)
+        badN = np.zeros(max(nN - 1, 0), bool)
+        if eT is not None:
+            fill(tab, eT, Tm, logN)
+            badT |= np.any(eT > 1.0, axis=1)
+        if eN is not None:
+            fill(tab, eN, lnT, Nm)
+            badN |= np.any(eN > 1.0, axis=0)
+        if eC is not None:   # cell centres
+            fill(tab, eC, Tm, Nm)
+            c = eC > 1.0
+            if settings.refine == "axis":
+                # attribute a failing cell to the axis whose own 1-D error around that cell is larger (0.21:
+                # refining both axes doubles the log N nodes while the T interpolation is the real culprit)
+                cT = np.maximum(eT[:, :-1], eT[:, 1:])                    # T error on the cell's two N edges
+                cN = np.maximum(eN[:-1, :], eN[1:, :])                    # log N error on the cell's two T edges
+                toT = c & (cT >= cN); toN = c & (cN > cT)
+                badT |= np.any(toT, axis=1); badN |= np.any(toN, axis=0)
+            else:
                 badT |= np.any(c, axis=1); badN |= np.any(c, axis=0)
-        if len(Nm):          # log N midpoints at every T node
-            es, ef = check(tab, lnT, Nm)
-            badN |= np.any((es > tol_s) | (ef > tol_f), axis=0)
-        say(f"    {comp.name}: pass {it}: {len(lnT)} x {len(logN)} nodes, refine {badT.sum()} T and {badN.sum()} log N intervals")
+        say(f"    {comp.name}: pass {it}: {nT} x {nN} nodes, refine {badT.sum()} T and {badN.sum()} log N intervals")
         if not badT.any() and not badN.any():
             break
-        if len(lnT) + badT.sum() > settings.max_nodes[0] or len(logN) + badN.sum() > settings.max_nodes[1]:
+        if nT + badT.sum() > settings.max_nodes[0] or nN + badN.sum() > settings.max_nodes[1]:
             warnings.warn(f"emulator {comp.name}: node limit reached before the tolerance; the table is less accurate")
             break
+        prev_T, prev_N = lnT.copy(), logN.copy()
         if badT.any():
             lnT = np.sort(np.concatenate([lnT, Tm[badT]]))
         if badN.any():
             logN = np.sort(np.concatenate([logN, Nm[badN]]))
-            rows.clear()
     # final random validation
     rng = np.random.default_rng(settings.seed)
     nv = settings.n_validate
@@ -411,6 +528,10 @@ def build_unit_table(model, comp, p: dict, T_bounds, logN_bounds, sigma, f_ref: 
     if v["max_sigma"] > settings.target_sigma or v["max_flux"] > settings.target_flux:
         warnings.warn(f"emulator {comp.name}: random validation max {v['max_sigma']:.3g} sigma / {v['max_flux']:.2e} in flux "
                       f"exceeds the target ({settings.target_sigma} / {settings.target_flux})")
+    if row_dir is not None:
+        rows.clear()
+        import shutil
+        shutil.rmtree(row_dir, ignore_errors=True)
     return tab
 
 

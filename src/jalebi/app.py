@@ -1021,7 +1021,7 @@ class JalebiApp:
         self.features_cb = pn.widgets.Checkbox(name="molecular feature markers", value=True, margin=(8, 10, 0, 10))
         self.features_cb.param.watch(lambda e: self.set_feature_marks(e.new), "value")
         # 0.18: the live model can interpolate precomputed tables (jalebi.emulator) instead of the full model
-        self.emu_cb = pn.widgets.Checkbox(name="fast model sliders (emulator tables)", value=False, margin=(8, 10, 0, 10))
+        self.emu_cb = pn.widgets.Checkbox(name="fast model sliders (emulator tables; shared cache when built)", value=False, margin=(8, 10, 0, 10))
         self.emu_cb.param.watch(lambda e: self.set_emulator(e.new), "value")
         self._emu_gen = 0
         self.sidebar = pn.Column(
@@ -1733,8 +1733,15 @@ class JalebiApp:
             with act.step(f"display model: {len(comps)} components "
                           f"({', '.join(c.name for c in comps if c.enabled) or 'none enabled'}) on {int(sel.sum())} px in "
                           f"{', '.join(f'{a:g}–{b:g}' for a, b in wins)} µm", "model", level=logging.DEBUG):
+                from .fit import DEFAULT_BOUNDS
+                cfgc = {c.name: c for c in self.current_config().components}
+                T_max = {}
+                for c in comps:
+                    cc = cfgc.get(c.tie_to or c.name)
+                    hi = ((cc.bounds or {}).get("T") or self.cfg.fit.bounds_by_molecule.get(c.molecule, {}).get("T") or DEFAULT_BOUNDS["T"])[1] if cc else DEFAULT_BOUNDS["T"][1]
+                    T_max[c.molecule] = max(T_max.get(c.molecule, 0.0), float(hi), float(c.T))
                 self.disp_model = build_model(comps, self.spec.wave[sel], self.spec.distance_pc, wins, oversample=4,
-                                              R_model=self.cfg.R_model, R_scale=self.cfg.R_scale,
+                                              R_model=self.cfg.R_model, R_scale=self.cfg.R_scale, T_max=T_max,
                                               continuum=self.spec.continuum[sel] if self.spec.continuum is not None else None)
             self.disp_model.unit_cache = {}
             if getattr(self, "emu_cb", None) is not None and self.emu_cb.value:
@@ -1815,13 +1822,32 @@ class JalebiApp:
         sig = np.where(np.isfinite(sig) & (sig > 0), sig, np.nanmedian(sig))
         y = (self.spec.flux - (self.spec.continuum if self.spec.continuum is not None else 0.0))[sel]
         f_ref = float(np.nanmax(np.abs(y))) if np.isfinite(y).any() else 1.0
-        settings = self.cfg.fit.emulator.settings()
+        settings = self.cfg.fit.emulator.settings(self.cfg)   # 0.21: shared tables when they exist
 
         def worker():
             bar = act.Progress("emulator tables", area="lte")
             try:
-                em = attach_emulator(model, bounds, sig, f_ref, settings, free_keys=set(),
-                                     say=lambda m: act.debug("lte", "%s", m.strip()))
+                dbg = lambda m: act.debug("lte", "%s", m.strip())
+                if settings.cache == "shared":
+                    # 0.21: shared tables when they exist (never built here: a survey table takes minutes);
+                    # the units without one get the 0.18 per-disk tables as before
+                    from .emulator import EmulatorSet
+                    from .emulator_shared import attach_shared_emulator
+                    import dataclasses
+                    ro = dataclasses.replace(settings, read_only=True)
+                    em = attach_shared_emulator(model, bounds, sig, f_ref, ro, free_keys=set(), say=dbg)
+                    if gen != self._emu_gen or model is not self.disp_model:
+                        model.emulator = None; bar.close("superseded"); return
+                    rest = {k: bounds[k] for k in em.exact_units if k in bounds and "read_only" in em.exact_units[k]}
+                    if rest:
+                        pd_ = dataclasses.replace(settings, cache="per_disk")
+                        em2 = attach_emulator(model, rest, sig, f_ref, pd_, free_keys=set(), say=dbg)
+                        tables = {**em.tables, **em2.tables}
+                        why = {k: v for k, v in em.exact_units.items() if k not in em2.tables}
+                        em = EmulatorSet(tables, why, {**em.info, "per_disk_units": sorted(em2.tables)})
+                        model.emulator = em
+                else:
+                    em = attach_emulator(model, bounds, sig, f_ref, settings, free_keys=set(), say=dbg)
                 if gen != self._emu_gen or model is not self.disp_model:
                     model.emulator = None              # toggled off or the model was rebuilt meanwhile
                     bar.close("superseded")

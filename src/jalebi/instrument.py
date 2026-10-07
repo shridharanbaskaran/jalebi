@@ -71,10 +71,26 @@ def band_of(wave_um) -> np.ndarray:
 # --- LSF + pixel operator -------------------------------------------------------
 
 def pixel_edges(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Lower/upper edges of pixels centred at x (midpoints; end pixels mirrored)."""
-    mid = 0.5 * (x[1:] + x[:-1])
-    lo = np.concatenate([[x[0] - (mid[0] - x[0])], mid])
-    hi = np.concatenate([mid, [x[-1] + (x[-1] - mid[-1])]])
+    """Lower/upper edges of pixels centred at x (midpoints; end pixels mirrored).
+
+    The edges are taken within each run of increasing x: the pixel array of a MIRI spectrum is the concatenation
+    of its sub-bands, and across a junction (e.g. the last 3B pixel at 15.568 um followed by the first 3C pixel at
+    15.410) the midpoint rule gave inverted edges, so the first and last pixel of every sub-band got no model
+    flux at all (until 0.20; 22 pixels of a 12-band fit)."""
+    x = np.asarray(x, float)
+    if len(x) < 2:
+        return x.copy(), x.copy()
+    lo = np.empty(len(x)); hi = np.empty(len(x))
+    cuts = np.concatenate([[0], np.flatnonzero(np.diff(x) < 0) + 1, [len(x)]])
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        xs = x[a:b]
+        if len(xs) == 1:                                   # a run of one pixel: use the neighbours' typical width
+            w = np.median(np.abs(np.diff(x))) if len(x) > 1 else 0.0
+            lo[a] = xs[0] - 0.5 * w; hi[a] = xs[0] + 0.5 * w
+            continue
+        mid = 0.5 * (xs[1:] + xs[:-1])
+        lo[a:b] = np.concatenate([[xs[0] - (mid[0] - xs[0])], mid])
+        hi[a:b] = np.concatenate([mid, [xs[-1] + (xs[-1] - mid[-1])]])
     return lo, hi
 
 
@@ -95,13 +111,20 @@ def build_lsf_operator(x_fine: np.ndarray, dx: float, wave_pix: np.ndarray, R_pi
     else:
         lo, hi = edges
     sig = FWHM_TO_SIGMA / R_pix                # LSF sigma in ln(lambda)
-    half = truncate * sig + 0.5 * (hi - lo)
     n_fine = len(x_fine)
     rows, cols, vals = [], [], []
+    # the fine points that reach the pixel: [lo - truncate sigma, hi + truncate sigma].  (Until 0.20 the window was
+    # x_pix +- (truncate sigma + width / 2): the same for a pixel centred between its edges, but a pixel next to a
+    # masked region, whose far edge is the midpoint to the next unmasked pixel, lost the part of its box beyond the
+    # window -- row sums of 0.5-0.6 in the OH-prompt-masked 9-13 um region.)
+    wlo = np.minimum(lo, hi) - truncate * sig
+    whi = np.maximum(lo, hi) + truncate * sig
     # fine grid may have gaps between segments; use searchsorted on the sorted x_fine
     for i in range(len(x_pix)):
-        j0 = np.searchsorted(x_fine, x_pix[i] - half[i])
-        j1 = np.searchsorted(x_fine, x_pix[i] + half[i])
+        if hi[i] <= lo[i]:                     # inverted edges (only when handed in explicitly): no model flux
+            continue
+        j0 = np.searchsorted(x_fine, wlo[i])
+        j1 = np.searchsorted(x_fine, whi[i])
         if j1 <= j0:
             continue
         xj = x_fine[j0:j1]
