@@ -113,6 +113,7 @@ class RunResult:
     theta: np.ndarray | None = None
     log: list[str] = field(default_factory=list)
     detection: object = None            # DetectionResult when fit.auto_detect was on
+    laplace: object = None              # LaplaceResult (fit.laplace / jalebi fit --laplace / the app's Quick errors)
     outdir: str | None = None           # folder the results were written to (output with {target} filled in)
 
     def say(self, msg):
@@ -204,6 +205,41 @@ def run_optimise_stage(run: RunResult, callback=None, progress=None):
     run.theta = opt.theta
     run.say(f"  chi2_red={opt.chi2_red:.3f} BIC={opt.bic:.1f} in {opt.runtime_s:.0f}s")
     return run
+
+
+def run_laplace_stage(run: RunResult, outdir: str | None = None, progress=None):
+    """Laplace (Gaussian) uncertainties at the optimiser's solution (jalebi.laplace): Hessian of -ln P by finite
+    differences, flags for flat directions and prior edges.  Uses the profiled areas when fit.mcmc.linear is
+    profile / marginalise, and whatever model backend is attached.  Writes laplace.json and the corner and
+    correlation figures when `outdir` is given (with the MCMC contours on top when a chain exists)."""
+    from .laplace import laplace
+    from .linear import normalise_mode
+    theta = run.opt.theta if run.opt is not None else run.theta
+    if theta is None:
+        raise ValueError("run the optimiser first: the Laplace approximation is taken at the optimum")
+    lin = "profile" if normalise_mode(run.cfg.fit.mcmc.linear) != "sample" else "sample"
+    say = progress or run.say
+    say(f"laplace: Gaussian approximation at the optimum ({lin} areas)")
+    lap = laplace(run.problem, theta, linear=lin, progress=say)
+    run.laplace = lap
+    bad = {k: v for k, v in lap.flags.items() if v}
+    say(f"  condition number {lap.condition:.3g}; " + ("; ".join(f"{k}: {', '.join(v)}" for k, v in bad.items()) if bad else "no flags"))
+    if outdir:
+        save_laplace(run, outdir)
+    return lap
+
+
+def save_laplace(run: RunResult, outdir: str):
+    from . import plots
+    import matplotlib.pyplot as plt
+    lap = run.laplace
+    os.makedirs(outdir, exist_ok=True)
+    lap.save(os.path.join(outdir, "laplace.json"))
+    lap.summary().to_csv(os.path.join(outdir, "laplace_summary.csv"), index=False)
+    fig = plots.plot_laplace_corner(lap, mcmc=run.mcmc)
+    fig.savefig(os.path.join(outdir, "laplace_corner.png"), dpi=90); plt.close(fig)
+    fig = plots.plot_laplace_correlation(lap)
+    fig.savefig(os.path.join(outdir, "laplace_correlation.png"), dpi=90); plt.close(fig)
 
 
 def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str | None = None, verbose: bool = True):
@@ -378,11 +414,18 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
             else:
                 run.say("  refinement did not improve chi2; keeping the previous continuum")
                 break
+    if cfg.fit.laplace and run.opt is not None:
+        try:
+            run_laplace_stage(run)
+        except Exception as e:                      # quick errors must never sink a fit
+            run.say(f"  laplace failed: {e}")
     if "mcmc" in stages:
         run_mcmc_stage(run, progress=(lambda f, s: progress("mcmc", f, None)) if progress else None,
                        stop_event=stop_event, outdir=outdir if save else None)
     if save:
         save_results(run, outdir)
+        if run.laplace is not None:
+            save_laplace(run, outdir)
     return run
 
 

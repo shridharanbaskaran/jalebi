@@ -1098,3 +1098,7 @@ def default_free_params(components: list[Component], area_param: str = "logR", f
         if c.group:
             seen_groups.add(c.group)
     return free
+
+
+# Laplace (Gaussian) approximation at the optimum: quick uncertainties without MCMC (0.19, jalebi.laplace)
+from .laplace import LaplaceResult, laplace  # noqa: E402,F401

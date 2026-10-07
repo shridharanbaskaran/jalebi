@@ -222,6 +222,8 @@ class FitConfig(BaseModel):
     # it, exact for the rest; built or loaded from the cache before the fit -- see jalebi.emulator)
     model_backend: str = "exact"
     emulator: EmulatorConfig = EmulatorConfig()
+    # 0.19: Laplace (Gaussian) errors at the optimum after the optimiser: laplace.json + laplace_corner.png
+    laplace: bool = False
 
 
 class LineDataConfig(BaseModel):

@@ -3,6 +3,41 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] — 2026-10-06 — quick errors at the optimum (Laplace approximation)
+
+After the optimiser, Gaussian uncertainties in seconds, without an MCMC. On the synthetic two-molecule test the
+Laplace σ agree with a converged emcee run to 1–3 % for every parameter; the whole Hessian takes 146–678 ln P calls
+(0.1 s with the emulator).
+
+### Added
+- `jalebi.fit.laplace(problem, theta)` (module `jalebi.laplace`):
+  - the Hessian of −ln P by central finite differences, with steps from `FitProblem.local_widths` and one
+    Richardson extrapolation (or numdifftools with `method="numdifftools"`);
+  - near a prior bound the stencil moves inside the prior (flag `one-sided`);
+  - eigen-analysis in prior-span units: directions the data constrain less than the uniform prior (`flat`) or
+    with negative curvature (`saddle`) are named by the parameters they load on, and regularised to the prior
+    width;
+  - per-parameter flags `flat` / `saddle` (with the direction, e.g. CO T on a ridge), `unconstrained`
+    (σ > 25 % of the prior span), `edge` (within 2σ of a bound) and `one-sided`;
+  - it returns the covariance, correlation matrix, 1σ errors and condition number, plus derived R, log N·A and
+    N_mol from 4000 Gaussian draws truncated to the prior;
+  - `linear="profile"` (0.17) takes the Hessian over the nonlinear parameters only, with the areas from the
+    conditional Gaussian of the linear solve per draw. Whatever model backend is attached (0.18) is used.
+- Pipeline: `fit.laplace: true` / `jalebi fit --laplace` write `laplace.json`, `laplace_summary.csv`,
+  `laplace_corner.png` (1/2σ error ellipses, with the MCMC contours drawn on top when a chain exists) and
+  `laplace_correlation.png`. `run_laplace_stage`, `save_laplace`.
+- Web app:
+  - Fit tab: a **Quick errors (Laplace)** button, enabled once an optimiser result exists. It runs in a
+    background thread, which also draws the figures; the page is updated with a next-tick document callback,
+    and progress goes to the activity log.
+  - Results tab: a new "Quick errors" section with a value ± σ table and flags, the corner-style ellipse plot
+    (MCMC contours on top when a chain exists) and the correlation heatmap.
+- `plots.plot_laplace_corner`, `plots.plot_laplace_correlation`.
+- `tests/test_laplace.py` (5): σ within 30 % of a converged emcee run (measured 1–3 %); flags for a component
+  at its log N bound; JSON and plots; `jalebi fit --laplace`; the app button running in a thread.
+  `runs/ui_check_laplace.py`: headless Playwright + Chromium check of the button, table and figures, with and
+  without a chain.
+
 ## [0.18.0] — 2026-10-06 — a precomputed emulator of the slab model
 
 The exact model costs 8–80 ms per evaluation: an opacity basis on a fine ln λ grid, then the LSF and pixel

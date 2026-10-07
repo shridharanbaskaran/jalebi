@@ -358,7 +358,9 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         out: Optional[str] = typer.Option(None, help=_OUT_HELP),
         processes: Optional[int] = None, nsteps: Optional[int] = None,
         auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first and fit only those"),
-        backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)")):
+        backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)"),
+        laplace: bool = typer.Option(False, "--laplace", help="Gaussian (Laplace) errors at the optimum: laplace.json, "
+                                                             "laplace_corner.png (with the MCMC contours when there is a chain)")):
     """Run the fit stages from a config file."""
     from .config import ProjectConfig
     from .pipeline import run_pipeline
@@ -374,6 +376,8 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         cfg.fit.mcmc.nsteps = nsteps
     if backend:
         cfg.fit.model_backend = backend
+    if laplace:
+        cfg.fit.laplace = True
     st = stages.split(",") if stages else None
     run = run_pipeline(cfg, stages=st)
     if run.mcmc is not None:
@@ -384,6 +388,16 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         for _, r in summ.iterrows():
             t.add_row(r["parameter"], f"{r['median']:.3f}", f"{r['minus']:.3f}", f"{r['plus']:.3f}", "!" if r["at_edge"] else "")
         rprint(t)
+    if run.laplace is not None:
+        lap = run.laplace
+        t = Table(title=f"{run.spec.name}: Laplace errors at the optimum (condition number {lap.condition:.3g})")
+        for c in ("parameter", "value", "σ", "flags"):
+            t.add_column(c)
+        for r in lap.summary().itertuples():
+            t.add_row(r.parameter, f"{r.value:.4g}", f"{r.sigma:.3g}", r.flags)
+        rprint(t)
+    elif laplace:
+        rprint("[yellow]--laplace needs the optimise stage[/yellow]")
     rprint(f"results in [green]{run.outdir}[/green]")
 
 

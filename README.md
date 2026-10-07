@@ -678,6 +678,23 @@ FZ Tau (`runs/emulator_report.py`, one core):
 * Posterior (`linear: profile`, 8000 steps): medians agree with the exact run within 0.018 dex and 1 K;
   the MCMC took 112 s against 1652 s.
 
+#### Quick errors without MCMC: the Laplace approximation (0.19)
+
+`jalebi fit config.yaml --stages grid,optimise --laplace` (or `fit.laplace: true`, or the **Quick errors (Laplace)**
+button in the app's Fit workspace) takes the Hessian of −ln P at the optimum by finite differences (steps from
+the local posterior widths, Richardson-extrapolated) and inverts it. The outputs are:
+
+* `laplace.json`: value, σ, covariance, correlations, condition number;
+* `laplace_summary.csv`, with derived R, N·A and N_mol from Gaussian draws;
+* `laplace_corner.png`: 68 / 95 % ellipses;
+* `laplace_correlation.png`.
+
+Directions the data do not constrain (a component at its bound, CO T on a ridge) are named, flagged `flat` or
+`saddle`, and capped at the prior width. Parameters within 2σ of a prior bound are flagged `edge`. When an
+MCMC chain exists its contours are drawn over the ellipses, which shows where the Gaussian approximation fails
+(curved or bounded posteriors). On well-constrained parameters the Laplace σ match a converged emcee run to a few
+per cent.
+
 ### Is a component needed? The ΔBIC test
 
 After the fit, each unit is removed in turn ($\log N \to -30$) and
@@ -957,6 +974,7 @@ fit:
          linear: sample, linear_prior: log, linear_prior_scale: null,   # linear sample | profile | marginalise (docs/LINEAR.md)
          vectorize: false}                                              # one ln P call for all walkers (no pool)
   model_backend: exact            # exact | emulator (docs/EMULATOR.md)
+  laplace: false                  # Laplace errors at the optimum (laplace.json, laplace_corner.png)
   emulator: {target_sigma: 0.1, target_flux: 0.001, safety: 0.5, method: cubic, n_start: [9, 9],
              max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false}
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
@@ -979,7 +997,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi init FILE --example fz_tau\|synthetic\|water_hot_cold\|blank` | write a config to start from |
 | `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
-| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
+| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi emulator build CONFIG [--cache-dir DIR] [--target-sigma S] [--rebuild] [--auto-detect]` / `jalebi emulator list` | build or verify the emulator tables of a fit; list the cache |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |

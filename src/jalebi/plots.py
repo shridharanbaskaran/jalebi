@@ -201,3 +201,122 @@ def plot_full_spectrum(spec, problem, theta, title="", figsize=(18, 10), oversam
     ax0.set_xlim(np.nanmin(spec.wave), np.nanmax(spec.wave))
     fig.tight_layout()
     return fig
+
+
+# ------------------------------------------------------------------------------------------------
+# Laplace approximation (0.19)
+# ------------------------------------------------------------------------------------------------
+
+def _laplace_params(lap, params=None, comps=None, max_params: int = 12):
+    names = list(lap.names)
+    if params:
+        idx = [names.index(p) for p in params if p in names]
+    elif comps:
+        idx = [i for i, n in enumerate(names) if n.split(".")[0] in comps]
+    else:
+        idx = list(range(len(names)))
+    return idx[:max_params]
+
+
+def _hist2d_levels(x, y, bins=40, levels=(0.393, 0.865)):
+    """Smoothed 2-D histogram and the density thresholds enclosing `levels` of the mass (1 and 2 sigma in 2-D)."""
+    from scipy.ndimage import gaussian_filter
+    H, xe, ye = np.histogram2d(x, y, bins=bins)
+    H = gaussian_filter(H, 1.0)
+    s = np.sort(H.ravel())[::-1]
+    c = np.cumsum(s) / s.sum()
+    thr = [s[min(np.searchsorted(c, lv), len(s) - 1)] for lv in levels]
+    xc, yc = 0.5 * (xe[1:] + xe[:-1]), 0.5 * (ye[1:] + ye[:-1])
+    return xc, yc, H.T, sorted(set(thr))
+
+
+def plot_laplace_corner(lap, mcmc=None, params=None, comps=None, max_params: int = 12, burn=None, size: float = 1.6):
+    """Corner-style plot of the Laplace approximation: Gaussian marginals on the diagonal and 1-/2-sigma error
+    ellipses below it.  With an MCMC result, its histograms and 1-/2-sigma contours are drawn on top, so the
+    places where the Gaussian approximation fails (curved ridges, skewed or bounded posteriors) stand out."""
+    idx = _laplace_params(lap, params, comps, max_params)
+    n = len(idx)
+    fig, axes = plt.subplots(n, n, figsize=(size * n + 1, size * n + 1), squeeze=False)
+    names = [lap.names[i] for i in idx]
+    flat = None
+    if mcmc is not None:
+        mnames = list(mcmc.names)
+        if all(nm in mnames for nm in names):
+            flat = mcmc.flat(burn)[:, [mnames.index(nm) for nm in names]]
+    mu, sd = lap.theta[idx], lap.sigma[idx]
+    C = lap.cov[np.ix_(idx, idx)]
+    t = np.linspace(0, 2 * np.pi, 200)
+    circ = np.vstack([np.cos(t), np.sin(t)])
+    lap_col, mc_col = "#d97706", "#2563eb"
+    for r in range(n):
+        for c in range(n):
+            ax = axes[r, c]
+            if c > r:
+                ax.axis("off"); continue
+            lo_x = mu[c] - 3.5 * sd[c]; hi_x = mu[c] + 3.5 * sd[c]
+            if flat is not None:
+                lo_x = min(lo_x, np.percentile(flat[:, c], 0.5)); hi_x = max(hi_x, np.percentile(flat[:, c], 99.5))
+            lo_x, hi_x = max(lo_x, lap.lo[idx[c]]), min(hi_x, lap.hi[idx[c]])
+            if r == c:
+                x = np.linspace(lo_x, hi_x, 200)
+                ax.plot(x, np.exp(-0.5 * ((x - mu[c]) / sd[c]) ** 2), color=lap_col, lw=1.4)
+                if flat is not None:
+                    hh, e = np.histogram(flat[:, c], bins=40, range=(lo_x, hi_x))
+                    ax.step(0.5 * (e[1:] + e[:-1]), hh / max(hh.max(), 1), where="mid", color=mc_col, lw=1.0)
+                ax.set_yticks([])
+                fl = lap.flags.get(names[c], [])
+                ax.set_title(f"{names[c]}\n{mu[c]:.3g} ± {sd[c]:.2g}" + (" ⚑" if fl else ""), fontsize=7,
+                             color="#b91c1c" if fl else "k")
+            else:
+                lo_y = mu[r] - 3.5 * sd[r]; hi_y = mu[r] + 3.5 * sd[r]
+                if flat is not None:
+                    lo_y = min(lo_y, np.percentile(flat[:, r], 0.5)); hi_y = max(hi_y, np.percentile(flat[:, r], 99.5))
+                lo_y, hi_y = max(lo_y, lap.lo[idx[r]]), min(hi_y, lap.hi[idx[r]])
+                if flat is not None:
+                    try:
+                        xc, yc, H, lev = _hist2d_levels(flat[:, c], flat[:, r])
+                        ax.contour(xc, yc, H, levels=lev, colors=mc_col, linewidths=0.9)
+                    except Exception:
+                        pass
+                S = C[np.ix_([c, r], [c, r])]
+                w, v = np.linalg.eigh(S)
+                for k, ls in ((np.sqrt(2.30), "-"), (np.sqrt(6.17), "--")):       # 68 % and 95 % in 2-D
+                    e = v @ (np.sqrt(np.maximum(w, 0))[:, None] * circ) * k
+                    ax.plot(mu[c] + e[0], mu[r] + e[1], color=lap_col, lw=1.1, ls=ls)
+                ax.plot(mu[c], mu[r], "+", color=lap_col, ms=5)
+                ax.set_ylim(lo_y, hi_y)
+                if c == 0:
+                    ax.set_ylabel(names[r], fontsize=7)
+                else:
+                    ax.set_yticklabels([])
+            ax.set_xlim(lo_x, hi_x)
+            if r == n - 1:
+                ax.set_xlabel(names[c], fontsize=7)
+            else:
+                ax.set_xticklabels([])
+            ax.tick_params(labelsize=6)
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color=lap_col, lw=1.4, label="Laplace (Gaussian) 68 / 95 %")]
+    if flat is not None:
+        handles.append(Line2D([], [], color=mc_col, lw=1.2, label="MCMC 68 / 95 %"))
+    fig.legend(handles=handles, loc="upper right", fontsize=9, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def plot_laplace_correlation(lap, figsize=(7, 6)):
+    """Correlation matrix of the Laplace approximation."""
+    n = len(lap.names)
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(lap.corr, cmap="RdBu_r", vmin=-1, vmax=1)
+    ax.set_xticks(range(n)); ax.set_xticklabels(lap.names, rotation=90, fontsize=7)
+    ax.set_yticks(range(n)); ax.set_yticklabels(lap.names, fontsize=7)
+    for i in range(n):
+        for j in range(n):
+            if i != j and abs(lap.corr[i, j]) >= 0.5:
+                ax.text(j, i, f"{lap.corr[i, j]:.1f}", ha="center", va="center", fontsize=5,
+                        color="w" if abs(lap.corr[i, j]) > 0.75 else "k")
+    fig.colorbar(im, ax=ax, shrink=0.8, label="correlation")
+    ax.set_title(f"Laplace correlations (condition number {lap.condition:.2g})", fontsize=9)
+    fig.tight_layout()
+    return fig

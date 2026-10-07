@@ -2072,6 +2072,11 @@ class JalebiApp:
         self.run_btn.on_click(lambda e: self.start_fit())
         self.stop_btn.on_click(lambda e: self._stop.set())
         self.stop_btn.disabled = True
+        # 0.19: Laplace (Gaussian) errors at the optimum, without MCMC; enabled once an optimiser result exists
+        self.laplace_btn = pn.widgets.Button(name="Quick errors (Laplace)", button_type="default", width=190,
+                                             margin=(0, 0, 0, 6), disabled=True)
+        self.laplace_btn.on_click(lambda e: self.start_laplace())
+        self._lap_thread = None
         self.progress = pn.indicators.Progress(name="progress", value=0, max=100, sizing_mode="stretch_width", bar_color="warning", height=10)
         self.stage_html = _html('<div class="sf-stage">idle<small>configure the fit in the panel on the right, then press Run</small></div>', sizing_mode="stretch_width")
         self.log_pane = _html('<div class="sf-log">—</div>', sizing_mode="stretch_width")
@@ -2091,7 +2096,7 @@ class JalebiApp:
             styles={"position": "sticky", "top": "0px", "max-height": "calc(100vh - 140px)", "overflow-y": "auto"})
         self.lnp_panel = _panel(pn.pane.Bokeh(self.lnp_fig, **W), visible=False)
         left = pn.Column(
-            _panel(pn.Row(self.stage_html, pn.Row(self.run_btn, self.stop_btn, width=260), **W), self.progress, title="Run"),
+            _panel(pn.Row(self.stage_html, pn.Row(self.run_btn, self.stop_btn, self.laplace_btn, width=460), **W), self.progress, title="Run"),
             self.lnp_panel,
             _panel(self.log_pane, title="Log"),
             **W)
@@ -2201,6 +2206,8 @@ class JalebiApp:
         self.lnp_src.data = dict(step=[], lnp=[], lo=[], hi=[])
         self.lnp_panel.visible = False
         self.run_btn.disabled = True; self.stop_btn.disabled = False
+        if hasattr(self, "laplace_btn"):
+            self.laplace_btn.disabled = True
         self._t_fit0 = time.time()
         f = cfg.fit
         act.info("fit", "fit of %s started: stages %s · %d components (%s) · windows %s · grid %s×%s · %s maxiter %s · "
@@ -2327,6 +2334,7 @@ class JalebiApp:
         self.estimate_continuum() if run.cfg.continuum.refine_iterations else None
         self.on_structure_change()
         self.show_results(run)
+        self.laplace_btn.disabled = run.opt is None
         pn.state.notifications.success("fit finished")
         self.tabs.active = 4
 
@@ -2358,10 +2366,19 @@ class JalebiApp:
             _paper(self.res_corr, "Cross-parameter correlations"),
             _paper(self.res_traces, "Walker traces"),
             visible=False, **W)
+        self.lap_md = _html("", **W)
+        self.lap_table = pn.widgets.Tabulator(pd.DataFrame(), show_index=False, disabled=True, height=300, **W)
+        self.lap_corner = pn.pane.Matplotlib(None, dpi=70, tight=True, **S)
+        self.lap_corr = pn.pane.Matplotlib(None, dpi=80, tight=True, width=650, height=560)
+        self.lap_section = pn.Column(
+            _panel(self.lap_md, self.lap_table, title="Quick errors — Laplace approximation at the optimum"),
+            _paper(self.lap_corner, "Laplace error ellipses (68 / 95 %) — MCMC contours on top when a chain exists"),
+            _paper(self.lap_corr, "Laplace correlations"),
+            visible=False, **W)
         self.results_tab = pn.Column(
             _panel(self.res_md, title="Summary"),
             _panel(self.res_table, pn.Row(self.summary_download), title="Parameters"),
-            self.res_figs, self.res_mcmc_figs, **W)
+            self.lap_section, self.res_figs, self.res_mcmc_figs, **W)
 
     @_bokeh_safe
     def show_results(self, run: RunResult):
@@ -2408,6 +2425,73 @@ class JalebiApp:
             rows = [{"parameter": f"{c}.{k}", "value": f"{v:.3f}"} for c, d in P.items() for k, v in d.items()]
             self.res_table.value = pd.DataFrame(rows)
         self.res_md.object = "\n\n".join(md)
+
+    # ------------------------------------------------------------------ Laplace (quick errors)
+    def start_laplace(self):
+        """Fit tab button: Laplace errors at the optimum in a background thread; the figures are drawn there too
+        (Agg) and handed to the page with a next-tick callback, so the Bokeh event loop never waits."""
+        run = self.run
+        if run is None or run.opt is None:
+            self._notify("warning", "run the optimiser first"); return
+        if self._lap_thread is not None and self._lap_thread.is_alive():
+            return
+        self.laplace_btn.disabled = True; self.laplace_btn.name = "Quick errors … running"
+        doc = pn.state.curdoc
+        act.info("fit", "Laplace errors for %s requested (%d parameters)", run.spec.name, run.problem.ndim)
+
+        def worker():
+            from . import plots
+            from .pipeline import run_laplace_stage
+            out = {}
+            try:
+                with act.step("Laplace approximation at the optimum", "fit"):
+                    lap = run_laplace_stage(run, progress=lambda m: act.info("fit", "%s", m.strip()))
+                out["lap"] = lap
+                out["corner"] = plots.plot_laplace_corner(lap, mcmc=run.mcmc)
+                out["corr"] = plots.plot_laplace_correlation(lap)
+                if run.outdir:
+                    from .pipeline import save_laplace
+                    save_laplace(run, run.outdir)
+            except Exception:
+                out["error"] = traceback.format_exc()
+                act.log("fit", "Laplace failed:\n%s", out["error"], level=logging.ERROR)
+            if doc is not None:
+                doc.add_next_tick_callback(lambda: self._laplace_done(out))
+            else:
+                self._laplace_done(out)
+        self._lap_thread = threading.Thread(target=act.thread_target(worker), daemon=True, name="jalebi-laplace")
+        self._lap_thread.start()
+
+    @_bokeh_safe
+    def _laplace_done(self, out: dict):
+        self.laplace_btn.name = "Quick errors (Laplace)"
+        self.laplace_btn.disabled = False
+
+        def note(kind, msg):            # next-tick callbacks may run without notifications on the state
+            try:
+                getattr(pn.state.notifications, kind)(msg)
+            except Exception:
+                act.info("fit", "%s", msg)
+        if "error" in out:
+            note("error", "Laplace failed — see the terminal log")
+            return
+        lap = out["lap"]
+        summ = lap.summary()
+        summ["value ± σ"] = [f"{v:.4g} ± {s:.2g}" for v, s in zip(summ["value"], summ["sigma"])]
+        self.lap_table.value = summ[["parameter", "value ± σ", "value", "sigma", "flags"]].round(5)
+        flagged = [k for k, v in lap.flags.items() if v]
+        dirs = "; ".join(f"{d['kind']}: {' + '.join(d['loads'])}" for d in lap.directions)
+        self.lap_md.object = (f'<div class="sf-kv">{len(lap.names)} parameters ({lap.linear} areas), {lap.n_evals} evaluations in '
+                              f'{lap.runtime_s:.1f} s · condition number <b>{lap.condition:.3g}</b> · '
+                              + (f'<span style="color:#ff9d9d">⚑ {len(flagged)} flagged: {", ".join(flagged)}</span>' if flagged else "no flags")
+                              + (f'<br>flat / saddle directions (regularised to the prior width): {dirs}' if dirs else "")
+                              + ('<br>Gaussian ellipses in amber, MCMC contours in blue: where they differ the Gaussian approximation fails.'
+                                 if self.run is not None and self.run.mcmc is not None else
+                                 '<br>Run the MCMC to see its contours on top of these ellipses.') + '</div>')
+        self.lap_corner.object = out["corner"]
+        self.lap_corr.object = out["corr"]
+        self.lap_section.visible = True
+        note("success", f"Laplace errors ready ({lap.runtime_s:.1f} s) — see Results")
 
     @_bokeh_safe
     def _draw_corner(self):
