@@ -114,6 +114,7 @@ class RunResult:
     log: list[str] = field(default_factory=list)
     detection: object = None            # DetectionResult when fit.auto_detect was on
     laplace: object = None              # LaplaceResult (fit.laplace / jalebi fit --laplace / the app's Quick errors)
+    evidence: object = None             # DataFrame of Delta ln Z per removed component (fit.dynesty.evidence_without)
     outdir: str | None = None           # folder the results were written to (output with {target} filled in)
 
     def say(self, msg):
@@ -242,9 +243,55 @@ def save_laplace(run: RunResult, outdir: str):
     fig.savefig(os.path.join(outdir, "laplace_correlation.png"), dpi=90); plt.close(fig)
 
 
+def run_nested_stage(run: RunResult, outdir: str | None = None):
+    """Dynamic nested sampling with dynesty (fit.sampler: dynesty, jalebi.nested) in place of emcee: the same
+    likelihood (fit.mcmc.linear profile or sample, any model backend), equal-weight posterior samples in the
+    chain layout, ln Z +- error in diagnostics.json; optionally Delta ln Z of removing components."""
+    from .linear import normalise_mode
+    from .nested import evidence_without, problem_without, run_dynesty
+    d = run.cfg.fit.dynesty
+    lin = "profile" if normalise_mode(run.cfg.fit.mcmc.linear) != "sample" else "sample"
+    theta = run.theta if run.theta is not None else run.problem.theta0()
+    kw = dict(nlive=d.nlive, sample=d.sample, bound=d.bound, dlogz_init=d.dlogz_init, n_effective=d.n_effective,
+              maxcall=d.maxcall, processes=d.processes, seed=d.seed, pfrac=d.pfrac, slices=d.slices, walks=d.walks,
+              dynamic=d.dynamic)
+    run.say(f"dynesty: {'dynamic' if d.dynamic else 'static'} nested sampling, nlive={d.nlive}, sample={d.sample}, "
+            f"bound={d.bound}, {lin} areas, processes={d.processes}")
+    res = run_dynesty(run.problem, theta0=theta, linear=lin, progress=run.say, **kw)
+    run.mcmc = res
+    run.theta = res.median_theta()
+    run.say(f"  done: ln Z = {res.logz:.2f} +- {res.logzerr:.2f}" + (" (profile likelihood: no area prior volume)" if lin == "profile" else "")
+            + f", {res.ncall:,} likelihood calls, posterior ESS {res.n_effective:.0f}, {res.runtime_s:.0f} s "
+            f"(prior transform: {res.info['prior_transform']})")
+    if d.evidence_without:
+        full = res if lin == "sample" else run_dynesty(run.problem, theta0=theta, linear="sample", **kw)
+        def factory(name):
+            p = problem_without(run.problem, name)          # same pixels, noise and weights
+            em = getattr(run.problem.model, "emulator", None)
+            if em is not None:                              # the same tables apply (same pixels and noise)
+                from .emulator import EmulatorSet
+                p.model.emulator = EmulatorSet({k: t for k, t in em.tables.items() if k in p.model._units()},
+                                               dict(em.exact_units), em.info)
+            return p
+        try:
+            sig = run.problem.component_significance(run.opt.theta if run.opt is not None else theta)
+        except Exception:
+            sig = None
+        ev = evidence_without(factory, d.evidence_without, full, {**kw, "linear": "sample"}, significance=sig, say=run.say)
+        run.evidence = ev
+        if outdir:
+            ev.to_csv(os.path.join(outdir, "evidence.csv"), index=False)
+    return run
+
+
 def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str | None = None, verbose: bool = True):
     """emcee stage with a progress bar (tqdm, terminal) and a log line every 10 % giving acceptance,
-    mean ln-probability, the current autocorrelation-time estimate and the time left."""
+    mean ln-probability, the current autocorrelation-time estimate and the time left.  With fit.sampler: dynesty
+    the nested sampler runs instead (run_nested_stage)."""
+    if run.cfg.fit.sampler == "dynesty":
+        return run_nested_stage(run, outdir=outdir)
+    if run.cfg.fit.sampler != "emcee":
+        raise ValueError(f"unknown fit.sampler {run.cfg.fit.sampler!r}: emcee | dynesty")
     m = run.cfg.fit.mcmc
     theta = run.theta if run.theta is not None else run.problem.theta0()
     ckpt = os.path.join(outdir, "chain.h5") if (outdir and m.checkpoint) else None

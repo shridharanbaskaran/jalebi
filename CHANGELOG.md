@@ -3,6 +3,48 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] — 2026-10-06 — dynesty nested sampling, molecule evidences, sampler benchmark
+
+### Added
+- `fit.sampler: emcee | dynesty` (default emcee) and `fit.dynesty` (`nlive` 500, `sample` rslice, `bound` multi,
+  `dynamic`, `dlogz_init`, `pfrac`, `n_effective`, `maxcall`, `processes`, `seed`, `slices`, `walks`,
+  `evidence_without`); `jalebi fit --sampler`. New module `jalebi.nested` (`run_dynesty`, `PriorTransform`,
+  `NestedLikelihood`, `NestedResult`, `problem_without`, `evidence_without`).
+- Optional extra `nested` (`pip install "jalebi[nested]"` → dynesty ≥ 2.1, tested with 3.1.0); included in `all`.
+  - **Likelihood:** the same as emcee's, including `linear: profile` (the NNLS areas come back as dynesty blobs)
+    and the emulator backend.
+  - **Prior transform:** uniform, or truncated-normal inverse CDF for Gaussian priors. T ordering (hot > warm >
+    cold) uses a **sorted transform**: k sorted uniforms are exactly uniform on the ordered region, the prior
+    emcee uses. Different bounds within a chain, non-chain orderings and T_vib ≤ T are handled by rejection.
+    Stick-breaking was not used because it is not uniform on that region.
+  - **Sampling:** dynamic nested sampling with random slice sampling (rslice, 3 + d slices), chosen for 6–15
+    correlated, curved dimensions; rwalk is the alternative. dynesty's process pool when `processes > 1`.
+  - **Output:** equal-weight posterior samples in the usual chain.npz layout (rows × 32 pseudo-walkers × every
+    free parameter; extra keys `sampler`, `logz`, `logzerr`), so the summary, corner plots and QA notebook are
+    unchanged. `diagnostics.json` gets `logz`, `logzerr`, `likelihood_calls`, `n_effective`, the method and the
+    prior transform used.
+- Molecule evidence: `fit.dynesty.evidence_without: [names]` refits without each component on **the same pixels,
+  noise and weights** (`problem_without`; with `line_regions` a config rebuild would change the pixels) and writes
+  `evidence.csv` with Δln Z ± error next to ΔBIC (Kaeufer et al. 2024). These refits always sample the areas (a
+  profiled area has no prior volume). AS 209: Δln Z(HCN) = 73.2 ± 0.9 (ΔBIC/2 = 257 unscaled, 110 rescaled by s²).
+- `runs/sampler_benchmark.py` (`list` / `run` / `report` / `evidence`), `runs/RUN_ME_sampler_benchmark.sh`,
+  `runs/slurm_sampler_benchmark.sh`, and `docs/SAMPLER_BENCHMARK.md` with the sandbox results and the
+  survey recommendation.
+- `tests/test_nested.py` (6): the sorted transform is uniform on the ordered simplex and the truncated normal is
+  right; rejection; recovery and chain layout with sample and profile; evidence prefers the true model;
+  `problem_without` keeps the data; the pipeline option.
+
+### Benchmark (emulator, one core; exact-model cells via RUN_ME)
+| | AS 209 emcee | AS 209 dynesty | FZ Tau emcee | FZ Tau dynesty |
+| --- | --- | --- | --- | --- |
+| `linear: sample` ESS / CPU s | 6.9 (R̂ 1.19, 17 τ) | 18.8 (2.8 M calls, 775 s) | 5.5 (R̂ 1.14) | > 45 min (RUN_ME) |
+| `linear: profile` ESS / CPU s | 17.3 (R̂ 1.02, 47 τ, 143 s) | 28.7 (1.3 M calls, 449 s) | 21.4 (R̂ 1.05, 54 τ, 103 s) | > 7 min (RUN_ME) |
+
+Posteriors agree between the samplers, including AS 209's CO thin-gas ridge (27–31 % of the mass in every run).
+No second modes. Recommended survey default: emcee (de, scaled, blocks auto) + `linear: profile` +
+`model_backend: emulator`, 8000 steps: ~10–15 min per disk, 50–75 core-hours for 300 disks (the exact-model
+emcee setup: 350–450). Use dynesty where the evidence matters.
+
 ## [0.19.0] — 2026-10-06 — quick errors at the optimum (Laplace approximation)
 
 After the optimiser, Gaussian uncertainties in seconds, without an MCMC. On the synthetic two-molecule test the

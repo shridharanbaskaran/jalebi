@@ -53,8 +53,9 @@ app = ["panel>=1.4", "bokeh>=3.4"]
 fetch = ["astroquery>=0.4.7"]
 notebook = ["jupyterlab>=4.0", "ipykernel>=6.25", "ipympl>=0.9"]
 jwst = ["jwst>=1.16"]
+nested = ["dynesty>=2.1"]
 dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
-all = ["jalebi[app,fetch,notebook]"]
+all = ["jalebi[app,fetch,notebook,nested]"]
 
 [project.scripts]
 jalebi = "jalebi.cli:main"

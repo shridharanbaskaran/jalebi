@@ -154,6 +154,25 @@ class MCMCConfig(BaseModel):
     vectorize: bool = False
 
 
+class DynestyConfig(BaseModel):
+    """fit.dynesty: dynamic nested sampling (jalebi.nested), used when fit.sampler is dynesty."""
+    nlive: int = 500                    # live points of the initial run (and of each batch)
+    sample: str = "rslice"              # rslice (default) | rwalk | slice | unif | auto
+    bound: str = "multi"
+    dynamic: bool = True                # dynamic nested sampling (Higson+2019); false = static (evidence only)
+    dlogz_init: float = 0.5
+    pfrac: float = 0.8                  # weight of the posterior (vs the evidence) in the dynamic batches
+    n_effective: int | None = None      # stop at this posterior ESS (None = dynesty default)
+    maxcall: int | None = None
+    processes: int = 1                  # dynesty's own process pool
+    seed: int = 0
+    slices: int | None = None           # rslice: default 3 + ndim
+    walks: int | None = None            # rwalk: default 25
+    # Delta ln Z of removing each of these components (refit without it; areas always sampled for this, since a
+    # profiled area has no prior volume and would bias ln Z): evidence.csv next to detections.csv
+    evidence_without: list[str] = Field(default_factory=list)
+
+
 class EmulatorConfig(BaseModel):
     """fit.emulator: precomputed (T, log N) tables of the slab fluxes on the data's pixels (jalebi.emulator)."""
     target_sigma: float = 0.1           # max |emulator - exact| / sigma at the largest area the data allow
@@ -224,6 +243,9 @@ class FitConfig(BaseModel):
     emulator: EmulatorConfig = EmulatorConfig()
     # 0.19: Laplace (Gaussian) errors at the optimum after the optimiser: laplace.json + laplace_corner.png
     laplace: bool = False
+    # 0.20: emcee (default; fit.mcmc) | dynesty (dynamic nested sampling, fit.dynesty; ln Z in diagnostics.json)
+    sampler: str = "emcee"
+    dynesty: DynestyConfig = DynestyConfig()
 
 
 class LineDataConfig(BaseModel):

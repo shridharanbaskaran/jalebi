@@ -360,7 +360,8 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         auto_detect: bool = typer.Option(False, "--auto-detect", help="detect the molecules first and fit only those"),
         backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)"),
         laplace: bool = typer.Option(False, "--laplace", help="Gaussian (Laplace) errors at the optimum: laplace.json, "
-                                                             "laplace_corner.png (with the MCMC contours when there is a chain)")):
+                                                             "laplace_corner.png (with the MCMC contours when there is a chain)"),
+        sampler: Optional[str] = typer.Option(None, "--sampler", help="emcee | dynesty (overrides fit.sampler)")):
     """Run the fit stages from a config file."""
     from .config import ProjectConfig
     from .pipeline import run_pipeline
@@ -378,6 +379,8 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         cfg.fit.model_backend = backend
     if laplace:
         cfg.fit.laplace = True
+    if sampler:
+        cfg.fit.sampler = sampler
     st = stages.split(",") if stages else None
     run = run_pipeline(cfg, stages=st)
     if run.mcmc is not None:
@@ -388,6 +391,10 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         for _, r in summ.iterrows():
             t.add_row(r["parameter"], f"{r['median']:.3f}", f"{r['minus']:.3f}", f"{r['plus']:.3f}", "!" if r["at_edge"] else "")
         rprint(t)
+    if run.mcmc is not None and getattr(run.mcmc, "logz", None) is not None:
+        rprint(f"ln Z = {run.mcmc.logz:.2f} ± {run.mcmc.logzerr:.2f} ({run.mcmc.ncall:,} likelihood calls)")
+    if getattr(run, "evidence", None) is not None:
+        rprint(run.evidence.to_string(index=False))
     if run.laplace is not None:
         lap = run.laplace
         t = Table(title=f"{run.spec.name}: Laplace errors at the optimum (condition number {lap.condition:.3g})")

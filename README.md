@@ -695,6 +695,28 @@ MCMC chain exists its contours are drawn over the ellipses, which shows where th
 (curved or bounded posteriors). On well-constrained parameters the Laplace σ match a converged emcee run to a few
 per cent.
 
+#### Nested sampling with dynesty (`sampler`, 0.20)
+
+```yaml
+fit:
+  sampler: dynesty             # emcee (default) | dynesty
+  dynesty: {nlive: 500, sample: rslice, dynamic: true, processes: 8, evidence_without: [HCN]}
+  mcmc: {linear: profile}      # the same likelihood options as emcee; model_backend: emulator works too
+```
+
+This is dynamic nested sampling (dynesty; Speagle 2020; Higson et al. 2019), with multi-ellipsoid bounds and
+random slice sampling. The posterior is written as equal-weight samples in the usual `chain.npz` layout, so the
+summary, corner plots and QA notebook work unchanged. ln Z ± error goes to `diagnostics.json`.
+
+* **Temperature ordering** (hot > warm > cold) uses a sorted transform, which is exactly the uniform prior on the
+  ordered region that emcee uses.
+* **Gaussian priors** use the truncated-normal inverse CDF.
+* **Molecule evidence:** `evidence_without` refits without each listed component and writes Δln Z next to ΔBIC in
+  `evidence.csv` (as Kaeufer et al. 2024 did for Sz 28). These refits always sample the areas, because a profiled
+  area has no prior volume.
+* **Choosing a sampler:** `runs/sampler_benchmark.py` compares it with emcee on AS 209 and FZ Tau;
+  `runs/results/sampler_benchmark/REPORT.md` has the numbers.
+
 ### Is a component needed? The ΔBIC test
 
 After the fit, each unit is removed in turn ($\log N \to -30$) and
@@ -975,6 +997,9 @@ fit:
          vectorize: false}                                              # one ln P call for all walkers (no pool)
   model_backend: exact            # exact | emulator (docs/EMULATOR.md)
   laplace: false                  # Laplace errors at the optimum (laplace.json, laplace_corner.png)
+  sampler: emcee                  # emcee | dynesty (fit.dynesty below)
+  dynesty: {nlive: 500, sample: rslice, bound: multi, dynamic: true, dlogz_init: 0.5, pfrac: 0.8, n_effective: null,
+            maxcall: null, processes: 1, seed: 0, slices: null, walks: null, evidence_without: []}
   emulator: {target_sigma: 0.1, target_flux: 0.001, safety: 0.5, method: cubic, n_start: [9, 9],
              max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false}
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
@@ -997,7 +1022,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi init FILE --example fz_tau\|synthetic\|water_hot_cold\|blank` | write a config to start from |
 | `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
-| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
+| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--sampler emcee\|dynesty] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
 | `jalebi emulator build CONFIG [--cache-dir DIR] [--target-sigma S] [--rebuild] [--auto-detect]` / `jalebi emulator list` | build or verify the emulator tables of a fit; list the cache |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
