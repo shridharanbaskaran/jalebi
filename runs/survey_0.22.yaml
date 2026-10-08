@@ -1,0 +1,161 @@
+# =====================================================================================================
+# JALEBI config 1 (0.22) — the 300-disk survey: automated molecule search, emission only (no absorption)
+# =====================================================================================================
+# 0.22 settings vs survey_300_autodetect.yaml (0.16-0.20): shared emulator tables (fit.emulator.cache: shared;
+# build them once with `jalebi emulator build --survey runs/survey_0.22.yaml`), areas marginalised
+# (fit.mcmc.linear: marginalise), 10000 MCMC steps (5 of 17 validation disks needed ~10000 for 50 tau),
+# stage checkpoints + resume (fit.resume: auto; a killed disk continues where it stopped), three DE starts
+# (fit.optimise.n_starts: 3).  fit.continuum_fit stays `none` until runs/continuum_study.py has decided.
+# validation_blind_0.22.yaml must be identical except `output` (python jalebi_runs.py check-sync survey_0.22.yaml
+# validation_blind_0.22.yaml).
+# One config for every disk; per-disk name / path / distance / RV come from the targets table.
+#
+#   python jalebi_runs.py targets DATA_ROOT -o survey_targets.csv --simbad   # build the table once
+#   jalebi emulator build --survey survey_0.22.yaml -j 8                      # shared tables, once
+#   jalebi batch survey_0.22.yaml survey_targets.csv --workers 32              # one machine
+#   sbatch --array=0-29 slurm_survey.sh                                       # SLURM, 10 disks per task
+#   jalebi batch survey_0.22.yaml survey_targets.csv --workers 32 --only-failed   # re-run failures
+#
+# What happens per disk (jalebi.pipeline.run_pipeline):
+#   prep (rest frame, spike filter, IRSQR continuum, line masks) → detect (one NNLS over LTE templates of
+#   every candidate, ΔBIC per candidate) → components + windows + hot>warm>cold ordering written from the
+#   detection → grid (sequential, MINDS-style) → differential evolution → emcee → continuum refinement
+#   pass with χ² guard → corner / correlation / posterior-predictive plots + summary.csv.
+#
+# Parallelism: `jalebi batch` runs one disk per worker (joblib) and forces mcmc.processes = 1 and
+# optimise.workers = 1 inside each disk, so throughput scales with --workers, not with the values below.
+# The values below apply when a single disk is run with `jalebi fit` or from the web app.
+#
+# Works on main (0.10.x) and feature/absorption (0.11.0). `detect.mode: emission` is REQUIRED on 0.11:
+# its default is `both`, which would also test absorbing screens; 0.10 ignores the key.
+# Keep the fit/continuum/masks sections identical to validation_blind.yaml — the blind validation is only
+# a test of this survey pipeline if the two are the same. `python jalebi_runs.py check-sync` diffs them.
+# =====================================================================================================
+
+target:
+  name: target                  # replaced per row of the targets table
+  path: ""                      # replaced per row: folder with the Level-3 *_x1d.fits of all 12 sub-bands
+  distance_pc: 140.0            # used only if the table leaves distance_pc blank (jalebi_runs.py warns)
+  rv_kms: 0.0                   # heliocentric RV removed before fitting; blank in the table -> this value
+  spike_filter: true
+  extraction:
+    source: s3d                 # aperture photometry on the s3d cubes of every sub-band (jalebi.data.load_s3d_folder)
+    ra: null                    # aperture centre: per target from the table (extract_ra / extract_dec), set by
+    dec: null                   #   the runner scripts; plain `jalebi batch` cannot pass per-target positions
+    aperture_fwhm_scale: 1.5    # radius = 1.5 x FWHM(lambda), FWHM = 0.033 lambda + 0.106 arcsec
+    aperture_arcsec: null
+    annulus_arcsec: null        # no background annulus (set e.g. [2.0, 3.0] for nebular backgrounds)
+    apcorr: mrs                 # MRS encircled-energy aperture correction
+
+# ---- continuum ---------------------------------------------------------------------------------------
+# IRSQR (MINDS: Temmink+2024, Vlasblom+2025) — the most widely used automated MIRI continuum; knots every
+# 25 pixels, 10th-percentile quantile so line forests sit above the baseline. Q-branches are protected so
+# the continuum does not cut through CO2 15 µm / C2H2 13.7 / HCN 14.0 pseudo-continua.
+continuum:
+  method: irsqr
+  quantile: 0.1
+  knot_spacing: 25
+  protect: true
+  refine_iterations: 1          # one model-aware pass (gas model subtracted, continuum re-estimated);
+                                # kept only if χ² improves
+masks:
+  default_lines: true           # H I, H2 S(0)-S(8), [Ne II], [Ne III], [Fe II], [Ar II], [S I] ...
+  oh_prompt: true               # OH prompt emission 9-13 µm is non-LTE: never fitted as a slab
+  oh_whole_range: false
+  extra: {}
+
+components: []                  # written per disk by the detection
+
+# ---- fitting -----------------------------------------------------------------------------------------
+fit:
+  auto_detect: true
+  model_backend: emulator
+  emulator:
+    cache: shared               # 0.21: survey-wide tables in <cache_dir>/shared, resampled per disk; build them
+    cache_dir: null             #   once (jalebi emulator build --survey) and set JALEBI_EMULATOR_READONLY=1 on nodes
+    read_only: false
+  resume: auto                  # 0.22: stage checkpoints in the disk folder; a killed disk continues
+  continuum_fit: none           # 0.22: none | offset | spline (joint continuum correction) -- none until the
+                                #   continuum study (runs/continuum_study.py) has decided
+  detect:
+    mode: emission              # NO absorption (0.11+). Emission slabs only.
+    threshold: 10.0             # ΔBIC > 10 = "strong evidence" (MINDS detection criterion)
+    # Explicit list, so every machine / cluster node tests the same species whatever is in its cache.
+    # C6H6 and C3H4 need local line lists (not in HITRAN): add them once the lists are in linedata/.
+    # OH and H2 are never slab candidates (non-LTE / masked). Isotopologues are only accepted with their
+    # parent and are then tied at the default ratio (13CO2, 13CO, H13CN at 70; 13CCH2 at 35).
+    candidates: [H2O, CO, 13CO, CO2, 13CO2, C2H2, 13CCH2, HCN, H13CN, CH4, NH3, C2H4, C2H6, C4H2, HC3N]
+    replace_windows: true       # fit windows = union of the detected molecules' windows
+    keep_undetected: false
+    oversample: 2
+  area_param: logNA             # sample log(N·A) instead of log R: removes most of the N-R banana for
+                                # optically thin components; R_au is still reported as a derived quantity
+  fit_noise_scale: true         # free log_s: absorbs the MAD-noise underestimate and residual continuum
+                                # structure, so posteriors are not over-confident on bright disks
+  fit_rv: false
+  fit_fwhm: false
+  use_pipeline_err: false       # MAD noise per sub-band (pipeline ERR is unreliable for MRS)
+  oversample: 3                 # fine-grid points per resolution element: 3 matches 12 to 0.01 sigma on FZ Tau
+                                # (chi2 shift 0.0 over 7777 px) at ~half the cost of 6
+  ordering: []                  # hot > warm > cold water written by the detection
+  bounds_by_molecule:           # prior bounds per molecule (0.16), applied to the components the detection writes
+    CO: {T: [100.0, 3000.0]}    # CO sat at the old 1500 K cap in most disks (validation QA, 2026-10-06);
+    13CO: {T: [100.0, 3000.0]}  # published CO slabs reach 1400-2400 K
+  window_weights: {}
+  stages: [grid, optimise, mcmc]
+  grid:
+    logN: [14.0, 21.0, 29]      # lo, hi, n  (0.25 dex steps)
+    T: [100.0, 1500.0, 29]      # 50 K steps; up to the prior edge so hot CO / C2H2 are not pinned at 1200 K
+    order: []
+    n_jobs: 1
+  optimise:
+    method: de
+    maxiter: 150
+    popsize: 12
+    workers: 1                  # serial: a parallel scipy DE changes its update order
+    polish: true
+    seed: 0
+    n_starts: 3                 # 0.22: three DE starts (seeds 0, 1, 2; the second from seed_points), lowest -2lnP kept
+    seed_points:                # literature-typical water start for the second DE run
+      H2O_hot:  {T: 900.0, logN: 18.5}
+      H2O_warm: {T: 500.0, logN: 18.0}
+      H2O_cold: {T: 250.0, logN: 17.8}
+  mcmc:
+    nwalkers: null              # 4 × ndim (min 32) per sampled block
+    nsteps: 10000               # 0.22: τ = 66-214 steps on the validation disks; 5 of 17 needed ~10000 for 50 τ
+                                # (with fit.resume a longer nsteps continues an existing chain)
+    processes: 1
+    linear: marginalise         # 0.22: areas integrated out analytically (same optimum as profile, correct area
+                                #   errors; docs/LINEAR.md)
+    vectorize: true
+    seed: 0
+    ball: 0.01                  # used only with init: ball
+    thin_by: 1
+    moves: de                   # 80 % DEMove + 20 % DESnookerMove (ter Braak & Vrugt 2008) instead of emcee's
+                                # stretch move: ~3x shorter autocorrelation time on these 13-26 parameter fits
+    de_gamma: 1.0               # DE step = 2.38/sqrt(2 ndim) x this (0.5 raised acceptance to 0.26 but not τ)
+    init: scaled                # walkers start at the local posterior width of each parameter, not 1 % of the prior
+    blocks: auto                # components that share no pixel (typically CO + ro-vib water at 4.9-8 µm vs the
+                                # 12-27.5 µm fit) are sampled as separate blocks; one block when they overlap
+    # linear: sample             # 0.17: what to do with the emitting areas R^2 (linear in the model, see docs/LINEAR.md)
+                                #   sample      = MCMC parameters like the others (default; the 0.16 runs)
+                                #   profile     = solved by bounded NNLS at every likelihood call (DuCKLinG,
+                                #                 Kaeufer+2024): only T, log N (and log s) are sampled
+                                #   marginalise = integrated out analytically (broad Gaussian prior on R^2)
+                                # the chain still holds every parameter (areas filled in per sample), so the QA
+                                # notebook and summary.csv work unchanged
+    # linear_prior: log          # marginalise only: log (default; uniform in log R, like sample) | gaussian (bare
+                                #   Gaussian on R^2: on AS 209 it pushed CO to log N 13.3, R 11 au)
+    checkpoint: true            # chain.h5 is written while sampling; 0.22 resumes from it (fit.resume: auto)
+
+linedata:
+  releases:
+    H2O: hitemp                 # complete at high E_up (hot water); HITRAN 2020 H2O is equivalent for cold water
+    CO: hitemp
+  data_dir: null                # null = $JALEBI_DATA, then ~/.jalebi/linedata. On a cluster set JALEBI_DATA
+                                # to a shared folder, so every node reads the same cache.
+
+output: results/survey_0.22/{target} # one folder per disk; population.csv goes to results/survey_0.22/
+R_model: argyriou2023           # MRS resolving power R(λ) (Argyriou+2023)
+R_scale: 1.0
+R_constant: null

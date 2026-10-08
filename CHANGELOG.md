@@ -3,6 +3,91 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.22.0] — 2026-10-08 — resume, robust start, joint continuum, detection probability
+
+Built on top of 0.21.0 from the findings of the local 0.20 validation (17 disks; emulator + DE moves ≈ 50× the
+0.15 wall clock; hot-water corner in 7 blind / 8 known disks; the continuum the dominant systematic; 45 % of the
+known-set quantities within tolerance).  Existing configs give the same results as before unless a new option
+is set, except for the new default `fit.optimise.n_starts: 3` (three DE starts instead of one; `n_starts: 1`
+restores 0.21).  Nothing in the fitting physics changed.
+
+### Added
+- **Stage checkpoints and resume** (`fit.resume: auto`, new module `jalebi.resume`, docs/RESUME.md).  Every
+  stage writes its result into the disk folder atomically — `detection.json`, `grid.json`, `de_pass1.json`,
+  `de_pass2.json` (θ, χ², areas, every DE start), `continuum_refined.npz`, `chain.h5` (+ `chain.key.json`),
+  `dynesty.save` — each keyed on the data signature, the config without run-only keys, and the model version;
+  a run continues from the last valid stage.  emcee chains are continued from the HDF backend (groups `mcmc`
+  / `mcmc_block{i}`, all three linear modes; the random state is restored, so a chain continued after a clean
+  stop equals an uninterrupted one bit for bit — tested; after a SIGKILL inside emcee's per-step write the
+  snapshot can be one step out of sync and the continuation is a different, equally valid realisation);
+  dynesty uses its own checkpoint / restore.  `[stage] …` log lines;
+  `jalebi fit --resume off`; `diagnostics.json["resume"]`; `jalebi.resume.status()`.
+- **Robust start**: `fit.optimise.n_starts` (default 3), `seed_points` (literature-typical values per
+  component), `multimodal_dchi2 / dT / dlogN`.  The lowest −2 ln P wins; every start's χ² and θ go to
+  `diagnostics.json["optimise"]`, possible multimodality is flagged there, in the log and in `population.csv`
+  (`multimodal`).  `fit.optimise.workers` stays 1 (a parallel scipy DE changes its update order).
+- **Per-component output**: `model.csv` has `band`, `continuum` and one `model_<component>` column per
+  component; new figure `fit_components.png` (`plots.plot_components`: each component against the data with the
+  others subtracted).
+- **Joint continuum correction** (experimental; `fit.continuum_fit: none | offset | spline`,
+  `fit.continuum_correction`, new module `jalebi.continuum_fit`, docs/CONTINUUM.md).  Per-sub-band offsets or
+  cubic B-splines with a zero-mean Gaussian prior, treated as linear parameters with the area machinery
+  (`jalebi.linear`: extra design columns, marginalised or profiled), profiled inside `log_like` /
+  `log_prob_many` for `linear: sample`, and alternated with the NNLS areas in the optimiser.  Products:
+  `model.csv["continuum_correction"]`, `continuum_fit.csv`, `diagnostics.json["continuum_fit"]`.  Default
+  `none`.
+- **Corner / pseudo-continuum diagnostic** (`fit.corner_check`, new module `jalebi.corner`): per component
+  "pinned at ≥ 2 bounds" and the smooth fraction (flux surviving a 0.3 µm running median; the pseudo-continuum
+  flag only for `smooth_molecules`, default water — Q-branch band heads are smooth by nature); warnings in the log,
+  `diagnostics.json["corner"]`, `population.csv` (`<unit>_smooth_frac`, `<unit>_pinned`, `<unit>_corner_flags`).
+- **Detection probability with the continuum varied** (experimental; `jalebi detect-prob`, new module
+  `jalebi.detection_prob`, `fit.detection_prob`, docs/DETECTION.md).  Ensemble mode: N plausible continua
+  (estimator parameters drawn in ranges, optional other methods, global offset ~ N(0, 1 %)), each refitted from
+  the best-fit checkpoint with a short DE pass (+ optional short MCMC); per unit the detection fraction, the
+  parameter spread across continua and a class (robust ≥ 95 % / continuum-dependent / not detected ≤ 5 %).
+  Bayesian mode: with `continuum_fit: spline` marginalised, P(present) = 1/(1+exp(−(Δ ln Z + ln prior odds)))
+  from the 0.20 dynesty molecule evidence.  `detection_probability.csv` per disk, `--survey ROOT` merges a survey
+  table.  Synthetic test: a 1.5 % continuum hump at the HCN Q branch is "detected" at the nominal continuum;
+  CO2 comes out robust, HCN continuum-dependent.
+- **Continuum study tool** `runs/continuum_study.py` (list / prepare / run / rank): the known validation set
+  under built-in continuum settings (IRSQR variants, median_sg, aspls, asls, offset / spline corrections) or a
+  settings file, launched through `jalebi_runs.py run`, scored and ranked (`continuum_study_ranking.csv/.md`).
+  `runs/co_bound_settings.yaml` compares the CO temperature prior at 1500 / 2000 / 3000 K with the same tool.
+- **`report.co: full | NA_only`**: report only log(N·A) for CO (and 13CO) in the printed summary and the
+  population row (`summary.csv` keeps every row with a `reported` column).
+- **Local line lists**: `jalebi linelist import --molecule C6H6 --file FILE --format auto|hitran160|islat|csv
+  --release TAG --partition FILE|levels --q296 Q` (`linedata.import_local_linelist`, `read_csv_lines`,
+  `read_partition_file`, `partition_from_levels`): writes `<MOL>_<release>.parquet` + `_Q.npz`; CSV lists may
+  carry 296 K intensities instead of Einstein A (converted with Q(296)); docs/LINELISTS.md says what the JWST
+  papers used for benzene (GEISA 2020 positions and intensities, Arabhavi et al. 2024 derived A and g, Dang-Nhu
+  & Plíva partition function) — no ready-made public C6H6 list in jalebi's layout was found.
+- Survey config `runs/survey_0.22.yaml` (emulator, shared tables, `linear: marginalise`, 10000 steps,
+  `resume: auto`, `n_starts: 3` with water seed points, `continuum_fit: none` until the continuum study decides).
+- Validation scoring (local scripts, delivered outside the package): strict / 0.20-rule / lenient verdicts side
+  by side, N·A scoring for degenerate molecules (`scoring:` block of the manifest, `compare --na`),
+  `expect_undetected`, a log N·A panel in the published-vs-fitted figure, `--survey` for the sync check.
+- Tests: `test_resume.py` (crash after each stage → bit-identical resumed products; chain continuation; key
+  changes; broken files; blocks; marginalise; dynesty; detection), `test_multistart.py`,
+  `test_components_output.py`, `test_continuum_fit.py`, `test_corner.py`, `test_detection_prob.py`,
+  `test_linelist_import.py`.
+
+### Changed
+- **emcee's random state is now seeded from `fit.mcmc.seed`** (per block: seed + 7919·i).  Up to 0.21 only the
+  walker starting positions were seeded; emcee took its own RandomState from numpy's global state, i.e. from
+  process entropy, so two runs of one config gave different chains.  Chains are now reproducible across
+  processes (and a resumed / continued chain equals the uninterrupted one bit for bit).  Statistically nothing
+  changes; a 0.22 chain differs from a 0.21 chain of the same config as any two 0.21 runs differed.
+- `tests/test_laplace.py`: the converged-length assertion of the Laplace-vs-MCMC test is 40 τ instead of 50 τ
+  (τ ≈ 60–70 on 3400 steps; 50 τ was a marginal, platform-dependent threshold that failed on the user's machine).
+- `FitProblem.mcmc(..., resume=)`, `run_mcmc_stage(..., resume=)`, `run_nested_stage(..., resume=)`,
+  `run_dynesty(..., checkpoint=, resume=, checkpoint_every=)`; `MCMCResult.meta["resumed_steps"]`.
+- `FitProblem.solve_areas` returns `(P, chi2)` as before but takes an optional `y=`; `_areas_into` factored out.
+- `diagnostics.json` is written after an optimise-only run too (it carries `optimise`, `corner`, `resume`).
+- `catalogue_row` adds the corner columns and `multimodal`, and honours `report.co`.
+
+### Not changed
+- 0.19 Laplace, 0.20 dynesty / molecule evidence and 0.21 shared tables work as before (their tests pass).
+
 ## [0.21.0] — 2026-10-07 — shared emulator tables
 
 ### Added

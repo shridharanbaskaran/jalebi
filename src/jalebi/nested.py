@@ -31,6 +31,7 @@ Parallel: `processes > 1` uses dynesty's own process pool (likelihood and prior 
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -198,10 +199,15 @@ def _systematic(weights, rng):
 def run_dynesty(problem, theta0=None, linear: str = "sample", nlive: int = 500, sample: str = "rslice",
                 bound: str = "multi", dlogz_init: float = 0.5, n_effective: int | None = None, maxcall: int | None = None,
                 processes: int = 1, seed: int = 0, pfrac: float = 0.8, slices: int | None = None, walks: int | None = None,
-                n_walkers_out: int = 32, progress=None, dynamic: bool = True) -> NestedResult:
+                n_walkers_out: int = 32, progress=None, dynamic: bool = True, checkpoint: str | None = None,
+                resume: bool = False, checkpoint_every: float = 60.0) -> NestedResult:
     """Dynamic nested sampling of `problem` (FitProblem).  `linear="profile"` samples the nonlinear parameters
     with the areas solved by NNLS (they come back per sample from the blobs).  Returns a NestedResult over the
-    *full* parameter vector (same columns as an emcee run)."""
+    *full* parameter vector (same columns as an emcee run).
+
+    checkpoint (0.22): dynesty's own save file (written every `checkpoint_every` seconds); with `resume` an
+    existing file is restored and the run continues from it (fit.resume auto).  The sampler state pickles the
+    likelihood, i.e. the whole problem, so the file can be large with emulator tables attached."""
     import dynesty
     t0 = time.time()
     lp = None
@@ -239,15 +245,32 @@ def run_dynesty(problem, theta0=None, linear: str = "sample", nlive: int = 500, 
         if progress is not None and time.time() - last["t"] > 10:
             last["t"] = time.time()
             progress(f"  dynesty: iteration {niter}, {ncall:,} likelihood calls")
+    restored = False
+    ck = {}
+    if checkpoint:
+        ck = {"checkpoint_file": checkpoint, "checkpoint_every": checkpoint_every}
     try:
+        cls = dynesty.DynamicNestedSampler if dynamic else dynesty.NestedSampler
+        s = None
+        if checkpoint and resume and os.path.exists(checkpoint):
+            try:
+                s = cls.restore(checkpoint, pool=pool)
+                restored = True
+                if progress is not None:
+                    progress(f"[stage] dynesty resumed from {os.path.basename(checkpoint)}")
+            except Exception as e:                       # a foreign or broken save file: start over
+                if progress is not None:
+                    progress(f"[stage] dynesty: could not restore {os.path.basename(checkpoint)} ({e}); starting over")
+                s = None
+        if s is None:
+            s = cls(loglike, prior, nd, nlive=nlive, **kw)
         if dynamic:
-            s = dynesty.DynamicNestedSampler(loglike, prior, nd, nlive=nlive, **kw)
             s.run_nested(nlive_init=nlive, dlogz_init=dlogz_init, wt_kwargs={"pfrac": pfrac}, n_effective=n_effective,
-                         maxcall=maxcall, print_progress=progress is not None, print_func=pf if progress else None)
+                         maxcall=maxcall, print_progress=progress is not None, print_func=pf if progress else None,
+                         resume=restored, **ck)
         else:
-            s = dynesty.NestedSampler(loglike, prior, nd, nlive=nlive, **kw)
             s.run_nested(dlogz=dlogz_init, maxcall=maxcall, print_progress=progress is not None,
-                         print_func=pf if progress else None)
+                         print_func=pf if progress else None, resume=restored, **ck)
         r = s.results
     finally:
         if pool is not None:
@@ -275,7 +298,7 @@ def run_dynesty(problem, theta0=None, linear: str = "sample", nlive: int = 500, 
             "pfrac": pfrac, "slices": kw.get("slices"), "walks": kw.get("walks"), "processes": processes, "seed": seed,
             "linear": "profile" if lp is not None else "sample", "prior_transform": ptf.describe(),
             "sampled": [p.key for p in target.free], "efficiency": float(r["eff"]),
-            "n_equal_weight": int(ns * nw)}
+            "n_equal_weight": int(ns * nw), "resumed": bool(restored)}
     res = NestedResult(problem, chain, lnp.reshape(ns, nw), time.time() - t0, r["logz"][-1], r["logzerr"][-1],
                        ncall, r["niter"], n_eff, info)
     if lp is not None:

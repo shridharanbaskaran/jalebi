@@ -70,6 +70,40 @@ def plot_fit(problem, theta, windows=None, per_component=True, title="", figsize
     return fig
 
 
+def plot_components(problem, theta, windows=None, title="", figsize=(14, 2.2)):
+    """0.22: one panel per component (unit): the data with every *other* component subtracted (black), the
+    component's own model (colour) and the noise band, over the fit windows.  Shows what each component
+    explains on its own -- a pseudo-continuum component is a broad hump here, a pinned hot component a
+    forest of weak lines."""
+    P, _ = problem.params_from_theta(theta)
+    total, units, tmax = problem.model.evaluate(P, per_unit=True)
+    windows = windows or problem.windows
+    keys = list(units)
+    n = max(len(keys), 1)
+    fig, axes = plt.subplots(n, 1, figsize=(figsize[0], figsize[1] * n + 0.8), sharex=True, squeeze=False)
+    sel = np.zeros(len(problem.wave), bool)
+    for lo, hi in windows:
+        sel |= (problem.wave >= lo) & (problem.wave <= hi)
+    for ax, key in zip(axes[:, 0], keys):
+        lead = next((c for c in problem.components if c.name == key or c.group == key), None)
+        mol = lead.molecule if lead is not None else key
+        own = units[key]
+        others = total - own
+        for j, i in enumerate(_band_segments(problem, sel)):
+            w = problem.wave[i]
+            lab = (lambda s: s if j == 0 else None)
+            ax.fill_between(w, -problem.sigma[i], problem.sigma[i], color="0.88", step="mid", label=lab("±1σ"))
+            ax.step(w, problem.y[i] - others[i], where="mid", color="k", lw=0.6, label=lab("data − other components"))
+            ax.plot(w, own[i], color=_colour(mol), lw=0.9, label=lab(f"{key} (τmax={tmax.get(key, np.nan):.1f})"))
+        ax.set_ylabel("F_ν [Jy]")
+        ax.legend(fontsize=7, ncol=3, loc="upper right")
+        ax.set_xlim(min(w[0] for w in windows), max(w[1] for w in windows))
+    axes[0, 0].set_title(title)
+    axes[-1, 0].set_xlabel("wavelength [µm]")
+    fig.tight_layout()
+    return fig
+
+
 def plot_grid(grid_result, figsize=(6, 4.5)):
     """Δχ² map over (log N, T) with the best point and the 1/2/3σ contours."""
     g = grid_result

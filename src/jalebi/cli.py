@@ -125,6 +125,33 @@ def linedata_import(molecule: str, path: str, release: str = "hitemp",
     rprint(f"[green]imported[/green] {molecule} -> {out}")
 
 
+linelist_app = typer.Typer(help="0.22: local line lists for molecules HITRAN does not have (C6H6, C3H4, ...).")
+app.add_typer(linelist_app, name="linelist")
+
+
+@linelist_app.command("import")
+def linelist_import(molecule: str = typer.Option(..., "--molecule", help="jalebi molecule name, e.g. C6H6"),
+                    file: str = typer.Option(..., "--file", help="the line list: HITRAN 160-char .par, iSLAT list or CSV"),
+                    fmt: str = typer.Option("auto", "--format", help="auto | hitran160 | islat | csv"),
+                    release: str = typer.Option("local", "--release", help="cache tag: <MOL>_<release>.parquet; use it as "
+                                                                           "linelist_release in configs"),
+                    partition: Optional[str] = typer.Option(None, "--partition", help="T,Q table file, or 'levels' = direct sum "
+                                                                                      "over the list's levels (approximate)"),
+                    q296: Optional[float] = typer.Option(None, "--q296", help="csv with intensities (sw) instead of A: Q(296 K)"),
+                    data_dir: Optional[str] = typer.Option(None, "--data-dir", help=_DATA_DIR_HELP),
+                    config: Optional[str] = typer.Option(None, "--config", help="project YAML whose linedata.data_dir names the cache")):
+    """Import a local line list into the cache in jalebi's Parquet layout, with its partition function.
+
+    CSV columns: wave [um] or nu [cm-1]; eu or el [K] (or eu_cm1 / el_cm1); gu (gl optional); a [s-1] or sw (HITRAN
+    296 K intensity, converted with --q296).  See docs/LINELISTS.md for where a C6H6 list can be obtained."""
+    _use_cache(data_dir, config)
+    from .linedata import import_local_linelist
+    info = import_local_linelist(molecule, file, release=release, fmt=fmt, partition=partition, q296=q296)
+    rprint(f"[green]imported[/green] {molecule} ({info['format']}): {info['n_lines']} lines, {info['wave_min']:.3f}-{info['wave_max']:.3f} um, "
+           f"partition {info['partition']} (Q(296) = {info['Q296']:.4g}) -> {info['path']}")
+    rprint(f"use it with  linelist_release: {release}  on the component, or linedata.releases: {{{molecule}: {release}}}")
+
+
 @linedata_app.command("list")
 def linedata_list(data_dir: Optional[str] = typer.Option(None, "--data-dir", help=_DATA_DIR_HELP),
                   config: Optional[str] = typer.Option(None, "--config", help="project YAML whose linedata.data_dir names the cache")):
@@ -442,7 +469,8 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)"),
         laplace: bool = typer.Option(False, "--laplace", help="Gaussian (Laplace) errors at the optimum: laplace.json, "
                                                              "laplace_corner.png (with the MCMC contours when there is a chain)"),
-        sampler: Optional[str] = typer.Option(None, "--sampler", help="emcee | dynesty (overrides fit.sampler)")):
+        sampler: Optional[str] = typer.Option(None, "--sampler", help="emcee | dynesty (overrides fit.sampler)"),
+        resume: Optional[str] = typer.Option(None, "--resume", help="auto | off (overrides fit.resume; 0.22 stage checkpoints)")):
     """Run the fit stages from a config file."""
     from .config import ProjectConfig
     from .pipeline import run_pipeline
@@ -462,11 +490,15 @@ def fit(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HEL
         cfg.fit.laplace = True
     if sampler:
         cfg.fit.sampler = sampler
+    if resume:
+        cfg.fit.resume = resume
     st = stages.split(",") if stages else None
     run = run_pipeline(cfg, stages=st)
     if run.mcmc is not None:
+        from .pipeline import report_mask
         summ = run.mcmc.summary()
-        t = Table(title=f"{run.spec.name} posterior summary")
+        summ = summ[report_mask(cfg, summ, run.problem.components)]            # 0.22 report.co
+        t = Table(title=f"{run.spec.name} posterior summary" + (" (report.co: NA_only)" if cfg.report.co != "full" else ""))
         for c in ("parameter", "median", "minus", "plus", "at_edge"):
             t.add_column(c)
         for _, r in summ.iterrows():
@@ -525,6 +557,45 @@ def batch(config: str, targets: str, workers: int = 4, stages: Optional[str] = N
     os.makedirs(root, exist_ok=True)
     pd.DataFrame(rows).to_csv(os.path.join(root, catalogue), index=False)
     rprint(f"catalogue: {os.path.join(root, catalogue)} ({len(rows)} rows); one folder per target in {root}/")
+
+
+@app.command("detect-prob")
+def detect_prob(config: str, target: Optional[str] = typer.Option(None, help=_TARGET_HELP),
+                name: Optional[str] = typer.Option(None, help=_NAME_HELP),
+                mode: Optional[str] = typer.Option(None, "--mode", help="ensemble | bayesian (overrides fit.detection_prob.mode)"),
+                n: Optional[int] = typer.Option(None, "--n", help="ensemble: number of continuum variants"),
+                mcmc_steps: Optional[int] = typer.Option(None, "--mcmc-steps", help="ensemble: short MCMC per variant (0 = optimum only)"),
+                survey: Optional[str] = typer.Option(None, "--survey", help="only merge <ROOT>/*/detection_probability.csv into a survey table"),
+                backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)")):
+    """0.22: detection probability of every molecule with the continuum varied (docs/DETECTION.md).
+
+    Ensemble mode refits the disk from its best-fit checkpoint under N plausible continua and reports the
+    detection fraction, the parameter spread and a class (robust / continuum-dependent / not detected);
+    bayesian mode uses the dynesty molecule evidence with the continuum correction marginalised."""
+    from . import detection_prob as dp
+    if survey:
+        t = dp.survey_table(survey)
+        rprint(f"{len(t)} rows -> {os.path.join(survey, 'detection_probability_survey.csv')}" if len(t) else "no detection_probability.csv found")
+        return
+    from .config import ProjectConfig
+    cfg = ProjectConfig.load(config)
+    _apply_target(cfg, target, name)
+    if n:
+        cfg.fit.detection_prob.n_variants = n
+    if mcmc_steps is not None:
+        cfg.fit.detection_prob.mcmc_nsteps = mcmc_steps
+    if backend:
+        cfg.fit.model_backend = backend
+    m = mode or cfg.fit.detection_prob.mode
+    s = dp.settings_from_config(cfg)
+    if m == "ensemble":
+        t = dp.ensemble(cfg, settings=s, say=rprint)
+    elif m == "bayesian":
+        t = dp.bayesian(cfg, settings=s, say=rprint)
+    else:
+        raise typer.BadParameter("mode must be ensemble or bayesian")
+    cols = [c for c in ("unit", "n_variants", "detection_fraction", "nominal_detected", "dBIC_median", "p_present", "delta_lnZ", "T_spread_16_84", "logNA_spread_16_84", "class") if c in t]
+    rprint(t[cols].to_string(index=False))
 
 
 @app.command()

@@ -135,6 +135,29 @@ class FitProblem:
         self.lo = np.array([p.lo for p in self.free]); self.hi = np.array([p.hi for p in self.free])
         self._base = {c.name: c.params() for c in components}
         self.ncall = 0
+        self.cont = None                  # 0.22: jalebi.continuum_fit.ContinuumCorrection (fit.continuum_fit)
+
+    # ---- joint continuum correction (0.22, fit.continuum_fit) -----------------------------
+    def set_continuum_fit(self, mode: str = "none", knot_spacing_um: float = 1.0, prior: str = "continuum",
+                          prior_width: float = 0.02, solve: str = "marginalise"):
+        """Attach (or remove, mode "none") the continuum correction: per-sub-band offsets or B-splines with a
+        Gaussian prior, profiled / marginalised inside every likelihood call (jalebi.continuum_fit)."""
+        from .continuum_fit import ContinuumCorrection
+        if mode in (None, "none"):
+            self.cont = None
+            return None
+        cont = self.spec.continuum[self.used] if self.spec.continuum is not None else None
+        self.cont = ContinuumCorrection(self.wave, self.band, cont, self.sigma, mode, knot_spacing_um, prior, prior_width, solve)
+        return self.cont
+
+    def continuum_solution(self, theta, model=None) -> tuple[np.ndarray, np.ndarray]:
+        """(coefficients, correction on the fitted pixels) of the continuum correction at `theta` (zeros when off)."""
+        if self.cont is None or self.cont.n == 0:
+            return np.zeros(0), np.zeros(len(self.y))
+        m = self.model_flux(theta) if model is None else model
+        _, log_s = self.params_from_theta(theta)
+        beta, _ = self.cont.solve(self.y - m, np.sqrt(self.weights) / self.sigma, 10.0 ** (2.0 * log_s))
+        return beta, self.cont.correction(beta)
 
     # ---- emulator (fit.model_backend: emulator) -----------------------------------------
     def emulator_bounds(self) -> tuple[dict, dict]:
@@ -261,8 +284,12 @@ class FitProblem:
         return self.model.evaluate(P)
 
     def chi2(self, theta, model=None) -> float:
+        """chi^2 of the gas model (with the continuum correction, when on, profiled at `theta`)."""
         m = self.model_flux(theta) if model is None else model
-        return float(np.sum(self.weights * ((self.y - m) / self.sigma) ** 2))
+        y = self.y
+        if self.cont is not None and self.cont.n:
+            y = y - self.continuum_solution(theta, m)[1]
+        return float(np.sum(self.weights * ((y - m) / self.sigma) ** 2))
 
     def log_like(self, theta) -> float:
         P, log_s = self.params_from_theta(theta)
@@ -270,7 +297,10 @@ class FitProblem:
         s2 = (10.0 ** log_s) ** 2
         r2 = ((self.y - m) ** 2) / (self.sigma**2 * s2)
         self.ncall += 1
-        return float(-0.5 * np.sum(self.weights * (r2 + np.log(2 * np.pi * self.sigma**2 * s2))))
+        ll = float(-0.5 * np.sum(self.weights * (r2 + np.log(2 * np.pi * self.sigma**2 * s2))))
+        if self.cont is not None and self.cont.n:          # 0.22: continuum coefficients profiled / marginalised
+            ll += self.cont.solve(self.y - m, np.sqrt(self.weights) / self.sigma, s2)[1]
+        return ll
 
     def log_prob(self, theta) -> float:
         lp = self.log_prior(theta)
@@ -313,6 +343,10 @@ class FitProblem:
         s2 = 10.0 ** (2.0 * ls)
         r2 = (self.y[None, :] - M) ** 2 / (self.sigma[None, :] ** 2 * s2[:, None])
         ll = -0.5 * np.sum(self.weights[None, :] * (r2 + np.log(2 * np.pi * self.sigma[None, :] ** 2 * s2[:, None])), axis=1)
+        if self.cont is not None and self.cont.n:          # 0.22: small per-walker solves
+            sw = np.sqrt(self.weights) / self.sigma
+            for j in range(len(ok)):
+                ll[j] += self.cont.solve(self.y - M[j], sw, s2[j])[1]
         self.ncall += len(ok)
         out[ok] = np.where(np.isfinite(ll), lp[ok] + ll, -np.inf)
         return out
@@ -357,8 +391,21 @@ class FitProblem:
                 units.setdefault(key, c.name)
         return units
 
-    def solve_areas(self, P: dict, fixed_units: set[str] | None = None) -> tuple[dict, float]:
-        logR, chi2 = self.model.solve_areas(self.y, self.sigma / np.sqrt(self.weights), P, fixed=fixed_units)
+    def solve_areas(self, P: dict, fixed_units: set[str] | None = None, y=None) -> tuple[dict, float]:
+        """NNLS areas at fixed (N, T).  0.22: with a continuum correction attached, the areas and the correction
+        are solved alternately (areas on y, correction on the residual, areas again on y - correction)."""
+        yy = self.y if y is None else y
+        logR, chi2 = self.model.solve_areas(yy, self.sigma / np.sqrt(self.weights), P, fixed=fixed_units)
+        if y is None and self.cont is not None and self.cont.n:
+            P1 = self._areas_into(P, logR)
+            m = self.model.evaluate(P1)
+            beta, _ = self.cont.solve(self.y - m, np.sqrt(self.weights) / self.sigma, 1.0)
+            c = self.cont.correction(beta)
+            logR, chi2 = self.model.solve_areas(self.y - c, self.sigma / np.sqrt(self.weights), P, fixed=fixed_units)
+            chi2 += float(np.sum(beta ** 2 / self.cont.tau ** 2))          # the prior penalty (profile objective)
+        return self._areas_into(P, logR), chi2
+
+    def _areas_into(self, P: dict, logR: dict) -> dict:
         for key, lead in self.area_units().items():
             if key in logR:
                 P[lead]["logR"] = logR[key]
@@ -369,7 +416,7 @@ class FitProblem:
         for c in self.components:
             if c.group and au.get(c.group) and c.name != au[c.group]:
                 P[c.name]["logR"] = P[au[c.group]]["logR"]
-        return P, chi2
+        return P
 
     def area_free_mask(self) -> np.ndarray:
         """Free parameters that are emitting areas of slab units (profiled by NNLS in the grid and the
@@ -645,7 +692,7 @@ class FitProblem:
              ball: float = 1e-2, progress=None, checkpoint: str | None = None, stop_event=None,
              thin_by: int = 1, chunk: int = 50, moves: str = "stretch", init: str = "ball",
              blocks: str = "joint", de_gamma: float = 1.0, linear: str = "sample", linear_prior: str = "log",
-             linear_prior_scale: float | None = None, vectorize: bool = False) -> "MCMCResult":
+             linear_prior_scale: float | None = None, vectorize: bool = False, resume: bool = False) -> "MCMCResult":
         """emcee run around theta0.
 
         moves  : "stretch" (emcee default, Goodman & Weare), "de" (80 % DEMove + 20 % DESnookerMove,
@@ -663,6 +710,9 @@ class FitProblem:
                  ln L) or "marginalise" (analytic Gaussian marginal over the areas); see `jalebi.linear`.
                  The returned chain always has the full parameter vector (areas filled in per sample).
         vectorize : one ln P call evaluates every walker (`log_prob_many`; emcee vectorize=True, no pool).
+        resume : 0.22: when `checkpoint` already holds this group's chain with the same walkers and
+                 dimension, continue it from its last stored step (and random state) until `nsteps` stored
+                 steps exist instead of starting over; a complete chain is read back without sampling.
         `processes` > 1 uses a process pool with the problem sent once to every worker.
         `progress(fraction, sampler)` is called every `chunk` steps; `stop_event.is_set()` stops early."""
         import emcee
@@ -673,7 +723,7 @@ class FitProblem:
                                        nwalkers=nwalkers, nsteps=nsteps, processes=processes, seed=seed, ball=ball,
                                        progress=progress, checkpoint=checkpoint, stop_event=stop_event,
                                        thin_by=thin_by, chunk=chunk, moves=moves, init=init, blocks=blocks,
-                                       de_gamma=de_gamma, vectorize=vectorize)
+                                       de_gamma=de_gamma, vectorize=vectorize, resume=resume)
         rng = np.random.default_rng(seed)
         theta0 = np.asarray(theta0, float)
         groups = self.independent_blocks(theta0) if blocks == "auto" else [list(range(self.ndim))]
@@ -684,6 +734,7 @@ class FitProblem:
         results = []
         total_steps = nsteps * len(groups)
         done_all = 0
+        resumed_steps = []
         for gi, idx in enumerate(groups):
             idx = np.asarray(idx)
             nd = len(idx)
@@ -691,9 +742,13 @@ class FitProblem:
             p0_full, _ = self.initial_walkers(theta0, nw, rng, init=init, ball=ball, widths=widths)
             p0 = p0_full[:, idx]
             backend = None
+            resumed = 0
             if checkpoint:
                 backend = emcee.backends.HDFBackend(checkpoint, name="mcmc" if len(groups) == 1 else f"mcmc_block{gi}")
-                backend.reset(nw, nd)
+                if resume and backend_steps(backend, nw, nd) > 0:
+                    resumed = backend_steps(backend, nw, nd)
+                else:
+                    backend.reset(nw, nd)
             mv = make_moves(moves, nd, de_gamma)
             pool = None
             try:
@@ -710,8 +765,14 @@ class FitProblem:
                     ctx = mp.get_context("fork") if hasattr(os, "fork") else mp.get_context("spawn")
                     pool = ctx.Pool(processes, initializer=init_args[0], initargs=init_args[1])
                 sampler = emcee.EnsembleSampler(nw, nd, fn, pool=pool, backend=backend, moves=mv, vectorize=vectorize)
-                state = p0
-                done = 0
+                if resumed == 0:
+                    # 0.22: emcee seeds its own RandomState from numpy's global state (process entropy), which made
+                    # chains irreproducible across processes; seed it from `seed` (per block) so that a run can be
+                    # repeated, and a resumed or continued chain equals the uninterrupted one bit for bit
+                    sampler.random_state = np.random.RandomState(int(seed) + 7919 * gi).get_state()
+                state = p0 if resumed == 0 else backend.get_last_sample()      # last position + random state
+                done = min(resumed, nsteps)
+                resumed_steps.append(int(resumed))
                 while done < nsteps:
                     n = min(chunk, nsteps - done)
                     state = sampler.run_mcmc(state, n, progress=False, thin_by=thin_by, skip_initial_state_check=True)
@@ -752,8 +813,21 @@ class FitProblem:
         res = MCMCResult(self, chain, lnp, acc, time.time() - t_start)
         res.blobs = blobs
         res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "vectorize": bool(vectorize), "blocks": [[self.free[j].key for j in g] for g in groups],
-                    "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results]}
+                    "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results],
+                    "resumed_steps": resumed_steps}
         return res
+
+
+def backend_steps(backend, nwalkers: int, ndim: int) -> int:
+    """Stored iterations of an emcee HDF backend group when it exists with this shape, else 0."""
+    try:
+        if not backend.initialized:
+            return 0
+        if tuple(backend.shape) != (int(nwalkers), int(ndim)):
+            return 0
+        return int(backend.iteration)
+    except Exception:
+        return 0
 
 
 def _target(problem):

@@ -26,8 +26,10 @@ pixel flux of unit u for R = 1 au (`SlabModel.unit_fluxes`).  So, per unit:
                                       transmissions and is bounded to [0, 1]             -> nonlinear (sampled)
   * an area that is `fixed`, or has a Gaussian prior from `priors`                       -> left as it is (sampled /
                                                                                             fixed)
-  * per-sub-band continuum offsets    there are none in the likelihood: the continuum is estimated and
-                                      subtracted before the fit (`pipeline.prepare`); nothing to remove.
+  * per-sub-band continuum offsets /  0.22, fit.continuum_fit: offset | spline -- extra linear columns with a
+    B-spline corrections                zero-mean Gaussian prior (jalebi.continuum_fit), marginalised or
+                                        profiled together with the areas; off by default (the continuum is
+                                        estimated and subtracted before the fit, `pipeline.prepare`).
 The noise scale s multiplies every sigma: the NNLS solution does not depend on it, the marginal does (below).
 
 Parameterisation
@@ -159,6 +161,10 @@ class LinearProblem(FitProblem):
         for j, i in enumerate(lin_idx):
             hi_area.append(10.0 ** (2.0 * base.hi[i]) if self.lin_kind[j] == "logR" else 10.0 ** (2.0 * rmax))
         self.prior_scale = np.full(self.k, float(prior_scale)) if prior_scale else np.array(hi_area, float)
+        # 0.22: the continuum-correction coefficients (jalebi.continuum_fit) are extra linear columns with their
+        # own Gaussian prior (zero mean, width tau), no positivity and no log-prior Jacobian
+        self.cont = getattr(base, "cont", None)
+        self.kc = int(self.cont.n) if self.cont is not None else 0
         self._sw = np.sqrt(self.weights) / self.sigma                        # whitening: w / sigma^2
         self._lnorm_w = np.sum(self.weights * np.log(2 * np.pi * self.sigma ** 2))
         self._wsum = float(np.sum(self.weights))
@@ -216,7 +222,10 @@ class LinearProblem(FitProblem):
         for key, f in uf.items():
             if key not in lin:
                 y -= f * 10.0 ** (2.0 * lR[key])
-        M = np.column_stack([uf[u] for u in self.lin_units]) if self.k else np.zeros((len(y), 0))
+        cols = [uf[u] for u in self.lin_units]
+        if self.kc:
+            cols.append(self.cont.B)
+        M = np.column_stack(cols) if cols else np.zeros((len(y), 0))
         return y, M, log_s
 
     def solve(self, theta, draw_rng=None) -> dict:
@@ -232,10 +241,21 @@ class LinearProblem(FitProblem):
         Mw = M * sw[:, None]
         norm = -0.5 * (self._lnorm_w + self._wsum * np.log(s2))
         self.ncall += 1
-        if self.k == 0:
+        k, kc = self.k, self.kc
+        if k + kc == 0:
             return {"lnL": -0.5 * float(yw @ yw) / s2 + norm, "a": np.zeros(0), "draw": np.zeros(0), "neg": np.zeros(0, bool)}
+        tau = self.cont.tau if kc else np.zeros(0)
         if self.mode == "profile":
             lo, hi = self.area_bounds(theta)
+            if kc:                                   # penalised least squares: ridge rows s / tau for the coefficients
+                lo = np.concatenate([lo, np.full(kc, -np.inf)]); hi = np.concatenate([hi, np.full(kc, np.inf)])
+                ridge = np.zeros((kc, k + kc)); ridge[:, k:] = np.diag(np.sqrt(s2) / tau)
+                Ma = np.vstack([Mw, ridge]); ya = np.concatenate([yw, np.zeros(kc)])
+                x = lsq_linear(Ma, ya, bounds=(lo, hi), method="bvls").x
+                r = yw - Mw @ x
+                chi2 = float(r @ r)
+                pen = float(np.sum((x[k:] / tau) ** 2))
+                return {"lnL": -0.5 * chi2 / s2 - 0.5 * pen + norm, "a": x[:k], "draw": x[:k], "neg": np.zeros(k, bool), "beta": x[k:]}
             a, rnorm = nnls(Mw, yw)
             if np.any(a < lo) or np.any(a > hi):
                 a = lsq_linear(Mw, yw, bounds=(lo, hi), method="bvls").x
@@ -243,39 +263,42 @@ class LinearProblem(FitProblem):
                 chi2 = float(r @ r)
             else:
                 chi2 = rnorm ** 2
-            return {"lnL": -0.5 * chi2 / s2 + norm, "a": a, "draw": a, "neg": np.zeros(self.k, bool)}
+            return {"lnL": -0.5 * chi2 / s2 + norm, "a": a, "draw": a, "neg": np.zeros(k, bool)}
         # marginalise
-        lam2 = self.prior_scale ** 2
+        lam2 = np.concatenate([self.prior_scale ** 2, tau ** 2]) if kc else self.prior_scale ** 2
         G = (Mw.T @ Mw) / s2 + np.diag(1.0 / lam2)
         b = (Mw.T @ yw) / s2
         try:
             L = np.linalg.cholesky(G)
         except np.linalg.LinAlgError:
-            return {"lnL": -np.inf, "a": np.full(self.k, np.nan), "draw": np.full(self.k, np.nan), "neg": np.ones(self.k, bool)}
-        a = np.linalg.solve(L.T, np.linalg.solve(L, b))
-        r = yw - Mw @ a
-        Q = float(r @ r) / s2 + float(np.sum(a ** 2 / lam2))
+            return {"lnL": -np.inf, "a": np.full(k, np.nan), "draw": np.full(k, np.nan), "neg": np.ones(k, bool)}
+        x = np.linalg.solve(L.T, np.linalg.solve(L, b))
+        r = yw - Mw @ x
+        Q = float(r @ r) / s2 + float(np.sum(x ** 2 / lam2))
         lnL = -0.5 * Q - float(np.sum(np.log(np.diag(L)))) - 0.5 * float(np.sum(np.log(lam2))) + norm
+        a = x[:k]
         neg = a <= 0
-        if self.prior == "log":
+        if self.prior == "log" and k:
             lo, _ = self.area_bounds(theta)
             lnL -= float(np.sum(np.log(np.maximum(a, lo))))
         draw = a
         if draw_rng is not None:
-            draw = self._draw(a, L, draw_rng)
-        return {"lnL": lnL, "a": a, "draw": draw, "neg": neg, "chol": L}
+            draw = self._draw(x, L, draw_rng, k)[:k]
+        return {"lnL": lnL, "a": a, "draw": draw, "neg": neg, "chol": L, "beta": x[k:]}
 
     @staticmethod
-    def _draw(mean, chol, rng, tries: int = 50):
-        """One draw from N(mean, G^-1) truncated to a > 0 (rejection; after `tries` failures the
-        non-positive entries are set to a tiny positive value)."""
-        k = len(mean)
+    def _draw(mean, chol, rng, tries: int = 50, k: int | None = None):
+        """One draw from N(mean, G^-1) truncated to a > 0 on the first `k` entries (the areas; rejection; after
+        `tries` failures the non-positive entries are set to a tiny positive value)."""
+        n = len(mean)
+        k = n if k is None else k
         for _ in range(tries):
-            z = rng.standard_normal(k)
+            z = rng.standard_normal(n)
             a = mean + np.linalg.solve(chol.T, z)          # cov = (L L^T)^-1 = L^-T L^-1
-            if np.all(a > 0):
+            if np.all(a[:k] > 0):
                 return a
-        return np.where(a > 0, a, 1e-12)
+        a[:k] = np.where(a[:k] > 0, a[:k], 1e-12)
+        return a
 
     # ---- probability -------------------------------------------------------------------------------------
     def log_like(self, theta) -> float:
@@ -324,7 +347,8 @@ class LinearProblem(FitProblem):
                 Y -= f * (10.0 ** (2.0 * lR[key]))[:, None]
         for j, i in enumerate(ok):
             th = thetas[i]
-            M = np.column_stack([F[u][j] for u in self.lin_units]) if self.k else np.zeros((len(self.y), 0))
+            cols = [F[u][j] for u in self.lin_units] + ([self.cont.B] if self.kc else [])
+            M = np.column_stack(cols) if cols else np.zeros((len(self.y), 0))
             rng = np.random.default_rng(np.frombuffer(np.ascontiguousarray(th).tobytes(), np.uint32)) \
                 if self.mode == "marginalise" else None
             sres = self._solve_design(th, Y[j], M, ls[j], rng)
@@ -361,7 +385,8 @@ def run_linear_mcmc(problem: FitProblem, theta0, mode: str, prior: str = "log", 
         nw = kw.get("nwalkers") or 32
         rng = np.random.default_rng(kw.get("seed", 0))
         s = lp.solve(th_red)
-        draws = np.array([[lp._draw(s["a"], s["chol"], rng) if "chol" in s else s["a"] for _ in range(nw)]
+        mean_full = np.concatenate([s["a"], s.get("beta", np.zeros(0))])
+        draws = np.array([[lp._draw(mean_full, s["chol"], rng, k=lp.k)[:lp.k] if "chol" in s else s["a"] for _ in range(nw)]
                           for _ in range(nsteps)])
         chain_red = np.zeros((nsteps, nw, 0))
         lnp = np.full((nsteps, nw), lp.log_prior(th_red) + s["lnL"])

@@ -88,6 +88,11 @@ def build_problem(cfg: ProjectConfig, spec: Spectrum, backend: str | None = None
                       releases=cfg.linedata.releases, use_pipeline_err=cfg.fit.use_pipeline_err,
                       tvib_below_trot=cfg.fit.tvib_below_trot,
                       model_kwargs={"R_model": cfg.R_model, "R_scale": cfg.R_scale, "R_constant": cfg.R_constant})
+    cf = getattr(cfg.fit, "continuum_fit", "none") or "none"
+    if cf != "none":                                   # 0.22: joint continuum correction (docs/CONTINUUM.md)
+        cc = cfg.fit.continuum_correction
+        cont = prob.set_continuum_fit(cf, knot_spacing_um=cc.knot_spacing_um, prior=cc.prior, prior_width=cc.prior_width, solve=cc.mode)
+        (say or (lambda m: act.info("fit", "%s", m)))(f"continuum correction (fit.continuum_fit): {cont.describe()}")
     backend = backend or cfg.fit.model_backend
     if backend == "emulator":
         say = say or (lambda m: act.info("fit", "%s", m))
@@ -116,6 +121,8 @@ class RunResult:
     laplace: object = None              # LaplaceResult (fit.laplace / jalebi fit --laplace / the app's Quick errors)
     evidence: object = None             # DataFrame of Delta ln Z per removed component (fit.dynesty.evidence_without)
     outdir: str | None = None           # folder the results were written to (output with {target} filled in)
+    checkpoint: object = None           # 0.22: jalebi.resume.Checkpoint of this run (stage files, key)
+    corner: dict | None = None          # 0.22: jalebi.corner.corner_check of the final parameters
 
     def say(self, msg):
         self.log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -187,11 +194,52 @@ def run_grid_stage(run: RunResult, progress=None):
     return run
 
 
+def seed_point_theta(problem, theta, seed_points: dict) -> np.ndarray:
+    """`theta` with the parameters listed in fit.optimise.seed_points replaced (clipped to the bounds)."""
+    P, log_s = problem.params_from_theta(np.asarray(theta, float))
+    for cname, vals in (seed_points or {}).items():
+        if cname not in P:
+            continue
+        for k, v in vals.items():
+            P[cname][k] = float(v)
+        if "logNA" in P[cname] and ("logN" in vals or "logR" in vals) and "logNA" not in vals:
+            from .fit import logNA_from
+            P[cname]["logNA"] = logNA_from(P[cname]["logN"], P[cname]["logR"])
+    th = problem.theta_from_params(P, log_s)
+    return np.clip(th, problem.lo + 1e-6 * (problem.hi - problem.lo), problem.hi - 1e-6 * (problem.hi - problem.lo))
+
+
+def multimodal_flags(problem, starts: list[dict], best: int, dchi2: float, dT: float, dlogN: float) -> list[dict]:
+    """Starts whose -2 ln P is within `dchi2` of the best but whose T or log N differ by more than `dT` / `dlogN`."""
+    out = []
+    tb = np.asarray(starts[best]["theta"], float)
+    for st in starts:
+        if st["start"] == best or not np.isfinite(st["energy"]):
+            continue
+        if st["energy"] - starts[best]["energy"] > dchi2:
+            continue
+        th = np.asarray(st["theta"], float)
+        far = []
+        for j, p in enumerate(problem.free):
+            if p.name == "T" and abs(th[j] - tb[j]) > dT:
+                far.append(f"{p.key}: {th[j]:.0f} vs {tb[j]:.0f} K")
+            elif p.name in ("logN", "logNA") and abs(th[j] - tb[j]) > dlogN:
+                far.append(f"{p.key}: {th[j]:.2f} vs {tb[j]:.2f}")
+        if far:
+            out.append({"start": st["start"], "delta_energy": float(st["energy"] - starts[best]["energy"]), "params": far})
+    return out
+
+
 def run_optimise_stage(run: RunResult, callback=None, progress=None):
+    """Global optimiser.  0.22: fit.optimise.n_starts DE runs (seeds seed, seed+1, ...; the second from
+    fit.optimise.seed_points when given); the lowest -2 ln P (chi2 when there is no noise scale and no Gaussian
+    prior) is kept and every start is recorded on run.opt.starts (-> diagnostics.json "optimise")."""
     o = run.cfg.fit.optimise
     nfree = int((~run.problem.area_free_mask()).sum())
+    n_starts = max(int(getattr(o, "n_starts", 1) or 1), 1)
     run.say(f"optimise: {o.method}, maxiter={o.maxiter} generations x popsize={o.popsize} x {nfree} params "
-            f"= up to {o.maxiter * o.popsize * nfree} model evaluations, workers={o.workers}")
+            f"= up to {o.maxiter * o.popsize * nfree} model evaluations, workers={o.workers}"
+            + (f", {n_starts} starts" if n_starts > 1 else ""))
 
     def prog(g, n, best, dt):
         if g == 1 or g % 5 == 0 or g == n:
@@ -199,8 +247,36 @@ def run_optimise_stage(run: RunResult, callback=None, progress=None):
             run.say(f"  generation {g}/{n}: best -2lnP = {best:.1f}  ({dt:.0f}s elapsed, ~{per * (n - g):.0f}s left)")
         if progress:
             progress(g / n)
-    opt = run.problem.optimise(run.theta, method=o.method, maxiter=o.maxiter, popsize=o.popsize, seed=o.seed,
-                               polish=o.polish, workers=o.workers, callback=callback, progress=prog)
+    theta0 = run.theta if run.theta is not None else run.problem.theta0()
+    starts, opts = [], []
+    for k in range(n_starts):
+        if k == 0:
+            th, origin = theta0, "config"
+        elif k == 1 and o.seed_points:
+            th, origin = seed_point_theta(run.problem, theta0, o.seed_points), "seed_points"
+        else:
+            th, origin = theta0, "random"
+        if n_starts > 1:
+            run.say(f"  start {k + 1}/{n_starts} (seed {o.seed + k}, {origin})")
+        opt = run.problem.optimise(th, method=o.method, maxiter=o.maxiter, popsize=o.popsize, seed=o.seed + k,
+                                   polish=o.polish, workers=o.workers, callback=callback, progress=prog)
+        energy = float(-2.0 * opt.log_prob) if np.isfinite(opt.log_prob) else float("inf")
+        starts.append({"start": k, "seed": o.seed + k, "from": origin, "chi2": float(opt.chi2), "log_prob": float(opt.log_prob),
+                       "energy": energy, "chi2_red": float(opt.chi2_red), "runtime_s": float(opt.runtime_s),
+                       "theta": np.asarray(opt.theta, float).tolist()})
+        opts.append(opt)
+        if n_starts > 1:
+            run.say(f"    chi2_red={opt.chi2_red:.3f} -2lnP={energy:.1f} in {opt.runtime_s:.0f}s")
+    best = int(np.argmin([st["energy"] for st in starts]))
+    opt = opts[best]
+    opt.starts = starts
+    opt.best_start = best
+    opt.multimodal = multimodal_flags(run.problem, starts, best, o.multimodal_dchi2, o.multimodal_dT, o.multimodal_dlogN) if n_starts > 1 else []
+    if n_starts > 1:
+        run.say(f"  best start: {best + 1} ({starts[best]['from']}); -2lnP of the starts: " + ", ".join(f"{st['energy']:.1f}" for st in starts))
+    for f in opt.multimodal:
+        run.say(f"  warning: possible multimodality -- start {f['start'] + 1} is within {f['delta_energy']:.1f} of the best but differs in "
+                + "; ".join(f["params"]))
     run.say("  polishing (Nelder-Mead) ...") if o.polish else None
     run.opt = opt
     run.theta = opt.theta
@@ -243,7 +319,7 @@ def save_laplace(run: RunResult, outdir: str):
     fig.savefig(os.path.join(outdir, "laplace_correlation.png"), dpi=90); plt.close(fig)
 
 
-def run_nested_stage(run: RunResult, outdir: str | None = None):
+def run_nested_stage(run: RunResult, outdir: str | None = None, resume: bool = False):
     """Dynamic nested sampling with dynesty (fit.sampler: dynesty, jalebi.nested) in place of emcee: the same
     likelihood (fit.mcmc.linear profile or sample, any model backend), equal-weight posterior samples in the
     chain layout, ln Z +- error in diagnostics.json; optionally Delta ln Z of removing components."""
@@ -255,9 +331,11 @@ def run_nested_stage(run: RunResult, outdir: str | None = None):
     kw = dict(nlive=d.nlive, sample=d.sample, bound=d.bound, dlogz_init=d.dlogz_init, n_effective=d.n_effective,
               maxcall=d.maxcall, processes=d.processes, seed=d.seed, pfrac=d.pfrac, slices=d.slices, walks=d.walks,
               dynamic=d.dynamic)
+    ck = os.path.join(outdir, "dynesty.save") if (outdir and getattr(d, "checkpoint", False)) else None
     run.say(f"dynesty: {'dynamic' if d.dynamic else 'static'} nested sampling, nlive={d.nlive}, sample={d.sample}, "
-            f"bound={d.bound}, {lin} areas, processes={d.processes}")
-    res = run_dynesty(run.problem, theta0=theta, linear=lin, progress=run.say, **kw)
+            f"bound={d.bound}, {lin} areas, processes={d.processes}" + (f", checkpoint {ck}" if ck else ""))
+    res = run_dynesty(run.problem, theta0=theta, linear=lin, progress=run.say, checkpoint=ck, resume=resume,
+                      checkpoint_every=getattr(d, "checkpoint_every", 60.0), **kw)
     run.mcmc = res
     run.theta = res.median_theta()
     run.say(f"  done: ln Z = {res.logz:.2f} +- {res.logzerr:.2f}" + (" (profile likelihood: no area prior volume)" if lin == "profile" else "")
@@ -284,12 +362,13 @@ def run_nested_stage(run: RunResult, outdir: str | None = None):
     return run
 
 
-def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str | None = None, verbose: bool = True):
+def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str | None = None, verbose: bool = True,
+                   resume: bool = False):
     """emcee stage with a progress bar (tqdm, terminal) and a log line every 10 % giving acceptance,
     mean ln-probability, the current autocorrelation-time estimate and the time left.  With fit.sampler: dynesty
-    the nested sampler runs instead (run_nested_stage)."""
+    the nested sampler runs instead (run_nested_stage).  `resume` (0.22): continue chain.h5 / dynesty.save."""
     if run.cfg.fit.sampler == "dynesty":
-        return run_nested_stage(run, outdir=outdir)
+        return run_nested_stage(run, outdir=outdir, resume=resume)
     if run.cfg.fit.sampler != "emcee":
         raise ValueError(f"unknown fit.sampler {run.cfg.fit.sampler!r}: emcee | dynesty")
     m = run.cfg.fit.mcmc
@@ -367,7 +446,7 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
                                ball=m.ball, progress=prog, checkpoint=ckpt, stop_event=stop_event, thin_by=m.thin_by,
                                moves=m.moves, init=m.init, blocks=m.blocks, de_gamma=m.de_gamma,
                                linear=linear, linear_prior=m.linear_prior, linear_prior_scale=m.linear_prior_scale,
-                               vectorize=m.vectorize)
+                               vectorize=m.vectorize, resume=resume)
     finally:
         if bar is not None:
             bar.close()
@@ -376,6 +455,9 @@ def run_mcmc_stage(run: RunResult, progress=None, stop_event=None, outdir: str |
     run.mcmc = res
     run.theta = res.median_theta()
     d = res.diagnostics()
+    rs = [n for n in getattr(res, "meta", {}).get("resumed_steps", []) if n]
+    if rs:
+        run.say(f"[stage] mcmc resumed from checkpoint ({', '.join(str(n) for n in rs)} stored steps, target {m.nsteps})")
     if linear != "sample":
         if m.blocks == "auto" and len(d.get("blocks", [])) > 1:
             run.say("  independent parameter groups (sampled one after the other): " + " | ".join(", ".join(g) for g in d["blocks"]))
@@ -404,22 +486,49 @@ def detect_and_apply(cfg: ProjectConfig, spec: Spectrum):
 def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[str] | None = None,
                  progress=None, stop_event=None, save: bool = True) -> RunResult:
     """Run the configured stages.  Continuum refinement (model-aware) re-runs prep with the
-    optimiser's gas model subtracted and refits."""
+    optimiser's gas model subtracted and refits.
+
+    0.22: every stage writes a checkpoint into the disk folder (jalebi.resume) and, with fit.resume: auto, a
+    run continues from the last valid one: detection.json -> grid.json -> de_pass1.json -> continuum_refined.npz
+    -> de_pass2.json -> chain.h5 / dynesty.save.  Log lines starting with "[stage]" say what was resumed."""
+    from . import resume as rs
     stages = stages or cfg.fit.stages
     spec = prepare(cfg, spec)
     outdir = cfg.output_dir(spec.name)             # e.g. results/FZ_Tau: one folder per source
     if save:
         os.makedirs(outdir, exist_ok=True)
+    cfg0 = cfg                                       # the config as given (the key is taken before auto-detect)
+    resume_mode = (getattr(cfg.fit, "resume", "auto") or "auto").lower()
+    if resume_mode not in ("auto", "off"):
+        raise ValueError(f"unknown fit.resume {resume_mode!r}: auto | off")
+    key = rs.stage_key(cfg0) if save else ""
+    log0: list[str] = []
+    ck = rs.Checkpoint(outdir if save else None, key, enabled=save, say=log0.append)
+    reading = resume_mode == "auto"
     detection = None
     if cfg.fit.auto_detect:
-        cfg, detection = detect_and_apply(cfg, spec)
+        d = ck.load("detection.json") if reading else None
+        if d is not None:
+            detection = rs.detection_from_payload(d)
+            from .detect import apply_detection
+            cfg = apply_detection(cfg, detection, replace_windows=cfg.fit.detect.replace_windows,
+                                  keep_undetected=cfg.fit.detect.keep_undetected)
+            log0.append("[stage] detection resumed from checkpoint")
+        else:
+            cfg, detection = detect_and_apply(cfg, spec)
+            ck.save("detection.json", rs.detection_payload(detection))
+            log0.append("[stage] detection done, checkpoint written")
     run = RunResult(cfg, spec, None)
+    for line in log0:
+        run.say(line)
+    ck.say = run.say
     prob = build_problem(cfg, spec, say=run.say)
     run.problem = prob
     run.detection = detection
     run.outdir = outdir if save else None
+    run.checkpoint = ck
     if save:
-        run.say(f"results -> {outdir}")
+        run.say(f"results -> {outdir}" + (f" (fit.resume {resume_mode}, key {key})" if ck.enabled else ""))
     if detection is not None:
         run.say("auto-detect: " + ", ".join(f"{r.candidate}{'✓' if r.detected else '✗'}(ΔBIC {r.delta_BIC:+.0f})"
                                              for r in detection.table.itertuples()))
@@ -435,16 +544,49 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
                 and not any(c.molecule == "H2O" and c.Tvib is not None for c in prob.components):
             run.say(f"  note: the fit reaches below {split} um but no water component emits there -- add an H2O_rovib "
                     f"component (or Tvib) if the nu2 band should be fitted")
+    free_keys = [p.key for p in prob.free]
     for it in range(cfg.continuum.refine_iterations + 1):
         if "grid" in stages and it == 0:
-            run_grid_stage(run, progress=(lambda n, f: progress("grid", f, n)) if progress else None)
+            g = ck.load("grid.json") if reading else None
+            if g is not None and g.get("free") == free_keys and len(g.get("theta", [])) == prob.ndim:
+                run.theta = np.asarray(g["theta"], float)
+                run.say("[stage] grid resumed from checkpoint (grid maps are not re-drawn)")
+            else:
+                run_grid_stage(run, progress=(lambda n, f: progress("grid", f, n)) if progress else None)
+                ck.save("grid.json", {"theta": run.theta, "free": free_keys,
+                                      "best": {n: gr.best for n, gr in run.grids.items()}})
+                run.say("[stage] grid done, checkpoint written")
         if "optimise" in stages:
-            run_optimise_stage(run)
+            name = f"de_pass{it + 1}.json"
+            d = ck.load(name) if reading else None
+            opt = rs.opt_from_payload(d, prob) if d is not None else None
+            if opt is not None:
+                run.opt = opt
+                run.theta = opt.theta
+                run.say(f"[stage] de_pass{it + 1} resumed from checkpoint (chi2_red={opt.chi2_red:.3f})")
+            else:
+                run_optimise_stage(run)
+                ck.save(name, rs.opt_payload(run.opt, prob, getattr(run.opt, "starts", None)))
+                run.say(f"[stage] de_pass{it + 1} done, checkpoint written")
         if it < cfg.continuum.refine_iterations:
             # model-aware continuum refinement: subtract the gas model over the fit windows, re-estimate
             # the continuum with a central estimator, refit; keep it only if chi2 improves
             if run.theta is None:
                 run.theta = prob.theta0()
+            cname = "continuum_refined.npz" if it == 0 else f"continuum_refined{it + 1}.npz"
+            c = ck.load_arrays(cname) if reading else None
+            if c is not None and len(c.get("continuum", [])) == len(spec.wave):
+                accepted = bool(c["accepted"])
+                run.say(f"[stage] continuum refinement pass {it + 1} resumed from checkpoint ({'accepted' if accepted else 'rejected'})")
+                if not accepted:
+                    break
+                spec_new = spec.copy()
+                spec_new.continuum = np.asarray(c["continuum"], float)
+                spec_new.mask = np.asarray(c["mask"], bool) if "mask" in c else spec.mask
+                prob_new = build_problem(cfg, spec_new, say=run.say)
+                spec, prob = spec_new, prob_new
+                run.spec, run.problem = spec, prob
+                continue
             gas = np.full(len(spec.wave), np.nan)
             gas[prob.used] = prob.model_flux(run.theta)
             chi2_before = prob.chi2(run.theta)
@@ -453,7 +595,11 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
             prob_new = build_problem(cfg, spec_new, backend="exact")
             chi2_after = prob_new.chi2(run.theta)
             run.say(f"  chi2 with old continuum {chi2_before:.0f} -> with refined continuum {chi2_after:.0f}")
-            if chi2_after < chi2_before:
+            accepted = bool(chi2_after < chi2_before)
+            ck.save_arrays(cname, continuum=np.asarray(spec_new.continuum, float), mask=np.asarray(spec_new.mask, bool),
+                           accepted=np.array(accepted), chi2_before=np.array(chi2_before), chi2_after=np.array(chi2_after))
+            run.say(f"[stage] continuum refinement pass {it + 1} done, checkpoint written")
+            if accepted:
                 if cfg.fit.model_backend != "exact":       # the tables are certified for this spectrum's noise
                     prob_new = build_problem(cfg, spec_new, say=run.say)
                 spec, prob = spec_new, prob_new
@@ -467,8 +613,16 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
         except Exception as e:                      # quick errors must never sink a fit
             run.say(f"  laplace failed: {e}")
     if "mcmc" in stages:
+        fname = "dynesty.save" if cfg.fit.sampler == "dynesty" else "chain.h5"
+        writes = cfg.fit.mcmc.checkpoint if cfg.fit.sampler != "dynesty" else bool(getattr(cfg.fit.dynesty, "checkpoint", False))
+        resume_chain = reading and ck.chain_resumable(fname)
+        if ck.enabled and not resume_chain and os.path.exists(ck.path(fname)):
+            run.say(f"[stage] {fname} belongs to another data/config/model version (or fit.resume off): starting the sampler over")
+            ck.discard_chain(fname)
+        if ck.enabled and writes:
+            ck.mark_chain(fname)
         run_mcmc_stage(run, progress=(lambda f, s: progress("mcmc", f, None)) if progress else None,
-                       stop_event=stop_event, outdir=outdir if save else None)
+                       stop_event=stop_event, outdir=outdir if save else None, resume=resume_chain)
     if save:
         save_results(run, outdir)
         if run.laplace is not None:
@@ -514,22 +668,70 @@ def _save_results(run: RunResult, outdir: str, em=None):
             fig.savefig(os.path.join(outdir, "fit.png"), dpi=110); plt.close(fig)
         except Exception as e:  # pragma: no cover
             run.say(f"  full-spectrum plot failed: {e}")
-        m = prob.model_flux(run.theta)
-        pd.DataFrame({"wave": prob.wave, "data": prob.y, "sigma": prob.sigma, "model": m}).to_csv(os.path.join(outdir, "model.csv"), index=False)
+        m, units, _ = prob.model.evaluate(P, per_unit=True)       # 0.22: one column per component + continuum
+        cols = {"wave": prob.wave, "band": prob.band, "data": prob.y, "sigma": prob.sigma, "model": m}
+        if run.spec.continuum is not None:
+            cols["continuum"] = np.asarray(run.spec.continuum, float)[prob.used]
+        for key, f in units.items():
+            cols[f"model_{key}"] = f
+        if prob.cont is not None and prob.cont.n:          # 0.22: the joint continuum correction at the best fit
+            beta, corr = prob.continuum_solution(run.theta, m)
+            cols["continuum_correction"] = corr
+            pd.DataFrame({"coefficient": prob.cont.labels, "value": beta, "prior_sigma": prob.cont.tau}).to_csv(
+                os.path.join(outdir, "continuum_fit.csv"), index=False)
+        pd.DataFrame(cols).to_csv(os.path.join(outdir, "model.csv"), index=False)
+        try:
+            fig = plots.plot_components(prob, run.theta, title=f"{run.spec.name}: components")
+            fig.savefig(os.path.join(outdir, "fit_components.png"), dpi=100); plt.close(fig)
+        except Exception as e:  # pragma: no cover
+            run.say(f"  component plot failed: {e}")
     for name, g in run.grids.items():
         np.savez(os.path.join(outdir, f"grid_{name}.npz"), logN=g.logN, T=g.T, chi2=g.chi2, logR=g.logR, tau_max=g.tau_max)
         fig = plots.plot_grid(g); fig.savefig(os.path.join(outdir, f"grid_{name}.png"), dpi=110); plt.close(fig)
+    d = {}
     if run.mcmc is not None:
         res = run.mcmc
         res.save(os.path.join(outdir, "chain.npz"))
-        summ = res.summary(); summ.to_csv(os.path.join(outdir, "summary.csv"), index=False)
+        summ = res.summary()
+        summ["reported"] = report_mask(cfg, summ, prob.components)        # 0.22 report.co
+        summ.to_csv(os.path.join(outdir, "summary.csv"), index=False)
         d = res.diagnostics()
         if em is not None:                              # 0.21: which units were emulated, spot checks, fallbacks
             d["emulator"] = {"cache": em.info.get("cache", "per_disk"), "units": sorted(em.tables),
                              "exact_units": dict(em.exact_units), "spot_check": em.info.get("spot_check", {}),
                              "fallback": em.info.get("fallback", {}), "timing": em.info.get("timing", {})}
+    if run.opt is not None and getattr(run.opt, "starts", None):   # 0.22: every DE start, the winner, multimodality
+        d["optimise"] = {"n_starts": len(run.opt.starts), "best_start": int(getattr(run.opt, "best_start", 0)),
+                         "starts": run.opt.starts, "multimodal": getattr(run.opt, "multimodal", [])}
+    cc = getattr(cfg.fit, "corner_check", None)
+    if cc is not None and cc.enabled and run.theta is not None:            # 0.22: corner / pseudo-continuum flags
+        from .corner import corner_check, corner_lines
+        try:
+            chk = corner_check(prob, run.theta, cc.bound_frac, cc.smooth_window_um, cc.smooth_threshold, cc.min_pinned,
+                               smooth_molecules=tuple(getattr(cc, "smooth_molecules", ["H2O"]) or ()))
+            d["corner"] = chk
+            run.corner = chk
+            for line in corner_lines(chk):
+                run.say(line)
+            if not any(v["flags"] for v in chk.values()):
+                run.say("corner check: no component pinned at >= %d bounds, none mostly pseudo-continuum" % cc.min_pinned)
+        except Exception as e:  # pragma: no cover
+            run.say(f"  corner check failed: {e}")
+    if prob.cont is not None and prob.cont.n and run.theta is not None:
+        beta, corr = prob.continuum_solution(run.theta)
+        cont_pix = np.asarray(run.spec.continuum, float)[prob.used] if run.spec.continuum is not None else np.full(len(corr), np.nan)
+        d["continuum_fit"] = {"mode": prob.cont.mode, "n_coefficients": int(prob.cont.n), "solve": prob.cont.solve_mode,
+                              "prior": prob.cont.prior, "prior_width": prob.cont.prior_width,
+                              "coefficients": dict(zip(prob.cont.labels, beta.tolist())),
+                              "max_abs_correction_over_continuum": float(np.nanmax(np.abs(corr) / np.maximum(np.abs(cont_pix), 1e-30))),
+                              "rms_correction_over_noise": float(np.sqrt(np.mean((corr / prob.sigma) ** 2)))}
+    ck = getattr(run, "checkpoint", None)
+    if ck is not None and getattr(ck, "enabled", False):           # 0.22: what was resumed / written
+        d["resume"] = {"key": ck.key, "resumed": list(ck.resumed), "written": list(ck.written)}
+    if d:
         with open(os.path.join(outdir, "diagnostics.json"), "w") as fh:
             json.dump({k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in d.items()}, fh, indent=1, default=float)
+    if run.mcmc is not None:
         with open(os.path.join(outdir, "tau_flags.json"), "w") as fh:
             json.dump(res.tau_flag(), fh, indent=1)
         res.correlation().to_csv(os.path.join(outdir, "correlation.csv"))
@@ -547,6 +749,25 @@ def _save_results(run: RunResult, outdir: str, em=None):
             act.debug("fit", "%s now holds %d files: %s", outdir, len(files), ", ".join(files))
         except OSError:
             pass
+
+
+def report_mask(cfg: ProjectConfig, summary: pd.DataFrame, components) -> np.ndarray:
+    """0.22 report.co: which summary rows are reported.  With report.co: NA_only the CO (and 13CO) rows other
+    than log(N.A) are hidden from the printed table and the population row (they stay in summary.csv with
+    reported = False): when the T prior reaches 3000 K the hot, thin CO solution makes T and N individually
+    meaningless while N.A is measured."""
+    keep = np.ones(len(summary), bool)
+    policy = getattr(getattr(cfg, "report", None), "co", "full")
+    if policy == "full":
+        return keep
+    if policy != "NA_only":
+        raise ValueError(f"unknown report.co {policy!r}: full | NA_only")
+    co = {c.name for c in components if c.molecule in ("CO", "13CO")}
+    for i, name in enumerate(summary.parameter.astype(str)):
+        comp, _, par = name.rpartition(".")
+        if comp in co and par != "logNA":
+            keep[i] = False
+    return keep
 
 
 def target_config(cfg: ProjectConfig, row) -> ProjectConfig:
@@ -573,6 +794,7 @@ def catalogue_row(run: RunResult) -> dict:
         row.update({"chi2_red": run.opt.chi2_red, "bic": run.opt.bic})
     if run.mcmc is not None:
         summ = run.mcmc.summary()
+        summ = summ[report_mask(run.cfg, summ, run.problem.components)]          # 0.22 report.co
         for _, r in summ.iterrows():
             row[f"{r['parameter']}"] = r["median"]; row[f"{r['parameter']}_m"] = r["minus"]; row[f"{r['parameter']}_p"] = r["plus"]
         d = run.mcmc.diagnostics()
@@ -582,4 +804,9 @@ def catalogue_row(run: RunResult) -> dict:
     if run.theta is not None:
         for r in run.problem.component_significance(run.theta).itertuples():
             row[f"{r.component}_dBIC"] = r.delta_BIC
+    for key, d in (getattr(run, "corner", None) or {}).items():       # 0.22
+        row[f"{key}_smooth_frac"] = d["smooth_fraction"]; row[f"{key}_pinned"] = d["n_pinned"]
+        row[f"{key}_corner_flags"] = ",".join(d["flags"])
+    if getattr(run, "opt", None) is not None and getattr(run.opt, "multimodal", None):
+        row["multimodal"] = "; ".join(f"start {f['start'] + 1}: " + ", ".join(f["params"]) for f in run.opt.multimodal)
     return row

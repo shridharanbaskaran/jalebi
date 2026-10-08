@@ -558,8 +558,15 @@ posterior; since 0.17 it can also profile or marginalise them (`fit.mcmc.linear`
 | Stage | What it does | Why |
 | --- | --- | --- |
 | **grid** | χ² over (log N, T) for one component at a time (config order or `grid.order`), with the others held at their current values and the component's area from a 1-D NNLS. Maps show Δχ² contours (2.30, 6.17, 11.8 = 1, 2, 3σ for two parameters), the τ = 1 contour and an edge flag | the familiar MINDS-style view, and a good starting point |
-| **optimise** | `scipy` differential evolution (Storn & Price 1997) over all non-area parameters jointly, areas by NNLS, parallel population evaluation; then a Nelder–Mead polish of the full posterior | finds the global mode when bands overlap and components interact |
+| **optimise** | `scipy` differential evolution (Storn & Price 1997) over all non-area parameters jointly, areas by NNLS, parallel population evaluation; then a Nelder–Mead polish of the full posterior. 0.22: `optimise.n_starts` (default 3) DE runs with different seeds — the first from the config values, the second from `optimise.seed_points` (literature-typical values per component) — the lowest −2 ln P wins, every start is recorded in `diagnostics.json`, and two starts within `multimodal_dchi2` of each other but far apart in T or log N are flagged as possible multimodality | finds the global mode when bands overlap and components interact; several starts guard against the DE missing the better minimum (AS 209, DR Tau in the 0.20 validation) |
 | **mcmc** | `emcee` ensemble sampler (Goodman & Weare 2010; Foreman-Mackey et al. 2013). Walkers (default max(4·ndim, 32)) start in a ball of 1 % of each prior width around the optimum, or at the local posterior widths (`init: scaled`). Moves: emcee's stretch move (default) or differential evolution (`moves: de`, ter Braak & Vrugt 2008), and independent parts of the spectrum can be sampled as separate blocks (`blocks: auto`), see below. The work is spread over a process pool, and chains are checkpointed to HDF5 | posterior uncertainties and degeneracies |
+
+Every stage writes a checkpoint into the disk folder (0.22, `fit.resume: auto`): a killed run continues from the
+last valid one, a longer `nsteps` continues the chain — [`docs/RESUME.md`](docs/RESUME.md).  The continuum can be
+corrected jointly inside the fit (`fit.continuum_fit: offset | spline`, off by default) and every component is
+checked for the hot-water corner and pseudo-continuum after the fit — [`docs/CONTINUUM.md`](docs/CONTINUUM.md).
+Whether a weak molecule's detection survives plausible continuum changes: `jalebi detect-prob` —
+[`docs/DETECTION.md`](docs/DETECTION.md).
 
 ### Convergence diagnostics (reported for every run)
 
@@ -1030,7 +1037,8 @@ fit:
   auto_detect: false
   detect: {threshold: 10, candidates: [], replace_windows: true, keep_undetected: false, oversample: 2}
   grid: {logN: [14, 20, 25], T: [150, 1200, 22], order: [], n_jobs: 1}          # [lo, hi, n]
-  optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0}   # method de | nelder
+  optimise: {method: de, maxiter: 150, popsize: 12, workers: 1, polish: true, seed: 0,   # method de | nelder
+             n_starts: 3, seed_points: {}, multimodal_dchi2: 10, multimodal_dT: 100, multimodal_dlogN: 0.5}   # 0.22 robust start
   mcmc: {nwalkers: null, nsteps: 3000, processes: 1, seed: 0, ball: 0.01, thin_by: 1, checkpoint: true,
          moves: stretch, de_gamma: 1.0, init: ball, blocks: joint,    # moves stretch | de | de+stretch; init ball | scaled; blocks joint | auto
          linear: sample, linear_prior: log, linear_prior_scale: null,   # linear sample | profile | marginalise (docs/LINEAR.md)
@@ -1044,6 +1052,14 @@ fit:
              max_nodes: [257, 257], n_validate: 200, cache_dir: null, rebuild: false,
              ref_snr: 1000, points_per_fwhm: 8, table_oversample: 6, read_only: false, spot_check: 200}   # 0.21 shared tables
   bounds_by_molecule: {}          # e.g. {CO: {T: [100, 3000]}}
+  resume: auto                    # 0.22: auto | off -- stage checkpoints in the disk folder (docs/RESUME.md)
+  continuum_fit: none             # 0.22: none | offset | spline -- joint continuum correction (docs/CONTINUUM.md)
+  continuum_correction: {knot_spacing_um: 1.0, prior: continuum, prior_width: 0.02, mode: marginalise}
+  corner_check: {enabled: true, bound_frac: 0.02, min_pinned: 2, smooth_window_um: 0.3, smooth_threshold: 0.5,
+                 smooth_molecules: [H2O]}   # 0.22 (docs/CONTINUUM.md)
+  detection_prob: {mode: ensemble, n_variants: 30, seed: 0, offset_sigma: 0.01, methods: [], threshold: 10,   # 0.22 (docs/DETECTION.md)
+                   robust_frac: 0.95, absent_frac: 0.05, de_maxiter: 40, de_popsize: 8, mcmc_nsteps: 0, prior_odds: 1.0}
+report: {co: full}              # 0.22: full | NA_only -- report only log(N.A) for CO (T and N degenerate with a 3000 K prior)
 output: results/{target}        # default; {target} = source name -> results/FZ_Tau (a path without {target} is used as written)
 R_model: argyriou2023           # argyriou2023 | jones2023
 R_scale: 1.0
@@ -1063,7 +1079,9 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi init FILE --example fz_tau\|synthetic\|water_hot_cold\|blank` | write a config to start from |
 | `jalebi prep CONFIG [--target PATH] [--name NAME]` | ingest, rest frame, spikes, continuum, masks → `results/<source>/prep.csv`, `prep.png` |
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
-| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--sampler emcee\|dynesty] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/` |
+| `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--sampler emcee\|dynesty] [--resume auto\|off] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/`; 0.22: continues from the folder's stage checkpoints |
+| `jalebi detect-prob CONFIG [--mode ensemble\|bayesian] [--n N] [--mcmc-steps S] [--backend B]` / `jalebi detect-prob --survey ROOT` | 0.22: detection probability of every molecule with the continuum varied → `detection_probability.csv`; merge a survey |
+| `jalebi linelist import --molecule MOL --file FILE [--format auto\|hitran160\|islat\|csv] [--release TAG] [--partition FILE\|levels] [--q296 Q]` | 0.22: a local line list (C6H6, C3H4, …) into the cache with its partition function (docs/LINELISTS.md) |
 | `jalebi emulator build CONFIG [CONFIG ...] [--survey] [-j N] [--cache-dir DIR] [--ref-snr S] [--points-per-fwhm P] [--rebuild] [--per-disk [--auto-detect]]` / `jalebi emulator list [CONFIG]` | build or verify the shared emulator tables of a survey (0.21) or the per-disk tables of one fit; list the cache, and with a config what each component gets |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
@@ -1081,7 +1099,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi rotdiag init FILE --example h2\|h2_fluxes\|co\|oh\|h2o` · `jalebi rotdiag run FILE` · `jalebi rotdiag demo` | rotation-diagram config; run it; the synthetic H₂ demo |
 | `jalebi model --molecule H2O --logN 18 --T 600 --R 0.5 --wmin 13 --wmax 17` | a quick model spectrum to CSV |
 | `jalebi synth OUT.csv [--snr 150] [--bands 3A,3B,3C] [--seed 0]` | a synthetic MRS spectrum with known parameters |
-| `jalebi linedata list` / `fetch MOL… [--release hitran --wmin --wmax --force]` / `import MOL FILE --release TAG` | manage line lists |
+| `jalebi linedata list` / `fetch MOL… [--release hitran --wmin --wmax --force]` / `import MOL FILE --release TAG` | manage line lists (`jalebi linelist import` for molecules without a HITRAN list, 0.22) |
 | `jalebi about` · `jalebi --version` | where things are, how to cite |
 
 `python -m jalebi …` works the same as `jalebi …`. The target table for `batch` needs the columns
@@ -1304,11 +1322,14 @@ sub-folder per target.
 | `config.yaml` | the exact config of the run (re-run it with `jalebi fit`) |
 | `prep.csv` | wave, flux, err, band, continuum, mask |
 | `best_fit.json` | parameters (ties resolved), χ², χ²_red, τ_max per unit |
-| `model.csv` | wave, data, σ, model on the fitted pixels |
+| `model.csv` | wave, band, data, σ, model, continuum and one `model_<component>` column per component on the fitted pixels (0.22); `continuum_correction` with `fit.continuum_fit` |
+| `fit_components.png` | 0.22: one panel per component, the data with the other components subtracted |
+| `detection.json`, `grid.json`, `de_pass1.json`, `de_pass2.json`, `continuum_refined.npz`, `chain.key.json` | 0.22 stage checkpoints (docs/RESUME.md) |
+| `continuum_fit.csv`, `detection_probability.csv`, `detection_prob_variants.json` | 0.22: the joint continuum coefficients; `jalebi detect-prob` results and its cached variants |
 | `fit_windows.png`, `fit.png` | data, components, total and residuals: the fit windows and the full spectrum |
 | `grid_<comp>.npz/.png` | the (log N, T) χ² maps |
-| `summary.csv` | posterior medians, 16/84 %, bounds, `at_edge`, derived quantities |
-| `diagnostics.json` | acceptance, τ, R̂, n_eff, burn-in, runtime |
+| `summary.csv` | posterior medians, 16/84 %, bounds, `at_edge`, derived quantities; 0.22: `reported` (report.co) |
+| `diagnostics.json` | acceptance, τ, R̂, n_eff, burn-in, runtime; 0.22: `optimise` (every DE start, multimodality), `corner` (pinned / pseudo-continuum flags), `continuum_fit`, `resume` |
 | `tau_flags.json` | fraction of posterior samples with τ_max < 1 per unit |
 | `correlation.csv`, `correlation.png`, `corner.png`, `traces.png`, `posterior_predictive.png` | posterior figures |
 | `chain.npz`, `chain.h5` | the full chain (and its checkpoint) |

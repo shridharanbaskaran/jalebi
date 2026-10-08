@@ -120,9 +120,21 @@ class OptimiseConfig(BaseModel):
     method: str = "de"                  # de | nelder
     maxiter: int = 150
     popsize: int = 12
-    workers: int = 1
+    workers: int = 1                    # keep 1: a parallel scipy DE updates its population in a different order
     polish: bool = True
     seed: int = 0
+    # 0.22: robust start.  n_starts DE runs with seeds seed, seed+1, ...; the first starts at the config values
+    # (the 0.21 behaviour), the second at `seed_points` when given, the rest from random populations.  The lowest
+    # -2 ln P wins; every start's chi2 and theta go to diagnostics.json ("optimise").  n_starts: 1 = 0.21 behaviour.
+    n_starts: int = 3
+    # literature-typical starting values per component, e.g. {H2O_hot: {T: 900, logN: 18.5}, H2O_warm: {T: 500,
+    # logN: 18.0}, H2O_cold: {T: 250, logN: 17.8}}; parameters not listed keep the config value
+    seed_points: dict[str, dict[str, float]] = Field(default_factory=dict)
+    # possible multimodality: two starts within `multimodal_dchi2` of the best -2 ln P whose solutions differ by
+    # more than `multimodal_dT` K in a T or `multimodal_dlogN` dex in a log N are flagged (diagnostics.json, log)
+    multimodal_dchi2: float = 10.0
+    multimodal_dT: float = 100.0
+    multimodal_dlogN: float = 0.5
 
 
 class MCMCConfig(BaseModel):
@@ -171,6 +183,8 @@ class DynestyConfig(BaseModel):
     # Delta ln Z of removing each of these components (refit without it; areas always sampled for this, since a
     # profiled area has no prior volume and would bias ln Z): evidence.csv next to detections.csv
     evidence_without: list[str] = Field(default_factory=list)
+    checkpoint: bool = True             # 0.22: write dynesty.save in the disk folder and resume from it (fit.resume)
+    checkpoint_every: float = 60.0      # seconds between saves
 
 
 class EmulatorConfig(BaseModel):
@@ -210,6 +224,60 @@ class EmulatorConfig(BaseModel):
             from .emulator_shared import molecule_boxes
             s.boxes = molecule_boxes(cfg)
         return s
+
+
+class ContinuumFitConfig(BaseModel):
+    """0.22: options of the joint continuum correction (fit.continuum_fit: offset | spline; docs/CONTINUUM.md).
+    The correction c(lambda) is added to the continuum inside the fit: offset = one constant per sub-band,
+    spline = a cubic B-spline per sub-band with knots every `knot_spacing_um`.  Its coefficients are LINEAR
+    parameters handled like the emitting areas (jalebi.linear): marginalised under a Gaussian prior of width
+    `prior_width` (x the median continuum of the sub-band for prior: continuum, x the noise for prior: noise),
+    or profiled (least squares at every likelihood call) with mode: profile.  The optimiser always profiles."""
+    knot_spacing_um: float = 1.0        # spline: knot spacing per sub-band [micron]
+    prior: str = "continuum"            # continuum | noise: what prior_width is relative to
+    prior_width: float = 0.02           # Gaussian prior sigma of each coefficient (2 % of the continuum by default)
+    mode: str = "marginalise"           # marginalise | profile (the MCMC); the optimiser profiles either way
+
+
+class CornerCheckConfig(BaseModel):
+    """0.22: corner / pseudo-continuum diagnostic per component (jalebi.corner), after the fit."""
+    enabled: bool = True
+    bound_frac: float = 0.02            # a parameter within this fraction of its prior range of a bound is "at the bound"
+    min_pinned: int = 2                 # flag "pinned" at this many bounds or more
+    smooth_window_um: float = 0.3       # running-median window of the low-pass filter [micron]
+    smooth_threshold: float = 0.5       # flag "pseudo-continuum" when more than this share of the flux survives
+    # molecules the pseudo-continuum flag applies to (the smooth fraction is reported for all).  Q-branch molecules
+    # (CO2, C2H2, HCN, C4H2, C6H6) legitimately put most of their flux into a 0.05-0.1 um band head that a 0.3 um
+    # running median keeps, so by default only water (where the hot-water corner occurs) is flagged; [] = all
+    smooth_molecules: list[str] = ["H2O"]
+
+
+class DetectionProbConfig(BaseModel):
+    """0.22: detection probability with the continuum varied (jalebi detect-prob, jalebi.detection_prob)."""
+    mode: str = "ensemble"              # ensemble | bayesian
+    n_variants: int = 30                # ensemble: plausible continua (the first is the nominal one)
+    seed: int = 0
+    offset_sigma: float = 0.01          # ensemble: global multiplicative continuum offset ~ N(0, sigma)
+    methods: list[str] = Field(default_factory=list)   # ensemble: extra continuum methods to mix in
+    quantile_range: list[float] = [0.05, 0.2]          # irsqr quantile
+    knot_spacing_range: list[int] = [15, 60]           # irsqr knot spacing [pixels]
+    median_window_range: list[int] = [51, 201]         # median_sg window [pixels]
+    median_percentile_range: list[float] = [10.0, 40.0]
+    lam_range_dex: list[float] = [-1.0, 1.0]           # asls / aspls stiffness x 10^U(range)
+    threshold: float = 10.0             # Delta BIC for "detected"
+    robust_frac: float = 0.95           # class robust at >= this detection fraction (or P(present))
+    absent_frac: float = 0.05           # class "not detected" at <= this (and not detected at the nominal continuum)
+    de_maxiter: int = 40                # ensemble: short DE pass per variant from the best-fit start
+    de_popsize: int = 8
+    mcmc_nsteps: int = 0                # ensemble: short MCMC per variant (0 = optimum only)
+    prior_odds: float = 1.0             # bayesian: prior odds of presence
+    cache_variants: bool = True         # ensemble: detection_prob_variants.json in the disk folder, reused on rerun
+
+
+class ReportConfig(BaseModel):
+    """0.22: what the summary reports (report.*)."""
+    co: str = "full"                    # full | NA_only: for CO report only log(N.A) (T and N are degenerate when
+                                        # the T prior reaches 3000 K: hot, thin solutions); the fit is unchanged
 
 
 class DetectConfig(BaseModel):
@@ -266,6 +334,17 @@ class FitConfig(BaseModel):
     # 0.20: emcee (default; fit.mcmc) | dynesty (dynamic nested sampling, fit.dynesty; ln Z in diagnostics.json)
     sampler: str = "emcee"
     dynesty: DynestyConfig = DynestyConfig()
+    # 0.22: stage checkpoints in the disk folder (detection.json, grid.json, de_pass{i}.json, continuum_refined.npz,
+    # chain.h5 / dynesty.save), each keyed on the data, the config and the model version (jalebi.resume).
+    # auto = continue from the last valid stage (a crashed or killed run restarts where it stopped; a longer
+    # fit.mcmc.nsteps continues the chain) | off = ignore existing checkpoints (they are still written)
+    resume: str = "auto"
+    # 0.22: joint continuum correction inside the fit (docs/CONTINUUM.md): none (default; the 0.21 behaviour) |
+    # offset (one additive constant per sub-band) | spline (B-spline per sub-band, fit.continuum_correction)
+    continuum_fit: str = "none"
+    continuum_correction: ContinuumFitConfig = ContinuumFitConfig()
+    corner_check: CornerCheckConfig = CornerCheckConfig()
+    detection_prob: DetectionProbConfig = DetectionProbConfig()
 
 
 class LineDataConfig(BaseModel):
@@ -294,6 +373,7 @@ class ProjectConfig(BaseModel):
     fit: FitConfig = FitConfig()
     linedata: LineDataConfig = LineDataConfig()
     output: str = DEFAULT_OUTPUT         # "{target}" -> source name, e.g. results/FZ_Tau
+    report: ReportConfig = ReportConfig()   # 0.22
     R_model: str = "argyriou2023"          # argyriou2023 | jones2023 (pontoppidan2024 = legacy alias)
     R_scale: float = 1.0
     R_constant: float | None = None        # a constant resolving power instead of R_model

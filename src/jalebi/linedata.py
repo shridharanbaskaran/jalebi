@@ -455,3 +455,129 @@ def import_linelist(molecule: str, path: str, release: str = "hitran") -> str:
     out = cache_path(ll.molecule.name, release, write=True)
     ll.to_parquet(out)
     return out
+
+
+# ----------------------------------------------------------------------------
+# 0.22: local line lists for molecules HITRAN does not have (C6H6, C3H4, ...)
+# ----------------------------------------------------------------------------
+IMPORT_FORMATS = ("auto", "hitran160", "islat", "csv")
+C2 = 1.438776877          # second radiation constant [cm K]
+
+
+def read_csv_lines(path: str, Q296: float | None = None) -> pd.DataFrame:
+    """A CSV / whitespace table with at least (wave [um] or nu [cm-1]), (eu or el) [K or cm-1 with a unit
+    suffix in the header: eu_cm1 / el_cm1], gu, and either the Einstein A [s-1] (column a) or the HITRAN
+    intensity at 296 K (column sw, cm-1 / (molecule cm-2)) with gu and the partition sum Q(296) to convert:
+        A = S * 8 pi c nu^2 * Q(296) * exp(c2 E_l / 296) / (g_u * (1 - exp(-c2 nu / 296)))     [c in cm/s]
+    (the relation of Simeckova et al. 2006 used by Arabhavi et al. 2024 for the GEISA benzene lines)."""
+    sep = None
+    with open(path) as fh:
+        head = fh.readline()
+    sep = "," if "," in head else r"\s+"
+    df = pd.read_csv(path, sep=sep, comment="#", engine="python")
+    df.columns = [str(c).strip() for c in df.columns]
+    if "nu" not in df and "wave" in df:
+        df["nu"] = 1e4 / df["wave"].astype(float)
+    if "wave" not in df and "nu" in df:
+        df["wave"] = 1e4 / df["nu"].astype(float)
+    if "nu" not in df:
+        raise ValueError("need a wave [um] or nu [cm-1] column")
+    for c in ("eu", "el"):
+        if f"{c}_cm1" in df and c not in df:
+            df[c] = df[f"{c}_cm1"].astype(float) * CM1_TO_K
+    if "el" not in df and "eu" in df:
+        df["el"] = df["eu"].astype(float) - df["nu"].astype(float) * CM1_TO_K
+    if "eu" not in df and "el" in df:
+        df["eu"] = df["el"].astype(float) + df["nu"].astype(float) * CM1_TO_K
+    if "eu" not in df:
+        raise ValueError("need eu or el (K; or eu_cm1 / el_cm1)")
+    if "gu" not in df:
+        raise ValueError("need the upper-level degeneracy gu")
+    if "gl" not in df:
+        df["gl"] = np.nan
+    if "a" not in df:
+        if "sw" not in df:
+            raise ValueError("need the Einstein A (column a) or the 296 K intensity (column sw) with --q296")
+        if Q296 is None:
+            raise ValueError("converting intensities to Einstein A needs Q(296): pass --q296 or a partition file covering 296 K")
+        nu = df["nu"].astype(float).to_numpy(); el_cm1 = df["el"].astype(float).to_numpy() / CM1_TO_K
+        c_cgs = 2.99792458e10
+        df["a"] = (df["sw"].astype(float).to_numpy() * 8.0 * np.pi * c_cgs * nu ** 2 * Q296 * np.exp(C2 * el_cm1 / 296.0)
+                   / (df["gu"].astype(float).to_numpy() * (1.0 - np.exp(-C2 * nu / 296.0))))
+    for c in ("vup", "vlow", "qup", "qlow"):
+        if c not in df:
+            df[c] = ""
+        df[c] = df[c].astype(str).str.strip()
+    if "iso" not in df:
+        df["iso"] = 1
+    return _finish(df)
+
+
+def read_partition_file(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Two columns T [K], Q (CSV or whitespace, '#' comments)."""
+    with open(path) as fh:
+        head = fh.readline()
+    t = pd.read_csv(path, sep="," if "," in head else r"\s+", comment="#", engine="python", header=None if head.strip()[0].isdigit() else 0)
+    T = t.iloc[:, 0].astype(float).to_numpy(); Q = t.iloc[:, 1].astype(float).to_numpy()
+    return T, Q
+
+
+def partition_from_levels(df: pd.DataFrame, T: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Q(T) = sum_i g_i exp(-E_i / T) over the distinct levels of the list (upper and lower levels keyed by
+    their energy and degeneracy).  Only as complete as the list: lines that start or end on a level are needed
+    for it to count, so Q is underestimated at temperatures where levels outside the list are populated.
+    Good enough when the list covers the ground state and the bands that matter at the fit temperatures;
+    prefer a published Q table (--partition file) whenever one exists."""
+    T = np.asarray(T if T is not None else np.concatenate([np.arange(1, 100, 1.0), np.arange(100, 3001, 10.0)]), float)
+    lev = pd.concat([pd.DataFrame({"E": df["eu"].astype(float).round(3), "g": df["gu"].astype(float)}),
+                     pd.DataFrame({"E": df["el"].astype(float).round(3), "g": df["gl"].astype(float)})]).dropna()
+    lev = lev.drop_duplicates(subset=["E", "g"])
+    E = lev["E"].to_numpy(); g = lev["g"].to_numpy()
+    Q = np.array([float(np.sum(g * np.exp(-E / t))) for t in T])
+    return T, Q
+
+
+def import_local_linelist(molecule: str, path: str, release: str = "local", fmt: str = "auto",
+                          partition: str | None = None, q296: float | None = None,
+                          T_grid: np.ndarray | None = None) -> dict:
+    """0.22 `jalebi linelist import`: read `path` (hitran160 .par, iSLAT list, CSV), attach a partition function
+    (a T,Q file; "levels" = direct sum over the list's levels; or the list's own table / TIPS when available)
+    and write <cache>/<MOL>_<release>.parquet + _Q.npz.  Returns a dict describing what was written."""
+    mol = get_molecule(molecule)
+    if fmt not in IMPORT_FORMATS:
+        raise ValueError(f"unknown format {fmt!r}: {', '.join(IMPORT_FORMATS)}")
+    Qtab = None
+    if partition and partition != "levels":
+        Qtab = read_partition_file(partition)
+    if fmt == "auto":
+        if path.endswith(".csv") or path.endswith(".txt"):
+            fmt = "csv"
+        else:
+            with open(path) as fh:
+                head = fh.read(20000)
+            fmt = "islat" if (head.startswith("#") or "Number of lines" in head) else "hitran160"
+    if fmt == "hitran160":
+        df = read_hitran_par(path, mol if mol.hitran_id > 0 else None)
+    elif fmt == "islat":
+        df, Q_own, _ = read_islat_par(path)
+        Qtab = Qtab or Q_own
+    else:
+        if q296 is None and Qtab is not None:
+            q296 = float(np.interp(296.0, Qtab[0], Qtab[1]))
+        df = read_csv_lines(path, q296)
+    if len(df) == 0:
+        raise ValueError(f"no lines read from {path} ({fmt})")
+    q_source = "file" if (partition and partition != "levels") else ("list" if Qtab is not None else None)
+    if Qtab is None and partition == "levels":
+        Qtab = partition_from_levels(df, T_grid); q_source = "levels"
+    if Qtab is None:
+        if mol.hitran_id > 0:
+            q_source = "TIPS (HITRAN id %d)" % mol.hitran_id
+        else:
+            Qtab = partition_from_levels(df, T_grid); q_source = "levels (no Q table given; underestimates Q where the list is incomplete)"
+    pf = partition_for(mol, table=Qtab) if Qtab is not None else partition_for(mol)
+    ll = LineList(mol, df, pf, source=path, release=release)
+    out = cache_path(mol.name, release, write=True)
+    ll.to_parquet(out)
+    return {"path": out, "n_lines": int(len(df)), "wave_min": float(df["wave"].min()), "wave_max": float(df["wave"].max()),
+            "format": fmt, "partition": q_source, "Q296": float(pf(296.0)), "release": release}
