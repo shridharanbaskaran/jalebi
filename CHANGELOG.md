@@ -3,6 +3,31 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.22.2] — 2026-10-09 — corner-study fixes (significance with a continuum correction, faster spline fits)
+
+### Fixed
+- **`FitProblem.component_significance` was wrong with a joint continuum correction** (`fit.continuum_fit:
+  offset | spline`).  The full model was scored on the continuum-corrected data but the model without the
+  component on the raw data, so Δχ² carried the correction's own χ² gain: in the corner study (74 targets) the
+  spline settings gave the *same* Δχ² to every component of 24 targets and a "detection" in 28 of the 36 no-disk
+  controls (water at 100–650 K, CO2, CH4, CO).  Both χ² values now re-profile the correction for their own model
+  (null hypothesis: no such component, but the continuum may adjust).  Without a continuum correction nothing
+  changes.  Runs made with `continuum_fit: none` (the 0.21 survey, the corner-study base / h2o settings) are
+  unaffected; spline / offset runs only need their outputs re-saved (resume keeps every stage, see
+  `runs/RUN_ME_0.22.2.sh`).  Test: `tests/test_0222_fixes.py`.
+
+### Changed
+- **`LinearProblem` (fit.mcmc.linear: marginalise | profile) solves the continuum coefficients ~3× faster**
+  with identical results (ln L to 1e-12): the whitened continuum columns are cached as a sparse matrix, B^T B is
+  computed once, and the design matrix holds only the k area columns (the per-call Gram matrix was
+  (k + kc)² × npix; spline 1 µm over 5–28 µm has kc ≈ 36).  The corner study's spline settings ran 7× slower
+  than the base setting (median 33 vs 4 min per target), most of it in this solve.  `_solve_design` still
+  accepts the old (k + kc)-column layout.
+- `runs/detection_thresholds.py`: a component at the **cold corner** (T < 1.15 × the lower T bound with
+  log N > upper bound − 3) counts as pinned, like the hot corner; `--no-cold-corner` restores 0.22.1.  The spline
+  setting had moved control water from the hot corner to T ≈ 100–115 K, log N 18–20.  On the 0.21 survey this
+  changes one CO2 and one HC3N detection.
+
 ## [0.22.1] — 2026-10-09 — fixes from the 0.21 survey (274 targets)
 
 ### Fixed

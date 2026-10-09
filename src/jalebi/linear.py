@@ -166,6 +166,14 @@ class LinearProblem(FitProblem):
         self.cont = getattr(base, "cont", None)
         self.kc = int(self.cont.n) if self.cont is not None else 0
         self._sw = np.sqrt(self.weights) / self.sigma                        # whitening: w / sigma^2
+        if self.kc:
+            # 0.22.2: the continuum columns never change -> whiten them once; B-splines / offsets are sparse, so
+            # B^T F, B^T y and B beta cost O(npix) per call and B^T B is cached (it was (k+kc)^2 npix per call)
+            from scipy import sparse
+            Bw = np.asarray(self.cont.B, float) * self._sw[:, None]
+            self._Bw = sparse.csr_matrix(Bw)
+            self._BwT = self._Bw.T.tocsr()
+            self._BtB = np.asarray((self._BwT @ self._Bw).todense())
         self._lnorm_w = np.sum(self.weights * np.log(2 * np.pi * self.sigma ** 2))
         self._wsum = float(np.sum(self.weights))
         self.ncall = 0
@@ -223,10 +231,8 @@ class LinearProblem(FitProblem):
             if key not in lin:
                 y -= f * 10.0 ** (2.0 * lR[key])
         cols = [uf[u] for u in self.lin_units]
-        if self.kc:
-            cols.append(self.cont.B)
         M = np.column_stack(cols) if cols else np.zeros((len(y), 0))
-        return y, M, log_s
+        return y, M, log_s          # the k area columns; the continuum columns are added in _solve_design (0.22.2)
 
     def solve(self, theta, draw_rng=None) -> dict:
         """Linear solve at `theta`: ln L, the areas (profile: bounded NNLS; marginalise: conditional mean),
@@ -238,16 +244,19 @@ class LinearProblem(FitProblem):
         s2 = 10.0 ** (2.0 * log_s)
         sw = self._sw
         yw = y * sw
-        Mw = M * sw[:, None]
+        k, kc = self.k, self.kc
+        if kc and M.shape[1] == k + kc:          # caller passed the continuum columns too (pre-0.22.2 layout)
+            M = M[:, :k]
+        Mw = M * sw[:, None]                     # the k area columns, whitened
         norm = -0.5 * (self._lnorm_w + self._wsum * np.log(s2))
         self.ncall += 1
-        k, kc = self.k, self.kc
         if k + kc == 0:
             return {"lnL": -0.5 * float(yw @ yw) / s2 + norm, "a": np.zeros(0), "draw": np.zeros(0), "neg": np.zeros(0, bool)}
         tau = self.cont.tau if kc else np.zeros(0)
         if self.mode == "profile":
             lo, hi = self.area_bounds(theta)
             if kc:                                   # penalised least squares: ridge rows s / tau for the coefficients
+                Mw = np.hstack([Mw, self._Bw.toarray()])
                 lo = np.concatenate([lo, np.full(kc, -np.inf)]); hi = np.concatenate([hi, np.full(kc, np.inf)])
                 ridge = np.zeros((kc, k + kc)); ridge[:, k:] = np.diag(np.sqrt(s2) / tau)
                 Ma = np.vstack([Mw, ridge]); ya = np.concatenate([yw, np.zeros(kc)])
@@ -266,14 +275,22 @@ class LinearProblem(FitProblem):
             return {"lnL": -0.5 * chi2 / s2 + norm, "a": a, "draw": a, "neg": np.zeros(k, bool)}
         # marginalise
         lam2 = np.concatenate([self.prior_scale ** 2, tau ** 2]) if kc else self.prior_scale ** 2
-        G = (Mw.T @ Mw) / s2 + np.diag(1.0 / lam2)
-        b = (Mw.T @ yw) / s2
+        if kc:                                   # block Gram: [[F'F, F'B], [B'F, B'B (cached)]]
+            FtB = np.asarray(self._BwT @ Mw).T                        # (k, kc), sparse product
+            G = np.empty((k + kc, k + kc))
+            G[:k, :k] = Mw.T @ Mw; G[:k, k:] = FtB; G[k:, :k] = FtB.T; G[k:, k:] = self._BtB
+            G /= s2
+            G[np.diag_indices_from(G)] += 1.0 / lam2
+            b = np.concatenate([Mw.T @ yw, self._BwT @ yw]) / s2
+        else:
+            G = (Mw.T @ Mw) / s2 + np.diag(1.0 / lam2)
+            b = (Mw.T @ yw) / s2
         try:
             L = np.linalg.cholesky(G)
         except np.linalg.LinAlgError:
             return {"lnL": -np.inf, "a": np.full(k, np.nan), "draw": np.full(k, np.nan), "neg": np.ones(k, bool)}
         x = np.linalg.solve(L.T, np.linalg.solve(L, b))
-        r = yw - Mw @ x
+        r = yw - Mw @ x[:k] - (self._Bw @ x[k:] if kc else 0.0)
         Q = float(r @ r) / s2 + float(np.sum(x ** 2 / lam2))
         lnL = -0.5 * Q - float(np.sum(np.log(np.diag(L)))) - 0.5 * float(np.sum(np.log(lam2))) + norm
         a = x[:k]
@@ -347,7 +364,7 @@ class LinearProblem(FitProblem):
                 Y -= f * (10.0 ** (2.0 * lR[key]))[:, None]
         for j, i in enumerate(ok):
             th = thetas[i]
-            cols = [F[u][j] for u in self.lin_units] + ([self.cont.B] if self.kc else [])
+            cols = [F[u][j] for u in self.lin_units]
             M = np.column_stack(cols) if cols else np.zeros((len(self.y), 0))
             rng = np.random.default_rng(np.frombuffer(np.ascontiguousarray(th).tobytes(), np.uint32)) \
                 if self.mode == "marginalise" else None

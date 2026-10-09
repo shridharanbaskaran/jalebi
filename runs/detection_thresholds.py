@@ -11,7 +11,8 @@ continuum errors.  This script applies three corrections and reports what surviv
   * dBIC_eff = Delta chi^2 / (s^2 f) - k ln(n / f),  f = (1 + rho) / (1 - rho)
     (rho = lag-1 residual autocorrelation: the effective number of independent pixels is n / f for AR(1) noise);
   * pinned: log N within `--pin-logN` of the prior upper bound (default 0.5 dex: > 20.5 for a log N <= 21 prior), or
-    T within 2 % of the upper bound with log N > 20 -- the pseudo-continuum corner;
+    T within 2 % of the upper bound with log N > 20 -- the pseudo-continuum corner; or (0.22.2) T within 15 % of
+    the lower bound with log N > upper bound - 3 -- the cold corner (--no-cold-corner to drop);
   * per-molecule empirical threshold: the largest dBIC_eff of a non-pinned component of that molecule among the
     controls (x `--margin`, default 1.0), never below `--floor` (default 10).
 
@@ -94,7 +95,7 @@ def load_controls(path: str | None, targets: str | None = None) -> dict[str, str
 
 
 def calibrate(d: str, controls: dict[str, str], pin_logN: float = 0.5, margin: float = 1.0, floor: float = 10.0,
-              exclude=None):
+              exclude=None, cold_corner: bool = True):
     t = pd.read_csv(os.path.join(d, "targets.csv")).set_index("target")
     s = pd.read_csv(os.path.join(d, "significance.csv"))
     p = pd.read_csv(os.path.join(d, "params_long.csv"))
@@ -103,13 +104,19 @@ def calibrate(d: str, controls: dict[str, str], pin_logN: float = 0.5, margin: f
                          zip(s.get("molecule", [""] * len(s)), s["component"])]
     # pinned / corner flags from the posterior medians and the prior bounds
     q = p[p["quantity"].isin(["T", "logN"]) & p["free"].astype(str).str.lower().eq("true")]
-    piv = q.pivot_table(index=["target", "component"], columns="quantity", values=["median", "hi_bound"], aggfunc="first")
+    vals = ["median", "hi_bound"] + (["lo_bound"] if "lo_bound" in q else [])
+    piv = q.pivot_table(index=["target", "component"], columns="quantity", values=vals, aggfunc="first")
     piv.columns = [f"{a}_{b}" for a, b in piv.columns]
     piv = piv.reset_index()
     s = s.merge(piv, on=["target", "component"], how="left")
     hiN = s.get("hi_bound_logN", pd.Series(21.0, index=s.index)).fillna(21.0)
     hiT = s.get("hi_bound_T", pd.Series(np.nan, index=s.index))
     s["pinned"] = (s["median_logN"] > hiN - pin_logN) | ((s["median_T"] > 0.98 * hiT) & (s["median_logN"] > hiN - 1.0))
+    # 0.22.2: the cold corner -- T at the lower bound with a large column (the corner study's spline setting moved
+    # control water there: T 100-115 K, log N 18-20).  A slab at the T floor is not a temperature measurement.
+    loT = s.get("lo_bound_T", pd.Series(np.nan, index=s.index))
+    s["pinned_cold"] = cold_corner & (s["median_T"] < 1.15 * loT) & (s["median_logN"] > hiN - 3.0)
+    s["pinned"] = s["pinned"] | s["pinned_cold"]
     # correlated, over-dispersed residuals
     sc = t["noise_scale_s"].astype(float) if "noise_scale_s" in t else 10 ** t["bf_log_s"].astype(float)
     s["s"] = s["target"].map(sc).fillna(1.0)
@@ -152,10 +159,12 @@ def main(argv=None):
                     "(they are still reported), e.g. a debris disk with a silica feature that sets the CO2 threshold")
     ap.add_argument("--margin", type=float, default=1.0, help="threshold = margin x max control dBIC_eff")
     ap.add_argument("--floor", type=float, default=10.0)
+    ap.add_argument("--no-cold-corner", action="store_true", help="do not count T < 1.15 x lower bound with "
+                    "log N > upper bound - 3 as pinned (0.22.2 default: counted)")
     a = ap.parse_args(argv)
     controls = load_controls(a.controls, a.targets)
     s, th = calibrate(a.compiled_dir, controls, a.pin_logN, a.margin, a.floor,
-                      exclude=[x.strip() for x in a.exclude.split(",") if x.strip()])
+                      exclude=[x.strip() for x in a.exclude.split(",") if x.strip()], cold_corner=not a.no_cold_corner)
     out = a.out or os.path.join(a.compiled_dir, "calibrated")
     os.makedirs(out, exist_ok=True)
     s.to_csv(os.path.join(out, "components_calibrated.csv"), index=False)

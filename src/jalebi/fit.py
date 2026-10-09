@@ -355,7 +355,12 @@ class FitProblem:
     # ---- detection test ------------------------------------------------------------------
     def component_significance(self, theta) -> pd.DataFrame:
         """For every independent unit: chi2 increase when it is removed (logN -> -inf) and the
-        corresponding delta-BIC (positive = the component is supported by the data)."""
+        corresponding delta-BIC (positive = the component is supported by the data).
+
+        With a continuum correction (fit.continuum_fit: offset / spline) both chi2 values are taken with the
+        correction re-profiled for their own model (0.22.2): the null hypothesis is "no such component, but the
+        continuum may adjust".  Up to 0.22.1 the reduced model was compared with the raw data, so delta_chi2
+        contained the correction's own chi2 gain and was nearly the same, large number for every component."""
         P, log_s = self.params_from_theta(theta)
         chi2_full = self.chi2(theta)
         n = len(self.y)
@@ -365,7 +370,7 @@ class FitProblem:
             P2 = {k: dict(v) for k, v in P.items()}
             for m in members:
                 P2[m]["logN"] = -30.0
-            chi2_wo = float(np.sum(self.weights * ((self.y - self.model.evaluate(P2)) / self.sigma) ** 2))
+            chi2_wo = self.chi2(theta, model=self.model.evaluate(P2))   # continuum re-profiled (0.22.2)
             k = sum(1 for p in self.free if p.comp in members)
             dchi2 = chi2_wo - chi2_full
             rows.append({"component": unit, "delta_chi2": dchi2, "k": k, "delta_BIC": dchi2 - k * np.log(n),
