@@ -13,7 +13,9 @@ goes through RUN_ME_continuum_study.sh (hours on 17-32 cores).  Lives next to ja
     python continuum_study.py rank validation_known.yaml            # ranking table (csv + md) from the scores
     python continuum_study.py run ... --dry-run                      # only write the manifests and print the commands
 
-A setting is {continuum: {...overrides...}, fit: {continuum_fit: ..., continuum_correction: {...}}}; add your own
+A setting is {continuum: {...overrides...}, fit: {continuum_fit: ..., continuum_correction: {...}},
+component_bounds: {MOLECULE: {T: [lo, hi], logN: [lo, hi]}}} (component_bounds overrides the bounds of every
+component of that molecule, also those the manifest sets itself); add your own
 with --settings-file my_settings.yaml (same layout as `list` prints; the file replaces the built-in list).  Source-level continuum overrides of the
 manifest (DN Tau's knot spacing, say) are removed so that every source sees the same setting (--keep-source-continuum
 keeps them).  Ranking: the strict / 0.20-rule / lenient pass counts over all scored quantities, the number of tier-A
@@ -68,6 +70,38 @@ def _root(a):
     return os.path.abspath(a.root)
 
 
+def apply_component_bounds(m: dict, cb: dict) -> int:
+    """Set `bounds` of every component of the given molecules, in every source and in the defaults.
+
+    fit.bounds_by_molecule only applies to components WITHOUT their own `bounds` (pipeline: per molecule first,
+    then per component), and the known-set manifest gives many components their own bounds (CO: T 500-3000 in
+    FZ Tau, ...), so a bounds_by_molecule setting alone changes nothing there (the first CO-bound study: three
+    identical results).  cb = {molecule: {param: [lo, hi]}}; the component's other bounds are kept."""
+    n = 0
+
+    def walk(x):
+        nonlocal n
+        if isinstance(x, dict):
+            mol = x.get("molecule")
+            if isinstance(mol, str) and mol in cb and "name" in x and not x.get("tie_to"):
+                b = dict(x.get("bounds") or {})
+                b.update({k: list(v) for k, v in cb[mol].items()})
+                x["bounds"] = b
+                n += 1
+            for v in list(x.values()):
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(m.get("sources"))
+    walk(m.get("defaults"))
+    f = m.setdefault("defaults", {}).setdefault("fit", {}).setdefault("bounds_by_molecule", {})
+    for mol, b in cb.items():                       # and the per-molecule prior, for detected / default components
+        f[mol] = {**dict(f.get(mol) or {}), **{k: list(v) for k, v in b.items()}}
+    return n
+
+
 def derived_manifest(man: dict, name: str, setting: dict, root: str, keep_source_continuum: bool) -> dict:
     m = copy.deepcopy(man)
     d = m.setdefault("defaults", {})
@@ -79,6 +113,8 @@ def derived_manifest(man: dict, name: str, setting: dict, root: str, keep_source
                 f.setdefault(k, {}).update(v)
             else:
                 f[k] = v
+    if setting.get("component_bounds"):
+        apply_component_bounds(m, setting["component_bounds"])
     if not keep_source_continuum:
         for src in m.get("sources", []):
             if isinstance(src.get("config"), dict):
@@ -91,7 +127,7 @@ def derived_manifest(man: dict, name: str, setting: dict, root: str, keep_source
 def settings_from_args(a) -> dict:
     s = dict(SETTINGS)
     if getattr(a, "settings_file", None):                 # a settings file replaces the built-in list
-        s = dict(_load(a.settings_file) or {})
+        s = {k: v for k, v in (_load(a.settings_file) or {}).items() if not str(k).startswith("_")}   # _x: YAML anchors
     if getattr(a, "settings", None):
         keep = [x for x in a.settings.split(",") if x]
         unknown = [x for x in keep if x not in s]
