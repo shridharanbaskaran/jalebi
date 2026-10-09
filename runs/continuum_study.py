@@ -197,9 +197,10 @@ def cmd_rank(a):
     md = ["# Continuum study ranking", "", f"Manifest: {a.manifest}; root: {root}", "",
           "| setting | strict | 0.20 rule | lenient | tier A (0.20) | median chi2_red | corner flags | n |",
           "| --- | --- | --- | --- | --- | --- | --- | --- |"]
-    for r in t.itertuples():
-        md.append(f"| {r.setting} | {r.pass_strict}/{r.scored_strict} | {getattr(r, 'pass_rule_0.20')}/{getattr(r, 'scored_rule_0.20')} | "
-                  f"{r.pass_lenient}/{r.scored_lenient} | {getattr(r, 'tierA_rule_0.20')} | {r.median_chi2_red:.2f} | {r.corner_flagged_components} | {r.n_results} |")
+    for r in t.to_dict("records"):          # (itertuples renames "pass_rule_0.20" to _N: use dicts)
+        md.append(f"| {r['setting']} | {r['pass_strict']}/{r['scored_strict']} | {r['pass_rule_0.20']}/{r['scored_rule_0.20']} | "
+                  f"{r['pass_lenient']}/{r['scored_lenient']} | {r['tierA_rule_0.20']} | {r['median_chi2_red']:.2f} | "
+                  f"{r['corner_flagged_components']} | {r['n_results']} |")
     open(os.path.join(root, "continuum_study_ranking.md"), "w").write("\n".join(md) + "\n")
     print("\n".join(md))
     print(f"\nranking -> {os.path.join(root, 'continuum_study_ranking.csv')}")
