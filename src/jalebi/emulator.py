@@ -83,6 +83,7 @@ class EmulatorSettings:
     table_oversample: int = 6          # shared: fine-grid points per line FWHM when a table is built (see emulator_shared)
     read_only: bool = False            # shared: never build (compute nodes); also $JALEBI_EMULATOR_READONLY=1
     spot_check: int = 200              # shared: random (T, log N) per unit checked on the disk's pixels at load (0 = off)
+    fallback: str = "relative"         # shared, 0.22.1: relative | absolute | never (see config.EmulatorConfig)
     boxes: dict | None = None          # shared: {molecule: {"T": (lo, hi), "logN": (lo, hi)}} survey-wide boxes
                                        # (emulator_shared.molecule_boxes); None = the unit's bounds widened to the defaults
     bands: tuple | None = None         # shared: MRS sub-bands of the dense grid (None = all 12; tests use fewer)

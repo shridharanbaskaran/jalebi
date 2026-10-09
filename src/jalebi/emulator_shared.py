@@ -681,6 +681,40 @@ def spot_check(model, comp, p: dict, tab: UnitTable, bounds: dict, sigma, f_ref:
             "pixels_excluded": int((~mask).sum()), "time_s": time.time() - t0}
 
 
+def fallback_decision(sc: dict, settings) -> tuple[bool, str]:
+    """(fall back to the exact model?, reason) for one unit's spot check `sc` (see `spot_check`).
+
+    sc["max_sigma"] / ["max_flux"] = emulator vs the exact model at the table's oversample (the reference).
+    sc["vs_fit_oversample"] = emulator vs the exact model at fit.oversample, i.e. the model a fallback would use,
+    on the same random (T, log N) points.  By the triangle inequality the fit's exact model is at least
+    vs_fit - max_sigma off the reference: a fallback only helps if the emulator is worse than that.
+    In the 0.21 survey 110 of the 111 fallbacks replaced a 0.1-5 sigma emulator by an exact model that was at least
+    1.4-47 sigma (median 1.9 sigma, 13x the emulator's error) off the reference, at ~15x the sampling time."""
+    mode = (getattr(settings, "fallback", "relative") or "relative").lower()
+    if mode not in ("relative", "absolute", "never"):
+        raise ValueError(f"fit.emulator.fallback must be relative | absolute | never, not {mode!r}")
+    es, ef = float(sc["max_sigma"]), float(sc["max_flux"])
+    miss = es > settings.target_sigma or ef > settings.target_flux
+    head = f"spot check max {es:.3f} sigma / {100 * ef:.3f} % (targets {settings.target_sigma} / {100 * settings.target_flux} %)"
+    if not miss:
+        return False, f"ok: {head}"
+    if mode == "never":
+        return False, f"kept (fallback: never): {head}"
+    if mode == "absolute":
+        return True, f"spot check failed: {head}"
+    v = sc.get("vs_fit_oversample")
+    if not v:                                    # the fit's exact model IS the reference: it is the better model
+        return True, f"spot check failed: {head}"
+    xs = max(float(v["max_sigma"]) - es, 0.0)                    # lower bound of |exact(fit) - reference| / sigma
+    xf = max(float(v.get("max_flux", 0.0)) - ef, 0.0)
+    if es > xs or (ef > settings.target_flux and ef > xf):
+        return True, (f"spot check failed: {head}; the exact model at fit.oversample {v['oversample']} may be "
+                      f"closer (>= {xs:.3f} sigma / {100 * xf:.3f} % off the reference)")
+    return False, (f"kept: {head}, but the exact model at fit.oversample {v['oversample']} is >= {xs:.3f} sigma off "
+                   f"the reference ({xs / max(es, 1e-12):.0f}x the emulator's error); raise fit.oversample to "
+                   f"{sc.get('oversample', 6)} if you want the exact model to be the better one")
+
+
 def clone_model(model, oversample: int):
     """The same SlabModel (components, line lists, pixels, distance, windows, R, continuum) at another oversample."""
     m = SlabModel(model.components, model.linelists, model.wave_pix, model.distance_pc, model.windows, oversample=oversample,
@@ -764,9 +798,13 @@ def attach_shared_emulator(model, bounds: dict[str, dict], sigma, f_ref: float, 
                                            "p99_sigma": sd["p99_sigma"], "max_flux": sd["max_flux"], "time_s": sd["time_s"]}
             tab.meta["spot_check"] = sc
             info["spot_check"][key] = sc
-            if sc["max_sigma"] > settings.target_sigma or sc["max_flux"] > settings.target_flux:
-                why[key] = (f"spot check failed: max {sc['max_sigma']:.3f} sigma / {100 * sc['max_flux']:.3f} % "
-                            f"(targets {settings.target_sigma} / {100 * settings.target_flux} %)")
+            fall, note = fallback_decision(sc, settings)
+            sc["decision"] = note
+            if note.startswith("kept"):
+                info.setdefault("kept_despite_target", {})[key] = note
+                say(f"  emulator {key}: {note}")
+            if fall:
+                why[key] = note
                 info["fallback"][key] = why[key]
                 warnings.warn(f"emulator {key}: {why[key]}; using the exact model for this unit")
                 say(f"  emulator {key}: {why[key]}")

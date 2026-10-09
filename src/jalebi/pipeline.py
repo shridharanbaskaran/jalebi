@@ -699,7 +699,8 @@ def _save_results(run: RunResult, outdir: str, em=None):
         if em is not None:                              # 0.21: which units were emulated, spot checks, fallbacks
             d["emulator"] = {"cache": em.info.get("cache", "per_disk"), "units": sorted(em.tables),
                              "exact_units": dict(em.exact_units), "spot_check": em.info.get("spot_check", {}),
-                             "fallback": em.info.get("fallback", {}), "timing": em.info.get("timing", {})}
+                             "fallback": em.info.get("fallback", {}), "timing": em.info.get("timing", {}),
+                             "kept_despite_target": em.info.get("kept_despite_target", {})}
     if run.opt is not None and getattr(run.opt, "starts", None):   # 0.22: every DE start, the winner, multimodality
         d["optimise"] = {"n_starts": len(run.opt.starts), "best_start": int(getattr(run.opt, "best_start", 0)),
                          "starts": run.opt.starts, "multimodal": getattr(run.opt, "multimodal", [])}

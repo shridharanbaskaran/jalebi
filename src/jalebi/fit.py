@@ -20,6 +20,7 @@ import os
 import time
 from dataclasses import dataclass
 
+import warnings
 import numpy as np
 import pandas as pd
 
@@ -673,19 +674,40 @@ class FitProblem:
 
     def initial_walkers(self, theta0, nwalkers, rng, init: str = "ball", ball: float = 1e-2, widths=None):
         """Starting positions: "ball" = theta0 + ball x (prior range) x N(0,1) (the old behaviour);
-        "scaled" = theta0 + local posterior width x N(0,1) (see `local_widths`)."""
+        "scaled" = theta0 + local posterior width x N(0,1) (see `local_widths`).
+
+        0.22.1: no two walkers start at the same point.  Up to 0.22.0 a walker whose 100 jittered starts all had
+        ln P = -inf was put at theta0 itself; several such walkers were identical, and emcee's DESnookerMove then
+        divides 0 by 0 (`delta / sqrt(|delta|)`) and stops with "At least one parameter value was NaN" (the five
+        failed targets of the 0.21 survey).  Such a walker is now a copy of a finite walker (or theta0) moved by
+        1e-6 of the prior range; `self.init_info` counts them."""
         theta0 = np.asarray(theta0, float)
         scale = ball * (self.hi - self.lo) if init == "ball" else \
             (self.local_widths(theta0) if widths is None else np.asarray(widths, float))
+        scale = np.where(np.isfinite(scale) & (scale > 0), scale, ball * (self.hi - self.lo))
         eps = 1e-6 * (self.hi - self.lo)
         p0 = np.clip(theta0 + scale * rng.standard_normal((nwalkers, self.ndim)), self.lo + eps, self.hi - eps)
+        good = np.zeros(nwalkers, bool)
         for i in range(nwalkers):            # every walker inside the prior (ordering constraints) and finite
             k = 0
             while not np.isfinite(self.log_prob(p0[i])) and k < 100:
                 f = 0.5 ** (k // 10)
                 p0[i] = np.clip(theta0 + f * scale * rng.standard_normal(self.ndim), self.lo + eps, self.hi - eps); k += 1
-            if not np.isfinite(self.log_prob(p0[i])):
-                p0[i] = theta0
+            good[i] = bool(np.isfinite(self.log_prob(p0[i])))
+        bad = np.flatnonzero(~good)
+        src = p0[good] if good.any() else theta0[None, :]
+        for i in bad:                        # a jittered copy of a finite walker, never theta0 itself
+            base = src[rng.integers(len(src))]
+            p0[i] = np.clip(base + eps * rng.standard_normal(self.ndim), self.lo + eps, self.hi - eps)
+        _, first = np.unique(p0, axis=0, return_index=True)
+        dup = np.setdiff1d(np.arange(nwalkers), first)
+        for i in dup:                        # identical rows (a zero-width column alone is fine; identical walkers are not)
+            p0[i] = np.clip(p0[i] + eps * rng.standard_normal(self.ndim), self.lo + eps, self.hi - eps)
+        self.init_info = {"walkers": int(nwalkers), "non_finite_starts": int(len(bad)), "duplicates_moved": int(len(dup)),
+                          "finite_at_theta0": bool(np.isfinite(self.log_prob(theta0)))}
+        if len(bad):
+            warnings.warn(f"MCMC start: {len(bad)} of {nwalkers} walkers had ln P = -inf after 100 tries; "
+                          f"started as jittered copies of {'finite walkers' if good.any() else 'theta0 (no finite walker!)'}")
         return p0, scale
 
     def mcmc(self, theta0, nwalkers: int | None = None, nsteps: int = 2000, processes: int = 1, seed: int = 0,
@@ -732,6 +754,7 @@ class FitProblem:
         t_start = time.time()
         lp0 = self.log_prob(theta0)
         results = []
+        init_infos = []
         total_steps = nsteps * len(groups)
         done_all = 0
         resumed_steps = []
@@ -740,7 +763,8 @@ class FitProblem:
             nd = len(idx)
             nw = nwalkers if (nwalkers and len(groups) == 1) else (nwalkers if nwalkers and nwalkers >= 2 * nd else nw_default(nd))
             p0_full, _ = self.initial_walkers(theta0, nw, rng, init=init, ball=ball, widths=widths)
-            p0 = p0_full[:, idx]
+            init_infos.append(dict(getattr(self, "init_info", {}) or {}))
+            p0 = dedupe_walkers(p0_full[:, idx], self.lo[idx], self.hi[idx], rng)
             backend = None
             resumed = 0
             if checkpoint:
@@ -814,7 +838,7 @@ class FitProblem:
         res.blobs = blobs
         res.meta = {"moves": moves, "de_gamma": de_gamma, "init": init, "vectorize": bool(vectorize), "blocks": [[self.free[j].key for j in g] for g in groups],
                     "block_acceptance": [r[3] for r in results], "block_nwalkers": [r[4] for r in results],
-                    "resumed_steps": resumed_steps}
+                    "resumed_steps": resumed_steps, "init_walkers": init_infos}
         return res
 
 
@@ -853,6 +877,59 @@ class _BlockLogProbMany:
         return _target_many(self.problem)(T)
 
 
+def dedupe_walkers(p0, lo, hi, rng):
+    """Move walkers that coincide with another one by 1e-6 of the prior range (identical walkers make the
+    snooker move divide 0 by 0; see FitProblem.initial_walkers)."""
+    p0 = np.array(p0, float, copy=True)
+    eps = 1e-6 * (np.asarray(hi, float) - np.asarray(lo, float))
+    for _ in range(3):
+        _, first = np.unique(p0, axis=0, return_index=True)
+        dup = np.setdiff1d(np.arange(len(p0)), first)
+        if not len(dup):
+            break
+        p0[dup] = np.clip(p0[dup] + eps * rng.standard_normal((len(dup), p0.shape[1])), lo + eps, hi - eps)
+    return p0
+
+
+def _safe_snooker_class():
+    import emcee
+
+    class SafeDESnookerMove(emcee.moves.DESnookerMove):
+        """emcee's DESnookerMove (ter Braak & Vrugt 2008), with the same random draws, except that a walker
+        sitting exactly on its snooker anchor z (|s - z| = 0) proposes to stay where it is and the proposal is
+        rejected, instead of producing NaN (0 / 0) and stopping the run (0.21 survey: 5 targets)."""
+
+        def get_proposal(self, s, c, random):
+            Ns = len(s)
+            Nc = list(map(len, c))
+            ndim = s.shape[1]
+            q = np.empty_like(s)
+            metropolis = np.empty(Ns, dtype=np.float64)
+            for i in range(Ns):
+                w = np.array([c[j][random.randint(Nc[j])] for j in range(3)])
+                random.shuffle(w)
+                z, z1, z2 = w
+                delta = s[i] - z
+                norm = np.linalg.norm(delta)
+                if not (norm > 0.0) or not np.isfinite(norm):
+                    q[i] = s[i]
+                    metropolis[i] = -np.inf          # always rejected: the walker stays
+                    continue
+                u = delta / np.sqrt(norm)
+                q[i] = s[i] + u * self.gammas * (np.dot(u, z1) - np.dot(u, z2))
+                qn = np.linalg.norm(q[i] - z)
+                metropolis[i] = np.log(qn) - np.log(norm) if qn > 0 else -np.inf
+            fac = np.where(np.isneginf(metropolis), -np.inf, 0.5 * (ndim - 1.0) * np.where(np.isneginf(metropolis), 0.0, metropolis))
+            return q, fac
+
+    return SafeDESnookerMove
+
+
+def SafeDESnookerMove(*a, **kw):
+    """A NaN-safe emcee DESnookerMove (see `_safe_snooker_class`)."""
+    return _safe_snooker_class()(*a, **kw)
+
+
 def make_moves(name: str, ndim: int | None = None, gamma: float = 1.0):
     """emcee move list for a name (see FitProblem.mcmc).  `gamma` scales the differential-evolution step
     (emcee default 2.38 / sqrt(2 ndim)): below 1 raises the acceptance on curved, non-Gaussian posteriors."""
@@ -863,9 +940,9 @@ def make_moves(name: str, ndim: int | None = None, gamma: float = 1.0):
     g0 = None if (ndim is None or gamma == 1.0) else gamma * 2.38 / np.sqrt(2.0 * ndim)
     de = emcee.moves.DEMove(gamma0=g0)
     if name == "de":
-        return [(de, 0.8), (emcee.moves.DESnookerMove(), 0.2)]
+        return [(de, 0.8), (SafeDESnookerMove(), 0.2)]
     if name in ("de+stretch", "mixed"):
-        return [(de, 0.6), (emcee.moves.DESnookerMove(), 0.2), (emcee.moves.StretchMove(), 0.2)]
+        return [(de, 0.6), (SafeDESnookerMove(), 0.2), (emcee.moves.StretchMove(), 0.2)]
     raise ValueError(f"unknown MCMC moves {name!r}: stretch | de | de+stretch")
 
 

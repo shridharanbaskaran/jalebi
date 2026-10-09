@@ -3,6 +3,42 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.22.1] — 2026-10-09 — fixes from the 0.21 survey (274 targets)
+
+### Fixed
+- **MCMC stopped with `ValueError: At least one parameter value was NaN`** (5 of 274 targets: 808-50020,
+  881-50220, HD-142666, HD-15407, IRAS-17178-2600).  `FitProblem.initial_walkers` put every walker whose 100
+  jittered starts had ln P = −inf at θ0 itself; identical walkers make emcee's `DESnookerMove` compute
+  `delta / sqrt(|delta|)` with |delta| = 0.  Now (a) such walkers start as jittered (1e-6 of the prior range)
+  copies of finite walkers, (b) identical walkers are moved apart (`dedupe_walkers`, also per sampling block),
+  (c) `moves: de` uses `SafeDESnookerMove` — emcee's move with the same random draws, which rejects instead of
+  producing NaN when a walker sits on its anchor.  `diagnostics.json["init_walkers"]` counts the non-finite
+  starts per block; a warning names them.  Results are unchanged where no walker failed (same random numbers).
+- **Emulator fell back to the exact model when that was the worse model** (54 targets, 111 units, 78 % of the
+  survey's sampling time: median 104 min vs 7 min per target).  The spot check compares the emulator with the
+  exact model at the table's oversample (6); in high-S/N disks it missed the 0.1 σ target (0.1–5 σ, at 2e-5 in
+  flux), and the fit then ran the exact model at `fit.oversample: 3`, which the same check puts ≥ 1.4–47 σ
+  (median 13× the emulator's error) off the reference.  New `fit.emulator.fallback: relative` (default): fall
+  back only if the emulator's error exceeds the lower bound of the fit's exact model's error
+  (vs_fit_oversample − emulator error, triangle inequality on the same random (T, log N) points).  110 of the
+  111 survey fallbacks would have kept the emulator.  `absolute` restores 0.21/0.22.0, `never` always emulates.
+  The decision is logged and stored in `diagnostics.json["emulator"]["spot_check"][unit]["decision"]` and
+  `["kept_despite_target"]`.  The new key changes the resume key: 0.22.0 stage files are not reused.
+
+### Added (runs/)
+- `collect_results.py` — compile a survey run folder (0.21 / 0.22 schemas) into targets / params_long /
+  params_wide / significance / autodetect / residuals_by_channel / failed tables + REPORT.txt + a tarball.
+- `detection_thresholds.py` — calibrate detections on no-disk controls (white dwarfs, debris disks, background
+  stars behind dark cores; from the targets table flags): ΔBIC corrected for the noise scale and the residual
+  autocorrelation, ΔBIC_eff = Δχ² / (s² f) − k ln(n/f), f = (1+ρ)/(1−ρ); corner (pinned) components removed;
+  per-molecule thresholds from the controls.  0.21 survey: all 35 fitted controls had pinned water; after the
+  corrections only three hot (920–965 K) CO2 components in debris disks / a white dwarf survive.
+- `corner_study.py` — re-fit the controls + the 17 published disks (+ N random) under five settings (base,
+  water log N ≤ 20, water log N ≤ 20 & T ≤ 1300 K, joint spline continuum, spline + water log N ≤ 20) and rank
+  them by false detections in the controls, pinned components and |ΔT|, |Δlog N| against the published fits.
+- `extend_unconverged.py` — continue the chains of unconverged targets of a ≥ 0.22 run with a larger
+  `fit.mcmc.nsteps` (resume keeps every stage; nsteps is not in the key), grouped in step buckets.
+
 ## [0.22.0] — 2026-10-08 — resume, robust start, joint continuum, detection probability
 
 Built on top of 0.21.0 from the findings of the local 0.20 validation (17 disks; emulator + DE moves ≈ 50× the

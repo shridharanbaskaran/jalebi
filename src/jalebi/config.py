@@ -209,6 +209,11 @@ class EmulatorConfig(BaseModel):
                                         # its fine grid at the 1e-3 level, which no shared table can reproduce)
     read_only: bool = False             # shared: never build (compute nodes; also $JALEBI_EMULATOR_READONLY=1)
     spot_check: int = 200               # shared: random (T, log N) per unit checked on the disk at load (0 = off)
+    # 0.22.1: when a unit's spot check misses the targets, fall back to the exact model only if that can be the
+    # better model.  relative (default): fall back only when the emulator's error exceeds the (lower bound of the)
+    # error of the fit's own exact model at fit.oversample (0.21 survey: 110 of 111 fallbacks were to a model
+    # >= 13x less accurate, at ~15x the time) | absolute: the 0.21 rule (any miss of the targets) | never
+    fallback: str = "relative"
     bands: list[str] | None = None      # shared: MRS sub-bands of the dense grid (null = all 12; tests and experiments)
 
     def settings(self, cfg=None):
