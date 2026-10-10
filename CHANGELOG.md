@@ -3,6 +3,16 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.23.2] — 2026-10-10 — area draws
+
+### Fixed
+- `LinearProblem.solve` passed the number of areas as the `tries` argument of `_draw` (positional), so the stored
+  area draws of `fit.mcmc.linear: marginalise` (the survey setting) got k rejection attempts instead of 50 and,
+  with a continuum correction, the positivity cut also hit the zero-mean continuum coefficients.  When every
+  attempt failed the non-positive areas were set to 1e-12, which pulled the log R / log NA chains of weak
+  components (areas consistent with zero) low.  ln L was not affected.  Test: an area at 0.5 sigma from zero was
+  clipped in 103 of 400 draws before, 0 now (`tests/test_0232_draw.py`).
+
 ## [0.23.1] — 2026-10-10 — survey_0.22 setting decided; survey-script fixes
 
 ### Decided

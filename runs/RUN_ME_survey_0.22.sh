@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# survey_0.22 production run (jalebi >= 0.23.1): every spectrum in runs/survey_targets.csv with runs/survey_0.22.yaml.
+# survey_0.22 production run (jalebi >= 0.23.2): every spectrum in runs/survey_targets.csv with runs/survey_0.22.yaml.
 #
 #   setsid nohup bash runs/RUN_ME_survey_0.22.sh > results/survey_0.22.log 2>&1 < /dev/null &
-#   WORKERS=30 NO_SEED=1 bash runs/RUN_ME_survey_0.22.sh        # without reusing the corner-study fits
+#   REUSE_CORNER=1 ...                                           # reuse the 74 corner-study base fits (not default:
+#                                                                  their chains predate the 0.23.2 area-draw fix)
 #
 # Setting: survey_0.22.yaml as it is (= corner-study "base": continuum_fit none, H2O log N up to 21). The 0.23
 # corner study ranked it first: 1 control with shift-null detections (HD 23514, aperture check pending) against
@@ -10,8 +11,8 @@
 # fits (median |dT| 61 K) and 66 % converged chains (spline: 31 %).  Hot-corner water (T ~1490 K, log N ~21) still
 # appears in most fits, but the shift-null test rejects 101 of 109 such units.
 #
-# Steps: tests -> preflight -> seed the 74 corner-study "base" fits (identical config, so they resume from their
-# checkpoints and only re-save with the 0.23 code, incl. shift_null.csv) -> run every disk (finished disks are
+# Steps: tests -> preflight -> (REUSE_CORNER=1 only: copy the 74 corner-study "base" fits, which resume from their
+# checkpoints) -> run every disk (finished disks are
 # skipped on a restart) -> report -> collect -> pooled shift-null calibration per class -> tarball.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -25,13 +26,13 @@ CLASSES=${CLASSES:-runs/census_classes_0.21.csv}
 SEED=${SEED:-runs/results/corner_study/base}
 ROOT=$(python -c "from jalebi.config import ProjectConfig; print(ProjectConfig.load('$CONFIG').output_root())")
 
-python -c "import jalebi; v=tuple(int(x) for x in jalebi.__version__.split('.')[:3]); assert v >= (0, 23, 1), jalebi.__version__; print('jalebi', jalebi.__version__)"
-python -m pytest -q tests/test_0230_shift_null.py tests/test_0222_fixes.py
+python -c "import jalebi; v=tuple(int(x) for x in jalebi.__version__.split('.')[:3]); assert v >= (0, 23, 2), jalebi.__version__; print('jalebi', jalebi.__version__)"
+python -m pytest -q tests/test_0230_shift_null.py tests/test_0222_fixes.py tests/test_0232_draw.py
 python runs/run_survey_server.py preflight --config "$CONFIG" --targets "$TARGETS"
 
 mkdir -p "$ROOT"
 n=0
-if [[ "${NO_SEED:-0}" != 1 && -d "$SEED" ]]; then
+if [[ "${REUSE_CORNER:-0}" == 1 && -d "$SEED" ]]; then
   for d in "$SEED"/*/; do
     t=$(basename "$d")
     [[ $t == _* || ! -f "$d/chain.h5" || -e "$ROOT/$t" ]] && continue

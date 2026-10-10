@@ -300,7 +300,7 @@ class LinearProblem(FitProblem):
             lnL -= float(np.sum(np.log(np.maximum(a, lo))))
         draw = a
         if draw_rng is not None:
-            draw = self._draw(x, L, draw_rng, k)[:k]
+            draw = self._draw(x, L, draw_rng, k=k)[:k]
         return {"lnL": lnL, "a": a, "draw": draw, "neg": neg, "chol": L, "beta": x[k:]}
 
     @staticmethod

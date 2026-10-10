@@ -28,7 +28,7 @@ Quick start
 >>> res = rotdiag.run_rotdiag(rotdiag.example_config("h2"), save=False)
 """
 
-__version__ = "0.23.1"
+__version__ = "0.23.2"
 __all__ = ["__version__", "MOLECULES", "get_molecule", "LineList", "load_linelist", "example_path",
            "ProjectConfig", "Component", "build_model", "Spectrum", "load_spectrum", "run_pipeline"]
 
