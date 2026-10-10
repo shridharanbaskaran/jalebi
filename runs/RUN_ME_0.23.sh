@@ -18,7 +18,7 @@ WORKERS=${WORKERS:-30}
 SETTINGS=${SETTINGS:-"base h2o_logN20 h2o_cap spline spline_h2o20"}
 STUDY=runs/results/corner_study
 
-python -c "import jalebi; assert jalebi.__version__ == '0.23.0', jalebi.__version__; print('jalebi', jalebi.__version__)"
+python -c "import jalebi; assert jalebi.__version__.startswith('0.23.'), jalebi.__version__; print('jalebi', jalebi.__version__)"
 if [[ -f "$STUDY/rescore_0.22.2.log" ]] && ! grep -q "copy back:" "$STUDY/rescore_0.22.2.log"; then
   echo "RUN_ME_0.22.2.sh has not finished yet (no 'copy back:' line in $STUDY/rescore_0.22.2.log) -- wait for it"; exit 1
 fi

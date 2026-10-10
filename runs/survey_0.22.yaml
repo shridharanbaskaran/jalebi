@@ -75,8 +75,8 @@ fit:
     cache_dir: null             #   once (jalebi emulator build --survey) and set JALEBI_EMULATOR_READONLY=1 on nodes
     read_only: false
   resume: auto                  # 0.22: stage checkpoints in the disk folder; a killed disk continues
-  continuum_fit: none           # 0.22: none | offset | spline (joint continuum correction) -- none until the
-                                #   continuum study (runs/continuum_study.py) has decided
+  continuum_fit: none           # decided in 0.23.1 from the corner study scored with the shift-null test:
+                                #   none beats spline (fewer control detections, narrower null, better T, convergence)
   detect:
     mode: emission              # NO absorption (0.11+). Emission slabs only.
     threshold: 10.0             # ΔBIC > 10 = "strong evidence" (MINDS detection criterion)

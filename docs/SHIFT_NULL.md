@@ -61,7 +61,7 @@ jalebi shift-null RESULTS --survey --workers 16 --backend emulator   # every fol
 python runs/shift_null_calibrate.py RESULTS --classes census.csv     # pooled null -> FAP of a threshold, rates
 ```
 
-`detected_shift` uses `fit.shift_null.threshold` (default S ≥ 5). `runs/shift_null_calibrate.py` pools the
+`detected_shift` uses `fit.shift_null.threshold` (default S ≥ 5). `runs/shift_null_calibrate.py` (output in `RESULTS/_shift_null_calibration/`) pools the
 leave-one-out S of all shifted matches of a survey (≈ 60 000 for 270 disks) and reports the false-alarm
 probability of each threshold per molecule; quote that, not a Gaussian tail.
 

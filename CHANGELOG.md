@@ -3,6 +3,31 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.23.1] — 2026-10-10 — survey_0.22 setting decided; survey-script fixes
+
+### Decided
+- **survey_0.22 runs with `runs/survey_0.22.yaml` as it is** (`continuum_fit: none`, H2O log N up to 21), the
+  corner study's "base" setting.  Scored with the shift-null test (74 targets × 5 settings): base has 1 control with
+  detections (HD 23514; aperture / companion check pending) against 2–6 for h2o_logN20, h2o_cap, spline,
+  spline_h2o20; the narrowest pooled null (FAP 1.8e-3 at S > 5; spline 3.4e-3); water |ΔT| vs published 61 K
+  (spline 70 K, logN cap 74 K); 66 % converged chains (spline 31 %).  The spline correction removes the hot-water
+  corner (5 units instead of 109) but creates 48 cold-corner sinks and CO2 false detections in four controls
+  (background star, white dwarf, β Pic tail, NGC 2547-ID8 at S = 12).  In base the shift-null test rejects 101 of
+  the 109 hot-corner water units; capping H2O log N at 20 only moves the pin.
+
+### Added
+- `runs/RUN_ME_survey_0.22.sh`: tests → preflight → seeds the 74 corner-study base fits (same config, so they
+  resume and only re-save with the 0.23 code) → full run → report → collect → pooled shift-null calibration per
+  census class → tarball.
+- `runs/census_classes_0.21.csv`: name, plan_class of the 274 spectra (survey_science/census.py) for the rates.
+
+### Fixed
+- `runs/shift_null_calibrate.py` writes to `<root>/_shift_null_calibration/` (was `shift_null_calibration/`,
+  which `corner_study.py analyse` then read as a target and crashed on its detections.csv) and skips helper
+  folders; its report falls back to a plain table without the optional `tabulate` package.
+- `runs/corner_study.py` and `runs/collect_results.py` treat only folders with a fit marker (config.yaml,
+  run.log, DONE, FAILED.txt, NO_DETECTION) as targets.
+
 ## [0.23.0] — 2026-10-10 — shifted-template null test for detections
 
 ### Added
