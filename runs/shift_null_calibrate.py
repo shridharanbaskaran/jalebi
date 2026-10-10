@@ -9,7 +9,7 @@ being assumed Gaussian:
     S_null(v) = (z(v) - median_{v' != v} z(v')) / robust sigma_{v' != v}     (leave-one-out, per disk x unit)
     FAP(S > s) = fraction of pooled S_null above s                         (per molecule and overall)
 
-    python runs/shift_null_calibrate.py RUN_ROOT [--classes census.csv] [--out RUN_ROOT/shift_null_calibration]
+    python runs/shift_null_calibrate.py RUN_ROOT [--classes census.csv] [--out RUN_ROOT/_shift_null_calibration]
 
 Inputs: RUN_ROOT/*/shift_null.csv and shift_null_curves.csv (written by the pipeline or `jalebi shift-null
 --survey RUN_ROOT`).  --classes: a table with columns name (= target folder) and plan_class (survey_science/
@@ -33,6 +33,8 @@ def load(root: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     tabs, curves = [], []
     for f in sorted(glob.glob(os.path.join(root, "*", "shift_null.csv"))):
         d = os.path.dirname(f)
+        if os.path.basename(d).startswith(("_", ".")):          # helper folders (_compiled, _shift_null_calibration)
+            continue
         t = pd.read_csv(f)
         t["folder"] = os.path.basename(d)
         tabs.append(t)
@@ -71,7 +73,7 @@ def main(argv=None):
     ap.add_argument("--threshold", type=float, default=5.0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
-    out = a.out or os.path.join(a.root, "shift_null_calibration")
+    out = a.out or os.path.join(a.root, "_shift_null_calibration")
     os.makedirs(out, exist_ok=True)
     tab, curves = load(a.root)
     mol = {(f, u): m for f, u, m in zip(tab.folder, tab.unit, tab.molecule.fillna(""))}
@@ -119,9 +121,12 @@ def main(argv=None):
          "| S > | n above | FAP pooled | FAP if Gaussian |", "|---|---|---|---|"]
     for r in cal[cal.molecule == "all"].itertuples():
         L.append(f"| {r.threshold_S:g} | {r.n_above} | {r.FAP:.2e} | {r.gaussian_FAP:.2e} |")
-    L += ["", f"## Detection rates (S >= {a.threshold:g}), per molecule x class\n",
-          rates.pivot_table(index="molecule", columns="plan_class", values="percent").round(0).to_markdown()
-          if hasattr(pd.DataFrame, "to_markdown") else rates.to_string(index=False)]
+    piv = rates.pivot_table(index="molecule", columns="plan_class", values="percent").round(0)
+    try:
+        table = piv.to_markdown()                  # needs the optional `tabulate` package
+    except ImportError:
+        table = "```\n" + piv.to_string() + "\n```"
+    L += ["", f"## Detection rates (S >= {a.threshold:g}), per molecule x class\n", table]
     with open(os.path.join(out, "REPORT.md"), "w") as fh:
         fh.write("\n".join(L) + "\n")
     print("\n".join(L))

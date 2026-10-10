@@ -166,6 +166,9 @@ def _md(df: pd.DataFrame) -> str:
         return "```\n" + df.to_string(index=False) + "\n```"
 
 
+TARGET_MARKERS = ("config.yaml", "run.log", "DONE", "FAILED.txt", "NO_DETECTION")   # a fit folder, not a helper folder
+
+
 def cmd_analyse(a):
     import collect_results as CR
     ctl = {**DEFAULT_CONTROLS, **(controls_from_targets(a.targets) if a.targets else {})}
@@ -175,7 +178,7 @@ def cmd_analyse(a):
         if not os.path.isdir(run_dir):
             continue
         tdirs = sorted(os.path.join(run_dir, x) for x in os.listdir(run_dir)
-                       if os.path.isdir(os.path.join(run_dir, x)) and not x.startswith(("_", ".")))
+                       if not x.startswith(("_", ".")) and any(os.path.isfile(os.path.join(run_dir, x, f)) for f in TARGET_MARKERS))
         if not tdirs:
             continue
         res = [CR.collect_target(t, True) for t in tdirs]

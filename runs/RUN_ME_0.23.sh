@@ -35,5 +35,5 @@ python runs/corner_study.py analyse --targets "$TARGETS"
 cat "$STUDY/RANKING.md"
 
 tar czf ~/corner_study_0.23.tar.gz -C runs/results corner_study/RANKING.md corner_study/ranking.csv \
-    $(cd runs/results && for s in $SETTINGS; do ls -d corner_study/$s/shift_null_survey.csv corner_study/$s/shift_null_calibration corner_study/$s/_compiled 2>/dev/null; done)
+    $(cd runs/results && for s in $SETTINGS; do ls -d corner_study/$s/shift_null_survey.csv corner_study/$s/_shift_null_calibration corner_study/$s/_compiled 2>/dev/null; done)
 echo "copy back: scp SERVER:~/corner_study_0.23.tar.gz ~/Desktop/Work/LTE_fitting/ && tar xzf corner_study_0.23.tar.gz"

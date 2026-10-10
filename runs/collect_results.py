@@ -332,8 +332,11 @@ def main():
     run_dir = (a.run_dir or a.results_dir / a.run_name).expanduser().resolve()
     if not run_dir.is_dir():
         sys.exit(f"run dir not found: {run_dir}")
-    tdirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and not p.name.startswith(("_", ".")))
-    skipped = sorted(p.name for p in run_dir.iterdir() if p.is_dir() and p.name.startswith(("_", ".")))
+    def _is_target(p):                       # a fit folder has its config.yaml; helper folders are skipped
+        return p.is_dir() and not p.name.startswith(("_", ".")) and any((p / f).is_file() for f in
+                                                                         ("config.yaml", "run.log", "DONE", "FAILED.txt", "NO_DETECTION"))
+    tdirs = sorted(p for p in run_dir.iterdir() if _is_target(p))
+    skipped = sorted(p.name for p in run_dir.iterdir() if p.is_dir() and not _is_target(p))
     out_dir = (a.out_dir or run_dir.parent / f"compiled_{run_dir.name}").expanduser().resolve()
     if out_dir.exists():
         shutil.rmtree(out_dir)
