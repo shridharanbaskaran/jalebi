@@ -45,6 +45,7 @@ RUN_ONLY_KEYS = {
     ("fit", "emulator", "spot_check"),
     ("linedata", "data_dir"),
     ("report",),
+    ("fit", "shift_null"),          # 0.23: post-processing only
 }
 
 

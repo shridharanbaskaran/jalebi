@@ -598,6 +598,53 @@ def detect_prob(config: str, target: Optional[str] = typer.Option(None, help=_TA
     rprint(t[cols].to_string(index=False))
 
 
+@app.command("shift-null")
+def shift_null_cmd(outdirs: List[str] = typer.Argument(..., help="finished fit folder(s) (config.yaml + best_fit.json), "
+                                                         "or one results root with --survey"),
+                   survey: bool = typer.Option(False, "--survey", help="run every <ROOT>/*/ that has a best_fit.json, "
+                                                "then merge into <ROOT>/shift_null_survey.csv"),
+                   workers: int = typer.Option(1, "--workers", help="parallel folders (survey mode)"),
+                   force: bool = typer.Option(False, "--force", help="recompute folders that already have shift_null.csv"),
+                   backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)"),
+                   threshold: Optional[float] = typer.Option(None, "--threshold", help="S for detected_shift (default 5)")):
+    """0.23: shifted-template null test of every molecule in finished fits (jalebi.shift_null).
+
+    The match of each molecule's template with the residual at its true wavelengths is compared with the same
+    match at Doppler shifts of 1500-9000 km/s, i.e. with this spectrum's own null.  S = (z0 - median) / robust
+    sigma of the shifted matches; writes shift_null.csv and shift_null_curves.csv into each folder.  Nothing is
+    refitted (the best fit is rebuilt from config.yaml + best_fit.json)."""
+    import glob
+    from joblib import Parallel, delayed
+    from . import shift_null as SN
+    if survey:
+        if len(outdirs) != 1:
+            raise typer.BadParameter("--survey takes one results root")
+        root = outdirs[0]
+        dirs = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "best_fit.json")))
+    else:
+        root, dirs = None, list(outdirs)
+    todo = [d for d in dirs if force or not os.path.exists(os.path.join(d, "shift_null.csv"))]
+    rprint(f"shift-null: {len(todo)} of {len(dirs)} folder(s) to do")
+
+    def one(d):
+        try:
+            from .config import ProjectConfig
+            s = SN.settings_from_config(ProjectConfig.load(os.path.join(d, "config.yaml")))
+            if threshold is not None:
+                s.threshold = threshold
+            t = SN.run_outdir(d, settings=s, backend=backend)
+            return d, SN.describe(t), None
+        except Exception as e:
+            return d, "", repr(e)
+
+    res = Parallel(n_jobs=max(1, workers))(delayed(one)(d) for d in todo) if workers > 1 else [one(d) for d in todo]
+    for d, txt, err in res:
+        rprint(f"  {os.path.basename(os.path.normpath(d))}: " + (f"[red]failed[/red] {err}" if err else txt))
+    if root:
+        t = SN.survey_table(root)
+        rprint(f"{len(t)} rows -> {os.path.join(root, 'shift_null_survey.csv')}" if len(t) else "no shift_null.csv found")
+
+
 @app.command()
 def doctor(json_out: bool = typer.Option(False, "--json", help="machine-readable report"),
            quick: bool = typer.Option(False, "--quick", help="packages only")):

@@ -196,7 +196,26 @@ def cmd_analyse(a):
         c = comp[comp.control]; d = comp[~comp.control]
         ok = t[t.status == "ok"]
         w = v[v.molecule == "H2O"]
+        # 0.23: the shifted-template null test (shift_null.csv per target, from the pipeline or jalebi shift-null)
+        sn = [pd.read_csv(os.path.join(x, "shift_null.csv")).assign(target=os.path.basename(x))
+              for x in tdirs if os.path.exists(os.path.join(x, "shift_null.csv"))]
+        shift = {}
+        if sn:
+            sn = pd.concat(sn, ignore_index=True)
+            sn["control"] = sn.target.isin(ctl)
+            pin = comp.set_index(["target", "component"])["pinned"]
+            sn["pinned"] = [bool(pin.get((a_, b_), False)) for a_, b_ in zip(sn.target, sn.unit)]
+            det = sn.detected_shift.astype(bool)
+            wat = sn.molecule == "H2O"
+            shift = {"shift_targets": int(sn.target.nunique()),
+                     "controls_shift_detections": int(sn[sn.control & det].target.nunique()),
+                     "disks_water_shift": int(sn[~sn.control & wat & det].target.nunique()),
+                     "pinned_units_shift_detected": int((sn.pinned & det).sum()),
+                     "disk_units_shift_detected": int((~sn.control & det).sum()),
+                     "disk_units": int((~sn.control).sum())}
+            sn.to_csv(os.path.join(comp_dir, "shift_null.csv"), index=False)
         rank.append({
+            **shift,
             "setting": n, "targets_ok": len(ok), "failed": int((t.status == "failed").sum()),
             "controls_fitted": int(c.target.nunique()),
             "controls_with_pinned": int(c[c.pinned].target.nunique()),
@@ -213,11 +232,19 @@ def cmd_analyse(a):
         })
     if not rank:
         sys.exit("no finished setting yet")
-    r = pd.DataFrame(rank).sort_values(["controls_false_detection", "controls_with_pinned", "water_median_abs_dT"])
+    r = pd.DataFrame(rank)
+    if "controls_shift_detections" in r and r["controls_shift_detections"].notna().all():
+        # 0.23: detections by the shift-null test; the controls are a sanity check, the fit quality decides
+        r = r.sort_values(["controls_shift_detections", "disks_with_pinned_water", "water_median_abs_dT"])
+        how = ("Sorted by shift-null detections in the no-disk controls (should be 0), then disks with pinned water, "
+               "then water |dT| vs published.  controls_false_detection is the old control-threshold count.")
+    else:
+        r = r.sort_values(["controls_false_detection", "controls_with_pinned", "water_median_abs_dT"])
+        how = "Sorted by false detections in the no-disk controls, then pinned controls, then water |dT| vs published."
+    cols = ["setting"] + [c for c in r.columns if c != "setting"]
+    r = r[cols]
     r.to_csv(os.path.join(STUDY, "ranking.csv"), index=False)
-    md = ["# corner study ranking", "",
-          "Sorted by false detections in the no-disk controls, then pinned controls, then water |dT| vs published.",
-          "", _md(r)]
+    md = ["# corner study ranking", "", how, "", _md(r)]
     with open(os.path.join(STUDY, "RANKING.md"), "w") as fh:
         fh.write("\n".join(md) + "\n")
     print("\n".join(md))

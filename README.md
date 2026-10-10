@@ -1081,6 +1081,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi detect CONFIG [--write OUT.yaml] [--threshold 10]` | automatic molecule detection |
 | `jalebi fit CONFIG [--stages grid,optimise,mcmc] [--processes P] [--nsteps N] [--auto-detect] [--backend exact\|emulator] [--laplace] [--sampler emcee\|dynesty] [--resume auto\|off] [--target PATH] [--name NAME] [--out DIR]` | run the fit; results in `results/<source>/`; 0.22: continues from the folder's stage checkpoints |
 | `jalebi detect-prob CONFIG [--mode ensemble\|bayesian] [--n N] [--mcmc-steps S] [--backend B]` / `jalebi detect-prob --survey ROOT` | 0.22: detection probability of every molecule with the continuum varied → `detection_probability.csv`; merge a survey |
+| `jalebi shift-null FOLDER...` / `jalebi shift-null ROOT --survey [--workers N] [--backend B]` | 0.23: shifted-template null test of every molecule in finished fits (docs/SHIFT_NULL.md) → `shift_null.csv`, `shift_null_curves.csv`; merge a survey |
 | `jalebi linelist import --molecule MOL --file FILE [--format auto\|hitran160\|islat\|csv] [--release TAG] [--partition FILE\|levels] [--q296 Q]` | 0.22: a local line list (C6H6, C3H4, …) into the cache with its partition function (docs/LINELISTS.md) |
 | `jalebi emulator build CONFIG [CONFIG ...] [--survey] [-j N] [--cache-dir DIR] [--ref-snr S] [--points-per-fwhm P] [--rebuild] [--per-disk [--auto-detect]]` / `jalebi emulator list [CONFIG]` | build or verify the shared emulator tables of a survey (0.21) or the per-disk tables of one fit; list the cache, and with a config what each component gets |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
@@ -1326,6 +1327,7 @@ sub-folder per target.
 | `fit_components.png` | 0.22: one panel per component, the data with the other components subtracted |
 | `detection.json`, `grid.json`, `de_pass1.json`, `de_pass2.json`, `continuum_refined.npz`, `chain.key.json` | 0.22 stage checkpoints (docs/RESUME.md) |
 | `continuum_fit.csv`, `detection_probability.csv`, `detection_prob_variants.json` | 0.22: the joint continuum coefficients; `jalebi detect-prob` results and its cached variants |
+| `shift_null.csv`, `shift_null_curves.csv` | 0.23: shifted-template null test per unit (S, null spread, FAP, detected_shift) and z per Doppler shift |
 | `fit_windows.png`, `fit.png` | data, components, total and residuals: the fit windows and the full spectrum |
 | `grid_<comp>.npz/.png` | the (log N, T) χ² maps |
 | `summary.csv` | posterior medians, 16/84 %, bounds, `at_edge`, derived quantities; 0.22: `reported` (report.co) |

@@ -279,6 +279,22 @@ class DetectionProbConfig(BaseModel):
     cache_variants: bool = True         # ensemble: detection_prob_variants.json in the disk folder, reused on rerun
 
 
+class ShiftNullConfig(BaseModel):
+    """0.23: shifted-template null test per molecule (jalebi.shift_null), after the fit.  Post-processing only:
+    not part of the resume key, so switching it on does not invalidate any stage checkpoint."""
+    enabled: bool = True
+    v_min_kms: float = 1500.0           # smallest |Doppler shift| of the null templates
+    v_max_kms: float = 9000.0           # largest |shift| (3 % in wavelength)
+    step_kms: float = 400.0             # ~2 resolution elements at R ~ 1500-3500: roughly independent samples
+    highpass_um: float = 0.3            # running-median high-pass of templates and residual (removes pseudo-continuum)
+    t_factors: list[float] = [0.5, 0.7, 1.0, 1.4, 2.0]   # template bank: T x factor ...
+    logN_offsets: list[float] = [-1.0, 0.0, 1.0]         # ... and log N + offset (clipped to the prior bounds)
+    threshold: float = 5.0              # S >= threshold -> detected_shift
+    min_energy_frac: float = 0.5        # a shift counts only if >= this share of the template energy stays on fit pixels
+    min_null: int = 10                  # fewer valid shifts -> S = NaN, null_ok False (fit windows too narrow)
+    save_curves: bool = True            # shift_null_curves.csv (z per shift, per unit)
+
+
 class ReportConfig(BaseModel):
     """0.22: what the summary reports (report.*)."""
     co: str = "full"                    # full | NA_only: for CO report only log(N.A) (T and N are degenerate when
@@ -350,6 +366,7 @@ class FitConfig(BaseModel):
     continuum_correction: ContinuumFitConfig = ContinuumFitConfig()
     corner_check: CornerCheckConfig = CornerCheckConfig()
     detection_prob: DetectionProbConfig = DetectionProbConfig()
+    shift_null: ShiftNullConfig = ShiftNullConfig()
 
 
 class LineDataConfig(BaseModel):

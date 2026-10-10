@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 """detection_thresholds.py (0.22.1) -- calibrate the molecule detections of a survey run on no-disk controls.
 
+0.23: SUPERSEDED for detections by the shifted-template null test (jalebi.shift_null, docs/SHIFT_NULL.md): the
+no-disk controls are not a valid null for disk spectra (photospheres / silicate / ice instead of a line forest,
+an unstable maximum of a handful of objects, Delta BIC scaling with S/N).  Kept for the Delta BIC_eff and pinned
+diagnostics and for the corner study's old ranking columns.
+
 Why: in the 0.21 survey every one of 22 objects without disk gas (white dwarfs, debris disks, background stars
 behind dark cores) got hot + ro-vibrational water at the prior corner (T 1500 K, log N 21, R ~ 0.01 au) with
 dBIC 3000-11000, and several got CH4 / CO / CO2 too.  dBIC > 10 is therefore not a detection test for these fits:

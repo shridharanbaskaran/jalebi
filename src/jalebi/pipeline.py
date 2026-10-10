@@ -123,6 +123,7 @@ class RunResult:
     outdir: str | None = None           # folder the results were written to (output with {target} filled in)
     checkpoint: object = None           # 0.22: jalebi.resume.Checkpoint of this run (stage files, key)
     corner: dict | None = None          # 0.22: jalebi.corner.corner_check of the final parameters
+    shift_null: object = None           # 0.23: DataFrame of the shifted-template null test (jalebi.shift_null)
 
     def say(self, msg):
         self.log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -661,6 +662,18 @@ def _save_results(run: RunResult, outdir: str, em=None):
                     ", ".join(f"{r.component}: Δχ²={r.delta_chi2:.0f}, ΔBIC={r.delta_BIC:+.0f}" for r in sig.itertuples()))
         except Exception as e:  # pragma: no cover
             run.say(f"  detection test failed: {e}")
+        sn_cfg = getattr(cfg.fit, "shift_null", None)
+        if sn_cfg is not None and sn_cfg.enabled:              # 0.23: shifted-template null test per molecule
+            try:
+                from . import shift_null as SN
+                s_sn = SN.settings_from_config(cfg)
+                tab, curves = SN.shift_null(prob, run.theta, s_sn, target=run.spec.name)
+                SN.save(outdir, tab, curves if s_sn.save_curves else None)
+                run.shift_null = tab
+                run.say(f"shift-null test (S >= {s_sn.threshold:g} = detected against the spectrum's own null): "
+                        + SN.describe(tab))
+            except Exception as e:  # pragma: no cover
+                run.say(f"  shift-null test failed: {e}")
         fig = plots.plot_fit(prob, run.theta, title=f"{run.spec.name} best fit (fit windows)")
         fig.savefig(os.path.join(outdir, "fit_windows.png"), dpi=110); plt.close(fig)
         try:
@@ -805,6 +818,10 @@ def catalogue_row(run: RunResult) -> dict:
     if run.theta is not None:
         for r in run.problem.component_significance(run.theta).itertuples():
             row[f"{r.component}_dBIC"] = r.delta_BIC
+    sn = getattr(run, "shift_null", None)                  # 0.23
+    if sn is not None and len(sn):
+        for r in sn.itertuples():
+            row[f"{r.unit}_Sshift"] = r.S
     for key, d in (getattr(run, "corner", None) or {}).items():       # 0.22
         row[f"{key}_smooth_frac"] = d["smooth_fraction"]; row[f"{key}_pinned"] = d["n_pinned"]
         row[f"{key}_corner_flags"] = ",".join(d["flags"])

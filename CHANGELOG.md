@@ -3,6 +3,32 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.23.0] — 2026-10-10 — shifted-template null test for detections
+
+### Added
+- **`jalebi.shift_null` — each spectrum is its own null for molecule detections** (docs/SHIFT_NULL.md).  For every
+  independent unit of a fit, the high-pass-filtered template bank (T × 0.5–2, log N ± 1 around the best fit) is
+  matched with the residual at the true wavelengths (z0) and at 38 Doppler shifts of 1500–9000 km/s (the null);
+  S = (z0 − median) / robust σ of the shifted matches.  The null carries the correlated residuals, misfit
+  structure, line confusion and S/N of that spectrum, and smooth pseudo-continuum flux does not count.  Run after
+  every fit (`fit.shift_null`, default on, post-processing only: not in the resume key) → `shift_null.csv`,
+  `shift_null_curves.csv`, `<unit>_Sshift` in the catalogue; on finished fits `jalebi shift-null FOLDER... |
+  ROOT --survey [--workers N] [--backend emulator]` (rebuilds the fit from config.yaml + prep.csv +
+  best_fit.json, nothing refitted).
+  Checks: AR(1)-correlated noise, absent molecules: ΔBIC > 10 in 14/40, naive matched-filter S/N > 5 in 22/40,
+  S > 5 in 0/40.  Published validation disks (0.22 fits): every hot-water component at the prior corner (AS 209,
+  BP, CY, DN, DR, HP, IQ Tau) has S ≤ 2.5, every physical one S ≥ 14; HCN / C2H2 / CO2 of GW Lup, Sz 114, DF Tau,
+  CX Tau S = 6.7–47; 0 of 2007 pooled null matches above S = 5.
+- `runs/shift_null_calibrate.py`: pools the leave-one-out S of all shifted matches of a survey → false-alarm
+  probability per threshold and molecule, detection rates per class (with a census table), S distribution plot.
+- `runs/corner_study.py analyse`: when the targets have shift_null.csv, ranks by shift-null detections in the
+  controls (sanity check, should be 0), then pinned water, then water |ΔT|; adds disks_water_shift,
+  pinned_units_shift_detected, disk_units_shift_detected.
+
+### Changed
+- `runs/detection_thresholds.py` is superseded for detections (the no-disk controls are not a valid null for
+  disk spectra); kept for the ΔBIC_eff / pinned diagnostics.
+
 ## [0.22.2] — 2026-10-09 — corner-study fixes (significance with a continuum correction, faster spline fits)
 
 ### Fixed
