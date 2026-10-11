@@ -13,6 +13,7 @@ from the terminal, from Python, or in an interactive web app.
 </p>
 
 <p align="center">
+  <a href="https://shridharanbaskaran.github.io/jalebi/"><b>Website</b></a> ·
   <a href="#installation">Install</a> ·
   <a href="#five-minute-tour">Tour</a> ·
   <a href="#the-physics">Physics</a> ·
