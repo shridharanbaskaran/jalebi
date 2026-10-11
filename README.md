@@ -195,6 +195,7 @@ jalebi prep   my_disk.yaml                  # continuum + masks  -> results/.../
 jalebi detect my_disk.yaml --write my_disk_detected.yaml    # which molecules are there?
 jalebi fit    my_disk.yaml --stages grid,optimise           # quick look (minutes)
 jalebi fit    my_disk.yaml --processes 16 --nsteps 20000    # full posterior
+jalebi showcase results/my_disk                              # the run as panels + an MP4: continuum, fit, each molecule, uncertainties
 ```
 
 From Python:
@@ -1084,6 +1085,7 @@ R_constant: null                # a constant resolving power instead of R_model
 | `jalebi shift-null FOLDER...` / `jalebi shift-null ROOT --survey [--workers N] [--backend B]` | 0.23: shifted-template null test of every molecule in finished fits (docs/SHIFT_NULL.md) → `shift_null.csv`, `shift_null_curves.csv`; merge a survey |
 | `jalebi linelist import --molecule MOL --file FILE [--format auto\|hitran160\|islat\|csv] [--release TAG] [--partition FILE\|levels] [--q296 Q]` | 0.22: a local line list (C6H6, C3H4, …) into the cache with its partition function (docs/LINELISTS.md) |
 | `jalebi emulator build CONFIG [CONFIG ...] [--survey] [-j N] [--cache-dir DIR] [--ref-snr S] [--points-per-fwhm P] [--rebuild] [--per-disk [--auto-detect]]` / `jalebi emulator list [CONFIG]` | build or verify the shared emulator tables of a survey (0.21) or the per-disk tables of one fit; list the cache, and with a config what each component gets |
+| `jalebi showcase RESULTS\|CONFIG [--out DIR] [--no-video] [--seconds 4] [--draws 200]` | an informational slideshow of a finished fit (PNG panels + MP4): settings and sampler health; data, continuum and the model-aware refinement; total fit over the observed spectrum with every molecule offset below; posterior model bands; ΔBIC and τ per component; one page per component (grid → optimiser → posterior); 1-D posteriors, table, correlations, traces. Nothing is refitted |
 | `jalebi batch CONFIG TARGETS.csv [--workers W] [--auto-detect] [--only-failed]` | many disks in parallel → `population.csv` |
 | `jalebi serve [--port 5006] [--data-root DIR] [--source DIR] [--config FILE] [--show] [--module source\|lte\|cube\|rotdiag] [--tab TAB] [--cube DIR] [--rotdiag-config FILE]` | the web app: the Source page (opening `--source` on start), or a module (and a tab of the LTE slab fit) |
 | `jalebi source list ROOT` · `jalebi source info PATH [--preload --workers N]` | target folders under a data root; what one contains (sub-bands, header facts, position; cube read time) |

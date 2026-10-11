@@ -3,6 +3,16 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`jalebi showcase`** (new module `jalebi.showcase`): turns a results folder (or its config) into informational
+  1920×1080 panels and an MP4 slideshow, without refitting: fit overview and sampler health; data and continuum;
+  continuum fit with every model-aware refinement pass (χ² before → after, kept / rejected); joint fit; total fit
+  over the observed spectrum with each component offset below it; posterior model bands; ΔBIC and τ per
+  component; one page per component; 1-D posteriors, parameter table, correlations, traces.
+  `--no-video`, `--seconds`, `--fps`, `--draws 0`, `--out`.
+
 ## [0.23.2] — 2026-10-10 — area draws
 
 ### Fixed

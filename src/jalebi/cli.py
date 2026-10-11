@@ -748,6 +748,26 @@ def _demo_config_path() -> str:
 
 
 @app.command()
+def showcase(path: str = typer.Argument(..., help="a results folder written by `jalebi fit`, or its config file"),
+             out: Optional[str] = typer.Option(None, help="where to write (default: <results>/showcase)"),
+             video: bool = typer.Option(True, "--video/--no-video", help="also write an MP4 slideshow (needs ffmpeg)"),
+             seconds: float = typer.Option(4.0, help="seconds per panel in the video"),
+             fps: int = typer.Option(30, help="video frame rate"),
+             draws: int = typer.Option(200, help="posterior draws for the model-uncertainty bands (0 = skip; rebuilds the "
+                                                 "model from config.yaml, no refitting)")):
+    """Informational slideshow of a finished fit: settings, data and continuum, the joint fit built up component by
+    component, the posterior spread of the model, which components are needed (Delta BIC, tau), one panel per component
+    (its share of the data, best fit and posterior, grid -> optimiser -> posterior), every parameter's 1-D posterior,
+    the parameter table, correlations and MCMC traces. PNG panels plus an MP4; nothing is refitted."""
+    from .showcase import showcase as _showcase
+    try:
+        _showcase(path, out=out, video=video, seconds=seconds, fps=fps, draws=draws, say=rprint)
+    except FileNotFoundError as e:
+        rprint(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def about():
     """Banner, version, citation and where things are."""
     from . import __version__
