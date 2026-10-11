@@ -18,7 +18,7 @@ export JALEBI_EMULATOR_READONLY=${JALEBI_EMULATOR_READONLY:-1}
 ROOT=${ROOT:-results/survey_0.22}
 WORKERS=${WORKERS:-30}
 
-"$PY" -c "import jalebi, numpy; v=tuple(int(x) for x in jalebi.__version__.split('.')[:3]); assert v >= (0, 24, 0), jalebi.__version__; print('jalebi', jalebi.__version__, 'python', __import__('sys').executable)" || exit 1
+"$PY" -c "import jalebi, numpy; v=tuple(int(x) for x in jalebi.__version__.split('.')[:3]); assert v >= (0, 24, 1), jalebi.__version__; print('jalebi', jalebi.__version__, 'python', __import__('sys').executable)" || exit 1
 "$PY" -m pytest -q -W ignore tests/test_0240_robustness_accretion.py -k "not app" || { echo "tests failed"; exit 1; }
 
 echo "== accretion ($(date))"

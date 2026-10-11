@@ -342,6 +342,31 @@ class AccretionConfig(BaseModel):
     sigma_range: list[float] = [0.8, 2.0]            # Gaussian sigma bounds (resolution elements)
     centre_dlam: float = 1.0            # centre within +- this many resolution elements
     baseline: str = "linear"            # local continuum: linear (core-masked, clipped) | als (Shridharan+2026)
+    water_overlap_check: bool = True    # fit water only where a water line overlaps the H I line (else none)
+    water_overlap_dlam: float = 1.0     # overlap: a water line within +- this many resolution elements,
+    water_overlap_eup: float = 5000.0   #   with E_up < this (K)
+    water_overlap_aul: float = 1.0      #   and A_ul > this (s^-1)   (Shridharan+2026 screening)
+    water_overlap_release: str = "hitran"
+    continuum_variants: int = 0         # optional: re-measure under N continuum variants -> logLacc_cont_syst
+    continuum_variant_sigma: float = 0.01
+    blend_fit: str = "peaks"            # peaks: a Gaussian for every significant peak near the line, fitted jointly
+                                        # with the H I line and a linear baseline term | hi: only H I neighbours
+    blend_snr: float = 5.0              # residual peak significance to add a component
+    blend_max: int = 20                 # max extra Gaussians per line
+    blend_sigma_range: list[float] = [0.3, 0.75]  # extra-component sigma bounds (resolution elements; unresolved)
+    blend_min_sep: float = 1.5          # no extra component within this many resolution elements of the H I centre
+    blend_dbic: float = 10.0            # BIC improvement required per extra component
+    blend_excl_fwhm: float = 0.75       # no extra component within this x the expected H I FWHM of the line centre
+    blend_sep_dlam: float = 1.5         # minimum separation between any two fitted components (resolution elements)
+    blend_dip: float = 0.9              # near the H I line an extra peak needs a dip below this fraction of the peaks
+    water_scale_max: float = 2.0        # joint local water scale in each line fit (0 = off)
+    water_floor_sigma: float = 2.0      # water may not exceed the data by > this many sigma (no H I in absorption)
+    fwhm_max_kms: float = 300.0         # H I Gaussian observed FWHM cap (km/s; floor 1.05 x LSF; 0 = off)
+    tie_kinematics: bool = True         # one H I velocity + intrinsic width per disk, from the clean strong lines
+    tie_min_snr: float = 10.0
+    tie_dv_kms: float = 25.0
+    tie_width_frac: float = 0.5
+    tie_vmax_kms: float = 40.0
     detect_rms: float = 10.0            # peak above this many times the RMS (Shridharan+2026)
     min_snr: float = 3.0                # and integrated flux S/N
     rin_over_rstar: float = 5.0         # Mdot = (1 - R*/R_in)^-1 L_acc R* / (G M*)  (1.25 for R_in = 5 R*)

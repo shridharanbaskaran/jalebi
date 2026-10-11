@@ -106,7 +106,7 @@ def test_hi_line_list_and_calibrations():
 
 
 def test_accretion_recovers_lacc_through_strong_water():
-    spec = _hi_spectrum(-0.6)                          # water carries ~90 % of the flux under Pf alpha
+    spec = _hi_spectrum(-1.0)                          # water carries ~70 % of the flux under Pf alpha
     s = AC.AccretionSettings(water_release="hitran", n_mc=400)
     tab, res = AC.measure(spec, distance_pc=140.0, mstar=0.7, rstar=2.0, settings=s)
     t = tab.set_index("line")
@@ -149,3 +149,108 @@ def test_app_has_accretion_tab_and_batch_columns():
     df = pd.DataFrame([{c: np.nan for c in cols}]); df.loc[0, ["logLacc", "mstar", "rstar"]] = [-1.5, 0.7, 2.0]
     a._batch_recompute_mdot(df, 0, {})
     assert np.isfinite(df.loc[0, "logMdot"])
+
+
+def test_water_only_fitted_where_a_water_line_overlaps():
+    spec = _hi_spectrum(-1.3)
+    s = AC.AccretionSettings(water_release="hitran", n_mc=100)
+    tab, _ = AC.measure(spec, distance_pc=140.0, settings=s)
+    t = tab.set_index("line")
+    assert not t.loc["HI_9-6", "water_overlap"] and not np.isfinite(t.loc["HI_9-6"].get("water_T", np.nan))
+    assert not t.loc["HI_10-7", "water_overlap"]
+    assert t.loc["HI_6-5", "water_overlap"] and np.isfinite(t.loc["HI_6-5", "water_T"])     # Pf alpha has water
+
+
+def test_accretion_continuum_variants_option():
+    spec = _hi_spectrum(-9)
+    s = AC.AccretionSettings(water_release="hitran", n_mc=100, continuum_variants=3, water="none")
+    tab, res = AC.measure(spec, distance_pc=140.0, settings=s)
+    assert "logLacc_cont_syst" in tab and np.isfinite(res["logLacc_cont_syst"]) and res["logLacc_cont_syst"] < 0.2
+
+
+def test_neighbouring_peaks_get_their_own_gaussians():
+    """0.24.1: a narrow line 2 resolution elements from an H I line is fitted as its own component, so the H I
+    flux is recovered; the 0.24.0 single-Gaussian fit ('hi') absorbs part of it."""
+    lam0, R = 8.76, 3000.0
+    dlam = lam0 / R
+    x = np.arange(lam0 - 20 * dlam, lam0 + 20 * dlam, dlam / 3)
+    sg_hi = 1.2 * dlam / 2.3548 * 1.6
+    rng = np.random.default_rng(4)
+    true_F = 0.05 * sg_hi * np.sqrt(2 * np.pi)
+    y = (0.05 * np.exp(-0.5 * ((x - lam0) / sg_hi) ** 2)
+         + 0.06 * np.exp(-0.5 * ((x - (lam0 - 2.2 * dlam)) / (0.45 * dlam)) ** 2)      # neighbouring molecular line
+         + 0.04 * np.exp(-0.5 * ((x - (lam0 + 6 * dlam)) / (0.45 * dlam)) ** 2)
+         + rng.normal(0, 0.001, len(x)))
+    err = np.full(len(x), 0.001)
+    m_pk = AC.measure_line(x, y, err, lam0, dlam, AC.AccretionSettings(blend_fit="peaks"))
+    m_hi = AC.measure_line(x, y, err, lam0, dlam, AC.AccretionSettings(blend_fit="hi"))
+    assert m_pk["n_extra_peaks"] >= 2
+    assert abs(m_pk["flux_jyum"] / true_F - 1) < 0.1
+    assert m_hi["flux_jyum"] / true_F - 1 > 0.15                     # the old fit is biased high by the blend
+    # a shoulder on a broad H I profile (no dip) is not split off
+    y2 = 0.05 * np.exp(-0.5 * ((x - lam0) / sg_hi) ** 2) + rng.normal(0, 0.001, len(x))
+    m2 = AC.measure_line(x, y2, err, lam0, dlam, AC.AccretionSettings())
+    assert m2["n_extra_peaks"] == 0 and abs(m2["flux_jyum"] / true_F - 1) < 0.05
+
+
+def test_water_never_puts_the_line_in_absorption_and_fwhm_is_capped():
+    """0.24.1: an over-predicted water line under the H I core is scaled down (water <= data + 2 sigma in the
+    core), and the H I Gaussian observed FWHM is at most fwhm_max_kms (300 km/s)."""
+    lam0, R = 12.372, 2700.0
+    dlam = lam0 / R
+    x = np.arange(lam0 - 20 * dlam, lam0 + 20 * dlam, dlam / 3)
+    rng = np.random.default_rng(5)
+    sg_lsf = dlam / 2.3548
+    water = 0.30 * np.exp(-0.5 * ((x - (lam0 + 0.6 * dlam)) / sg_lsf) ** 2) \
+        + 0.20 * np.exp(-0.5 * ((x - (lam0 + 5 * dlam)) / sg_lsf) ** 2)
+    fwhm_true = 500.0                                                   # km/s, broader than the cap
+    sg_true = fwhm_true / 2.99792458e5 * lam0 / 2.3548
+    hi = 0.10 * np.exp(-0.5 * ((x - lam0) / sg_true) ** 2)
+    flux = hi + 0.4 * water + rng.normal(0, 0.002, len(x))              # the slab over-predicts water by 2.5x
+    err = np.full(len(x), 0.002)
+    m = AC.measure_line(x, flux - water, err, lam0, dlam, AC.AccretionSettings(), water=water)
+    ws = m["water_scale"]
+    after = flux - ws * water
+    core = np.abs(x - lam0) <= 2.5 * dlam
+    assert ws < 0.7
+    assert np.min(after[core] - np.polyval(np.polyfit(x[~core], after[~core], 1), x[core])) > -3 * 0.002 - 0.01
+    fwhm = 2.3548 * m["sigma_um"] / lam0 * 2.99792458e5
+    assert fwhm <= 300.0 + 1e-6
+    # no cap -> the fit follows the broad line
+    m2 = AC.measure_line(x, flux - water, err, lam0, dlam, AC.AccretionSettings(fwhm_max_kms=0), water=water)
+    assert 2.3548 * m2["sigma_um"] / lam0 * 2.99792458e5 > 400
+
+
+def test_validation_script_parses_published_tables(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("av", os.path.join(os.path.dirname(__file__), "..", "runs",
+                                                                       "accretion_validate.py"))
+    av = importlib.util.module_from_spec(spec); spec.loader.exec_module(av)
+    assert av.parse_val("-5.57(0.03)") == (-5.57, 0.03, False)
+    v, e, ul = av.parse_val("<-6.67")
+    assert v == -6.67 and ul and np.isnan(e)
+    assert av.norm("V-DF-TAU_jw01282-o003_t009_miri") == av.norm("DF Tau") == "dftau"
+    assert av.norm("*49 Cet") == "49cet" and av.norm("FZ_Tau_P24") == "fztau"
+
+
+def test_no_component_steals_the_hi_core_and_peaks_are_separated():
+    """0.24.1: no extra component inside the H I core (max(1.5 dlam, 0.75 FWHM)); any two components >= 1.5 dlam
+    apart; the H I Gaussian stays on the H I peak even next to a stronger blend (the CX Tau (9-6) case)."""
+    lam0, R = 5.908, 3700.0
+    dlam = lam0 / R
+    x = np.arange(lam0 - 20 * dlam, lam0 + 20 * dlam, dlam / 3)
+    rng = np.random.default_rng(6)
+    sg_hi = 170.0 / 2.99792458e5 * lam0 / 2.3548
+    narrow = lambda c, a: a * np.exp(-0.5 * ((x - c) / (0.45 * dlam)) ** 2)
+    y = (0.006 * np.exp(-0.5 * ((x - lam0) / sg_hi) ** 2) + narrow(lam0 - 2.6 * dlam, 0.005)
+         + narrow(lam0 - 3.3 * dlam, 0.003) + narrow(lam0 + 5 * dlam, 0.002) + rng.normal(0, 0.0002, len(x)))
+    err = np.full(len(x), 0.0002)
+    m = AC.measure_line(x, y, err, lam0, dlam, AC.AccretionSettings())
+    comps = m["components"]
+    excl = max(1.5 * dlam, 0.75 * 2.3548 * 0.5 * (0.8 + 2.0) * dlam)
+    assert all(abs(c[1] - lam0) >= excl - 1e-9 for c in comps)
+    cs = sorted(c[1] for c in comps)
+    assert all(b - a >= 0.69 * dlam for a, b in zip(cs, cs[1:]))     # seeds >= 1.5 dlam apart, centres +-0.4 dlam
+    assert abs(m["centre"] - lam0) < 0.3 * dlam
+    true_F = 0.006 * sg_hi * np.sqrt(2 * np.pi)
+    assert abs(m["flux_jyum"] / true_F - 1) < 0.2

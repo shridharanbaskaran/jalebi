@@ -3,6 +3,51 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.24.1] — 2026-10-11 — accretion: multi-peak line fits, water only where it overlaps, tied H I kinematics
+
+### Changed
+- **Accretion line fit = multi-peak decomposition** (`fit.accretion.blend_fit: peaks`). Every significant peak
+  around the H I line gets its own Gaussian, fitted jointly with the H I line and a linear baseline correction.
+  Only the H I area is reported.
+  - Close to the line, a peak needs a dip (a shoulder stays with the H I line); at known water-line positions,
+    no dip is needed.
+  - Neighbouring H I lines share the line's velocity and width.
+  - Columns `n_extra_peaks`, `blend_frac_core`, `chi2_red`.
+- **Peak detection:**
+  - `scipy.signal.find_peaks` on the data (prominence ≥ 5× noise, ≥ 1.5 Δλ apart) seeds all peaks at once; the
+    residual loop adds shoulders;
+  - no two components closer than 1.5 Δλ;
+  - no extra component inside the H I core (max(1.5 Δλ, 0.75 FWHM)), enforced by its centre bounds;
+  - in the tied pass every residual peak outside the core is fitted (no dip test);
+  - up to 20 extras.
+- **Tied H I kinematics** (`tie_kinematics`, width ±50 %, reference re-derived once from the tied fits): a second pass with one velocity centroid and intrinsic width per
+  disk, from the clean strong lines (`HI_v_kms`, `HI_sigma_int_kms` in accretion.json).
+- **Water:**
+  - fitted only where a HITRAN H2O line (E_up < 5000 K, A > 1 s⁻¹) lies within ±1 Δλ of the H I line, i.e. for
+    (6–5), (7–6), (12–7) and not for (9–6), (8–6), (10–7), (13–8);
+  - the local slab is fitted with a simultaneous linear baseline;
+  - a local water scale (0–2) is fitted jointly in each line's cut-out (`water_scale`), which fixes the Hu α
+    over-subtraction.
+- Flux errors come from the covariance of the linear parameters, which stays well-defined with overlapping
+  components.
+- **No H I line in absorption** (`water_floor_sigma`, 2): in the H I core, the water may not exceed the data by
+  more than 2× noise, both in the window fit (slab area cap) and in the line fit (water-scale cap).
+- **H I width cap** (`fwhm_max_kms`, 300): observed FWHM ≤ 300 km/s, floored at 1.05× the instrumental profile.
+- accretion.png shows the extra components and the total model.
+
+### Added
+- `runs/accretion_validate.py`: jalebi vs Shridharan+2026 Tables A.1/A.2 (comparison.csv, summary.md,
+  validation.png). On 6 disks from the public rows, the scatter per line is ≤ 0.10 dex, and jalebi is 0.1–0.2 dex
+  higher in L_line (spectra / aperture correction).
+- `fit.accretion.continuum_variants` (default 0): remeasure under N continua perturbed by a per-band offset + tilt,
+  giving `logLacc_cont_syst`; `jalebi accretion --continuum-variants N`.
+
+### Validation
+- 12 published disks, offsets from the mean of (10–7) and (13–8): Hu α +0.18 ± 0.14 dex (0.24.0: ±0.30), Pf α
+  +0.19 ± 0.10.
+- (9–6) is lower in water-rich disks: the 5.904 µm water line next to it is now separated. This needs a check
+  against the A&A calibration (docs/ACCRETION.md).
+
 ## [0.24.0] — 2026-10-11 — continuum robustness, H I accretion, sgclip continuum
 
 ### Added

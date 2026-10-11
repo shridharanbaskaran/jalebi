@@ -655,6 +655,9 @@ def accretion_cmd(outdirs: List[str] = typer.Argument(None, help="finished fit f
                   config: Optional[str] = typer.Option(None, "--config", "-c", help="config for --targets (default: built-in)"),
                   workers: int = typer.Option(1, "--workers"),
                   water: Optional[str] = typer.Option(None, "--water", help="local | global | none"),
+                  continuum_variants: Optional[int] = typer.Option(None, "--continuum-variants",
+                                                                   help="remeasure under N perturbed continua "
+                                                                        "(logLacc_cont_syst); default: config (0)"),
                   out: Optional[str] = typer.Option(None, "--out", help="csv of the merged results (targets mode)")):
     """0.24: accretion luminosity and rate from the mid-IR H I lines (jalebi.accretion; Shridharan et al. 2026,
     A&A 708, A22), with a local water fit (+-0.5 um) subtracted around every line.  Every H I line is measured;
@@ -680,6 +683,8 @@ def accretion_cmd(outdirs: List[str] = typer.Argument(None, help="finished fit f
                     cfg.target.extraction.ra, cfg.target.extraction.dec = row["extract_ra"], row["extract_dec"]
                 if water:
                     cfg.fit.accretion.water = water
+                if continuum_variants is not None:
+                    cfg.fit.accretion.continuum_variants = continuum_variants
                 spec = prepare(cfg)
                 outdir = cfg.output_dir(spec.name)
                 t, r = AC.run_spectrum(cfg, spec, outdir=outdir, say=lambda m: None)
@@ -706,7 +711,8 @@ def accretion_cmd(outdirs: List[str] = typer.Argument(None, help="finished fit f
 
     def one(d):
         try:
-            t, r = AC.run_outdir(d, say=lambda m: None) if not water else _acc_with_water(d, water)
+            t, r = AC.run_outdir(d, say=lambda m: None) if (not water and continuum_variants is None) \
+                else _acc_with_water(d, water, continuum_variants)
             return d, AC.describe(r), None
         except Exception as e:
             return d, "", repr(e)
@@ -719,12 +725,15 @@ def accretion_cmd(outdirs: List[str] = typer.Argument(None, help="finished fit f
         rprint(f"{len(t)} rows -> {os.path.join(root, 'accretion_survey.csv')}" if len(t) else "no accretion.json written")
 
 
-def _acc_with_water(d, water):
+def _acc_with_water(d, water, continuum_variants=None):
     from . import accretion as AC
     from .config import ProjectConfig
     from .data import load_csv
     cfg = ProjectConfig.load(os.path.join(d, "config.yaml"))
+    water = water or cfg.fit.accretion.water
     cfg.fit.accretion.water = water
+    if continuum_variants is not None:
+        cfg.fit.accretion.continuum_variants = continuum_variants
     spec = load_csv(os.path.join(d, "prep.csv"))
     gm = None
     if water == "global":
