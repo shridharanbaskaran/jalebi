@@ -110,8 +110,17 @@ def main(argv=None):
         tab["plan_class"] = "all"
     tab.to_csv(os.path.join(out, "detections.csv"), index=False)
     # rates: a molecule counts once per disk (any of its units detected)
+    # denominators = every fitted disk of the class, not only the disks where auto-detect put the molecule in the
+    # fit (a molecule that was never fitted in a disk is a non-detection there)
     per = tab.groupby(["folder", "plan_class", "molecule"]).detected.any().reset_index()
-    rates = per.groupby(["molecule", "plan_class"]).agg(disks=("folder", "nunique"), detected=("detected", "sum")).reset_index()
+    per = per[per.detected].groupby(["molecule", "plan_class"]).folder.nunique().rename("detected")
+    n_class = tab.groupby("plan_class").folder.nunique().rename("disks")
+    rates = per.reset_index().merge(n_class.reset_index(), on="plan_class", how="right")
+    full = pd.MultiIndex.from_product([sorted(tab.molecule.dropna().unique()), n_class.index], names=["molecule", "plan_class"])
+    rates = (rates.dropna(subset=["molecule"]).set_index(["molecule", "plan_class"]).reindex(full)
+             .assign(disks=lambda r: n_class.reindex(r.index.get_level_values(1)).to_numpy()).fillna({"detected": 0})
+             .reset_index())
+    rates["detected"] = rates.detected.astype(int)
     rates["percent"] = (100 * rates.detected / rates.disks).round(1)
     rates.to_csv(os.path.join(out, "rates.csv"), index=False)
 
