@@ -33,6 +33,12 @@ class TargetConfig(BaseModel):
     path: str = ""                      # folder of x1d/s3d files, one FITS file, or a CSV
     distance_pc: float = 140.0
     rv_kms: float = 0.0                 # heliocentric radial velocity to remove
+    # 0.24: stellar parameters for the accretion module (jalebi.accretion); null = unknown
+    av: float | None = None             # visual extinction (mag) for dereddening the H I line fluxes
+    mstar: float | None = None          # stellar mass (Msun)
+    rstar: float | None = None          # stellar radius (Rsun); derived from lstar + teff when null
+    lstar: float | None = None          # stellar luminosity (Lsun)
+    teff: float | None = None           # effective temperature (K)
     spike_filter: bool = True
     extraction: ExtractionConfig = ExtractionConfig()
 
@@ -62,7 +68,13 @@ class ContinuumConfig(BaseModel):
     min_window: int = 61
     anchors: list[float] = Field(default_factory=list)
     anchor_width: int = 3
-    refine_iterations: int = 0          # model-aware refinement passes after the first fit
+    refine_iterations: int = 0          # model-aware refinement passes after the first fit (maximum)
+    refine_tol: float = 0.0             # 0.24: stop refining once chi2 improves by less than this fraction (0 = never)
+    # sgclip (0.24): iterative one-sided sigma clipping + Savitzky-Golay (sg_window, sg_order above)
+    clip_sigma: float = 3.0
+    clip_iter: int = 10
+    clip_mode: str = "auto"             # emission | absorption | auto
+    intervals: list[dict] = Field(default_factory=list)   # [{range: [lo, hi], mode: emission|absorption|auto}]
 
 
 class MaskConfig(BaseModel):
@@ -295,6 +307,51 @@ class ShiftNullConfig(BaseModel):
     save_curves: bool = True            # shift_null_curves.csv (z per shift, per unit)
 
 
+class ContinuumRobustnessConfig(BaseModel):
+    """0.24: refit under ~20 continuum variants and score every molecule with the shift-null S
+    (jalebi.robustness, docs/ROBUSTNESS.md).  Post-processing only: not part of the resume key."""
+    enabled: bool = True
+    n_perturb: int = 13                 # per-band offset + tilt variants of the fit continuum
+    estimators: list[str] = ["irsqr_q0.05", "irsqr_q0.2", "irsqr_k15", "irsqr_k40", "median_sg", "sgclip"]
+    sigma_floor: float = 0.005          # per-band perturbation scale = estimator spread, clipped to [floor, cap]
+    sigma_cap: float = 0.05
+    tilt_ratio: float = 0.5             # tilt sigma relative to the offset sigma
+    refit: str = "local"                # local (Nelder-Mead from the best fit) | de (short DE per variant)
+    max_evals: int = 3000
+    de_maxiter: int = 40
+    de_popsize: int = 8
+    threshold: float = 5.0              # S for a detection (as fit.shift_null.threshold)
+    robust_frac: float = 0.9            # robust: detected at the fit continuum and in >= this share of variants
+    absent_frac: float = 0.1            # not detected: not at the fit continuum and in <= this share
+    seed: int = 0
+    save_plot: bool = True
+
+
+class AccretionConfig(BaseModel):
+    """0.24: accretion luminosity / rate from the mid-IR H I lines (jalebi.accretion; Shridharan et al. 2026,
+    A&A 708, A22) with a local water subtraction around every line.  Post-processing only (run-only)."""
+    enabled: bool = True
+    combine: list[str] = ["HI_9-6", "HI_8-6", "HI_10-7"]   # water-free lines for the combined L_acc
+    water: str = "local"                # local (slab fit within +-water_window_um) | global (the jalebi fit) | none
+    water_window_um: float = 0.5
+    water_T: list[float] = [200.0, 2000.0, 37]       # grid lo, hi, n
+    water_logN: list[float] = [12.0, 22.0, 41]
+    water_mask_dlam: float = 3.0        # H I lines masked by +- this many resolution elements in the water fit
+    cutout_dlam: float = 30.0           # cut-out width (resolution elements)
+    fit_dlam: float = 15.0              # Gaussian fitting half-window (resolution elements)
+    sigma_range: list[float] = [0.8, 2.0]            # Gaussian sigma bounds (resolution elements)
+    centre_dlam: float = 1.0            # centre within +- this many resolution elements
+    baseline: str = "linear"            # local continuum: linear (core-masked, clipped) | als (Shridharan+2026)
+    detect_rms: float = 10.0            # peak above this many times the RMS (Shridharan+2026)
+    min_snr: float = 3.0                # and integrated flux S/N
+    rin_over_rstar: float = 5.0         # Mdot = (1 - R*/R_in)^-1 L_acc R* / (G M*)  (1.25 for R_in = 5 R*)
+    extinction_law: str = "mcclure09"   # mcclure09 (needs extinction_table) | g23 (Gordon+2023, dust_extinction) | none
+    extinction_table: str | None = None   # McClure 2009 curve: csv with wave_um and alambda_over_av (or _over_ak)
+    n_mc: int = 2000
+    max_nup: int = 14                   # H I lines measured: n_up <= max_nup, n_low 4..11, inside the MIRI range
+    save_plot: bool = True
+
+
 class ReportConfig(BaseModel):
     """0.22: what the summary reports (report.*)."""
     co: str = "full"                    # full | NA_only: for CO report only log(N.A) (T and N are degenerate when
@@ -367,6 +424,8 @@ class FitConfig(BaseModel):
     corner_check: CornerCheckConfig = CornerCheckConfig()
     detection_prob: DetectionProbConfig = DetectionProbConfig()
     shift_null: ShiftNullConfig = ShiftNullConfig()
+    continuum_robustness: ContinuumRobustnessConfig = ContinuumRobustnessConfig()   # 0.24
+    accretion: AccretionConfig = AccretionConfig()                                  # 0.24
 
 
 class LineDataConfig(BaseModel):

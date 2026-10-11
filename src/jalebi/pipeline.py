@@ -25,7 +25,9 @@ def continuum_settings(cfg: ProjectConfig) -> ContinuumSettings:
                              median_window=c.median_window, median_percentile=c.median_percentile, sg_window=c.sg_window,
                              sg_order=c.sg_order, n_iter=c.n_iter, lam=c.lam, p=c.p, aspls_lam=c.aspls_lam, aspls_alpha=c.aspls_alpha, segment=c.segment,
                              overlap=c.overlap, percentile=c.percentile, min_window=c.min_window,
-                             anchors=list(c.anchors), anchor_width=c.anchor_width)
+                             anchors=list(c.anchors), anchor_width=c.anchor_width,
+                             clip_sigma=c.clip_sigma, clip_iter=c.clip_iter, clip_mode=c.clip_mode,
+                             intervals=[dict(iv) for iv in c.intervals])
 
 
 def prepare(cfg: ProjectConfig, spec: Spectrum | None = None, gas_model: np.ndarray | None = None) -> Spectrum:
@@ -124,6 +126,8 @@ class RunResult:
     checkpoint: object = None           # 0.22: jalebi.resume.Checkpoint of this run (stage files, key)
     corner: dict | None = None          # 0.22: jalebi.corner.corner_check of the final parameters
     shift_null: object = None           # 0.23: DataFrame of the shifted-template null test (jalebi.shift_null)
+    robustness: object = None           # 0.24: DataFrame of the continuum robustness stage (jalebi.robustness)
+    accretion: object = None            # 0.24: (per-line table, combined dict) of jalebi.accretion
 
     def say(self, msg):
         self.log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -546,6 +550,7 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
             run.say(f"  note: the fit reaches below {split} um but no water component emits there -- add an H2O_rovib "
                     f"component (or Tvib) if the nu2 band should be fitted")
     free_keys = [p.key for p in prob.free]
+    refine_done = False                                 # 0.24: continuum.refine_tol reached -> no further passes
     for it in range(cfg.continuum.refine_iterations + 1):
         if "grid" in stages and it == 0:
             g = ck.load("grid.json") if reading else None
@@ -569,6 +574,8 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
                 run_optimise_stage(run)
                 ck.save(name, rs.opt_payload(run.opt, prob, getattr(run.opt, "starts", None)))
                 run.say(f"[stage] de_pass{it + 1} done, checkpoint written")
+        if refine_done:
+            break
         if it < cfg.continuum.refine_iterations:
             # model-aware continuum refinement: subtract the gas model over the fit windows, re-estimate
             # the continuum with a central estimator, refit; keep it only if chi2 improves
@@ -581,6 +588,9 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
                 run.say(f"[stage] continuum refinement pass {it + 1} resumed from checkpoint ({'accepted' if accepted else 'rejected'})")
                 if not accepted:
                     break
+                cb, ca = float(c.get("chi2_before", np.nan)), float(c.get("chi2_after", np.nan))
+                if cfg.continuum.refine_tol > 0 and np.isfinite(cb) and cb > 0 and (cb - ca) / cb < cfg.continuum.refine_tol:
+                    refine_done = True
                 spec_new = spec.copy()
                 spec_new.continuum = np.asarray(c["continuum"], float)
                 spec_new.mask = np.asarray(c["mask"], bool) if "mask" in c else spec.mask
@@ -600,6 +610,9 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
             ck.save_arrays(cname, continuum=np.asarray(spec_new.continuum, float), mask=np.asarray(spec_new.mask, bool),
                            accepted=np.array(accepted), chi2_before=np.array(chi2_before), chi2_after=np.array(chi2_after))
             run.say(f"[stage] continuum refinement pass {it + 1} done, checkpoint written")
+            if accepted and cfg.continuum.refine_tol > 0 and (chi2_before - chi2_after) / max(chi2_before, 1e-300) < cfg.continuum.refine_tol:
+                refine_done = True
+                run.say(f"  chi2 improved by less than refine_tol={cfg.continuum.refine_tol:g}: last refinement pass")
             if accepted:
                 if cfg.fit.model_backend != "exact":       # the tables are certified for this spectrum's noise
                     prob_new = build_problem(cfg, spec_new, say=run.say)
@@ -628,7 +641,52 @@ def run_pipeline(cfg: ProjectConfig, spec: Spectrum | None = None, stages: list[
         save_results(run, outdir)
         if run.laplace is not None:
             save_laplace(run, outdir)
+        run_post_stages(run, outdir)
     return run
+
+
+def run_post_stages(run: RunResult, outdir: str | None):
+    """0.24 post-processing after the save step (run-only settings, never part of the resume key):
+    the H I accretion estimate (fit.accretion) and the continuum robustness stage (fit.continuum_robustness).
+    Failures are logged and never sink the fit."""
+    cfg = run.cfg
+    acc = getattr(cfg.fit, "accretion", None)
+    if acc is not None and acc.enabled:
+        try:
+            from . import accretion as AC
+            gm = None
+            if acc.water == "global" and run.theta is not None:
+                gm = global_model_fn(run.problem, run.theta)
+            table, res = AC.run_spectrum(cfg, run.spec, outdir=outdir, global_model=gm, say=run.say)
+            run.accretion = (table, res)
+        except Exception as e:  # pragma: no cover
+            run.say(f"  accretion failed: {e}")
+    rb = getattr(cfg.fit, "continuum_robustness", None)
+    if rb is not None and rb.enabled and run.theta is not None and run.spec.continuum is not None:
+        try:
+            from . import robustness as RB
+            post = run.mcmc.summary() if run.mcmc is not None else None
+            key = run.checkpoint.key if getattr(run, "checkpoint", None) is not None else ""
+            table, _ = RB.run(cfg, run.spec, run.problem, run.theta, outdir=outdir, posterior=post,
+                              stage_key=key, target=run.spec.name, say=run.say)
+            run.robustness = table
+        except Exception as e:  # pragma: no cover
+            run.say(f"  continuum robustness failed: {e}")
+
+
+def global_model_fn(prob: FitProblem, theta):
+    """callable(wave) -> the disk's own best-fit gas model (all components) on arbitrary pixels, for the
+    accretion module's water: global option."""
+    from .model import build_model
+    P, _ = prob.params_from_theta(theta)
+
+    def f(wave):
+        wave = np.asarray(wave, float)
+        m = build_model(prob.components, wave, prob.model.distance_pc, windows=[(float(wave.min()), float(wave.max()))],
+                        releases=getattr(prob.model, "releases", None), oversample=3,
+                        R_model=prob.model.R_model, R_scale=prob.model.R_scale)
+        return m.evaluate(P)
+    return f
 
 
 def save_results(run: RunResult, outdir: str):
@@ -791,10 +849,14 @@ def target_config(cfg: ProjectConfig, row) -> ProjectConfig:
     c = cfg.model_copy(deep=True)
     get = (lambda k: row.get(k)) if hasattr(row, "get") else (lambda k: getattr(row, k, None))
     c.target.name = str(get("name")); c.target.path = str(get("path"))
-    for key, attr in (("distance_pc", "distance_pc"), ("rv_kms", "rv_kms")):
+    for key, attr in (("distance_pc", "distance_pc"), ("rv_kms", "rv_kms"), ("av", "av"), ("mstar", "mstar"),
+                      ("rstar", "rstar"), ("lstar", "lstar"), ("teff", "teff")):      # 0.24: stellar parameters
         v = get(key)
-        if v is not None and not (isinstance(v, float) and pd.isna(v)):
-            setattr(c.target, attr, float(v))
+        try:
+            if v is not None and not pd.isna(v) and str(v).strip() != "":
+                setattr(c.target, attr, float(v))
+        except (TypeError, ValueError):
+            pass
     if not cfg.per_target_output():
         from .config import safe_name
         c.output = os.path.join(cfg.output, safe_name(c.target.name))
@@ -822,6 +884,17 @@ def catalogue_row(run: RunResult) -> dict:
     if sn is not None and len(sn):
         for r in sn.itertuples():
             row[f"{r.unit}_Sshift"] = r.S
+    rb = getattr(run, "robustness", None)                  # 0.24
+    if rb is not None and len(rb):
+        for r in rb.to_dict("records"):
+            u = r["unit"]
+            row[f"{u}_robust"] = r["class"]; row[f"{u}_frac"] = r["frac"]
+            for p in ("T", "logN", "logNA"):
+                row[f"{u}_{p}_syst"] = r.get(f"{p}_syst")
+    acc = getattr(run, "accretion", None)                  # 0.24
+    if acc is not None:
+        from .accretion import catalogue_columns
+        row.update(catalogue_columns(*acc))
     for key, d in (getattr(run, "corner", None) or {}).items():       # 0.22
         row[f"{key}_smooth_frac"] = d["smooth_fraction"]; row[f"{key}_pinned"] = d["n_pinned"]
         row[f"{key}_corner_flags"] = ",".join(d["flags"])

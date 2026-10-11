@@ -564,7 +564,7 @@ _SKIP = ("_reg", "_all_figs", "_cat", "servable", "_notify", "_add_feature_marks
 
 @act.traced("lte", skip=_SKIP, hot=_HOT)
 class JalebiApp:
-    TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Batch"]      # the tabs of the LTE slab-fit module
+    TAB_NAMES = ["Data", "Continuum", "Model", "Fit", "Results", "Accretion", "Batch"]   # the tabs of the LTE slab-fit module
 
     def __init__(self, data_root: str | None = None, config_path: str | None = None, start_tab: str = "data",
                  cube_path: str | None = None, start_module: str | None = None, rotdiag_config: str | None = None,
@@ -609,6 +609,7 @@ class JalebiApp:
         self._build_model_tab()
         self._build_fit_tab()
         self._build_results_tab()
+        self._build_accretion_tab()
         self._build_batch_tab()
         self._module_options = {"cube": dict(cube_path=cube_path), "rotdiag": dict(config_path=rotdiag_config),
                                 "source": dict(source_path=source_path)}
@@ -618,7 +619,8 @@ class JalebiApp:
         if not self.cfg.components:
             self.add_component(ComponentConfig(name="H2O_hot", molecule="H2O", logN=18.0, T=700.0, logR=-0.6), rebuild=False)
         self.tabs = pn.Tabs(("Data", self.data_tab), ("Continuum", self.cont_tab), ("Model", self.model_tab),
-                            ("Fit", self.fit_tab), ("Results", self.results_tab), ("Batch", self.batch_tab),
+                            ("Fit", self.fit_tab), ("Results", self.results_tab), ("Accretion", self.acc_tab),
+                            ("Batch", self.batch_tab),
                             sizing_mode="stretch_width", dynamic=False)
         low = [t.lower() for t in self.TAB_NAMES]
         from .modules import resolve_module
@@ -2532,13 +2534,114 @@ class JalebiApp:
             pn.state.notifications.error(f"corner failed: {ex}")
 
     # ------------------------------------------------------------------ Batch tab
+    # ------------------------------------------------------------------ accretion (0.24)
+    def _build_accretion_tab(self):
+        """H I lines -> L_acc, Mdot (jalebi.accretion; Shridharan et al. 2026, A&A 708, A22) on the current
+        spectrum, with a local water fit subtracted around every line."""
+        from .accretion import CALIBRATIONS
+        W = dict(sizing_mode="stretch_width")
+        t = self.cfg.target
+        self.acc_av = pn.widgets.FloatInput(name="A_V [mag]", value=t.av or 0.0, width=100)
+        self.acc_mstar = pn.widgets.FloatInput(name="M* [Msun]", value=t.mstar if t.mstar else None, width=100)
+        self.acc_rstar = pn.widgets.FloatInput(name="R* [Rsun]", value=t.rstar if t.rstar else None, width=100)
+        self.acc_lstar = pn.widgets.FloatInput(name="L* [Lsun]", value=t.lstar if t.lstar else None, width=100)
+        self.acc_teff = pn.widgets.FloatInput(name="Teff [K]", value=t.teff if t.teff else None, width=100)
+        a = self.cfg.fit.accretion
+        self.acc_water = pn.widgets.Select(name="water subtraction", options=["local", "global", "none"], value=a.water, width=150)
+        self.acc_window = pn.widgets.FloatInput(name="water window ± [µm]", value=a.water_window_um, step=0.05, width=140)
+        self.acc_combine = pn.widgets.MultiChoice(name="combined L_acc from", options=list(CALIBRATIONS), value=list(a.combine), **W)
+        self.acc_run = pn.widgets.Button(name="▶  Measure H I lines", button_type="primary", width=220)
+        self.acc_md = _html('<div class="sf-note">Load a spectrum (Data) and estimate its continuum, then measure. Every H I line in '
+                            'the MIRI range is fitted after a local LTE water fit (±0.5 µm, H I lines masked) is subtracted; the six '
+                            'calibrated lines give log L<sub>acc</sub> (Shridharan et al. 2026, A&amp;A 708, A22), the combined value uses '
+                            'the water-free lines; Ṁ = 1.25 L<sub>acc</sub> R*/(G M*).</div>', **W)
+        self.acc_summary = _html("", **W)
+        self.acc_table = pn.widgets.Tabulator(pd.DataFrame(), show_index=False, disabled=True, height=360, **W)
+        self.acc_fig = pn.pane.Matplotlib(None, dpi=75, tight=True, visible=False, sizing_mode="scale_width")
+        self.acc_download = pn.widgets.FileDownload(callback=lambda: io.BytesIO(self.acc_table.value.to_csv(index=False).encode()),
+                                                    filename="accretion.csv", label="⬇ accretion CSV", width=160)
+        self.acc_run.on_click(lambda e: self._accretion_run())
+        self.acc_tab = pn.Column(
+            _panel(self.acc_md,
+                   pn.Row(self.acc_av, self.acc_mstar, self.acc_rstar, self.acc_lstar, self.acc_teff),
+                   pn.Row(self.acc_water, self.acc_window), self.acc_combine,
+                   pn.Row(self.acc_run, self.acc_download), title="Accretion from H I lines"),
+            _panel(self.acc_summary, self.acc_table, title="Lines"),
+            _paper(self.acc_fig, "Every H I line: data after water subtraction (grey), local water (orange), Gaussian (blue)"),
+            **W)
+
+    def _acc_settings(self):
+        from .accretion import settings_from_config
+        cfg = self.current_config(light=True) if hasattr(self, "current_config") else self.cfg
+        s = settings_from_config(cfg)
+        s.water = self.acc_water.value
+        s.water_window_um = float(self.acc_window.value or 0.5)
+        s.combine = list(self.acc_combine.value)
+        return s
+
+    @staticmethod
+    def _num(v):
+        try:
+            v = float(v)
+            return v if np.isfinite(v) and v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    @_bokeh_safe
+    def _accretion_run(self):
+        from . import accretion as AC
+        spec = self.spec
+        if spec is None:
+            pn.state.notifications.warning("load a spectrum first (Data)"); return
+        if spec.continuum is None or not np.any(spec.continuum):
+            pn.state.notifications.warning("estimate the continuum first (Continuum)"); return
+        gm = None
+        if self.acc_water.value == "global":
+            if self.run is None or self.run.theta is None:
+                pn.state.notifications.warning("water: global needs a finished fit; using local"); self.acc_water.value = "local"
+            else:
+                from .pipeline import global_model_fn
+                gm = global_model_fn(self.run.problem, self.run.theta)
+        self.acc_run.disabled = True
+        self.acc_summary.object = '<div class="sf-note">measuring H I lines …</div>'
+        try:
+            cfg = self.cfg
+            table, res = AC.measure(spec, distance_pc=self.distance.value, av=self._num(self.acc_av.value) or 0.0,
+                                    mstar=self._num(self.acc_mstar.value), rstar=self._num(self.acc_rstar.value),
+                                    lstar=self._num(self.acc_lstar.value), teff=self._num(self.acc_teff.value),
+                                    settings=self._acc_settings(), R_model=cfg.R_model, R_scale=cfg.R_scale, global_model=gm)
+            self._acc_result = (table, res)
+            cols = [c for c in ("line", "wave", "detected", "snr", "flux_Wm2", "flux_err_Wm2", "water_frac", "water_T",
+                                "logLacc", "logLacc_err", "upper_limit", "logMdot", "in_combined", "note", "status") if c in table]
+            show = table[cols].copy()
+            for c in ("wave", "snr", "water_frac", "water_T", "logLacc", "logLacc_err", "logMdot"):
+                if c in show:
+                    show[c] = show[c].astype(float).round(3)
+            self.acc_table.value = show
+            md = res.get("logMdot", np.nan)
+            txt = AC.describe(res)
+            self.acc_summary.object = (f'<div class="sf-stage">{txt}<small>{res.get("n_HI_lines", 0)} water-free line(s); '
+                                       f'extinction {res.get("extinction_law", "none")}'
+                                       + ("" if np.isfinite(md) else "; give M* and R* (or L* and Teff) for Ṁ") + "</small></div>")
+            self.acc_fig.object = AC.plot(table, res, title=spec.name)
+            self.acc_fig.visible = True
+        except Exception as ex:
+            act.log("lte", "accretion failed: %s", ex, level=logging.ERROR, exc_info=True)
+            pn.state.notifications.error(f"accretion failed: {ex}")
+        finally:
+            self.acc_run.disabled = False
+
     def _build_batch_tab(self):
         W = dict(sizing_mode="stretch_width")
         self.batch_root = pn.widgets.TextInput(name="root folder", value=self.data_root, **W)
         self.batch_scan = pn.widgets.Button(name="Scan", width=90, margin=(22, 5, 5, 5))
-        self.batch_table = pn.widgets.Tabulator(pd.DataFrame(columns=["name", "path", "distance_pc", "rv_kms", "status"]),
-                                                selectable="checkbox", height=350, editors={"distance_pc": "number", "rv_kms": "number"},
+        self.batch_table = pn.widgets.Tabulator(pd.DataFrame(columns=self._batch_columns()),
+                                                selectable="checkbox", height=350,
+                                                editors={"distance_pc": "number", "rv_kms": "number", "av": "number",
+                                                         "mstar": "number", "rstar": "number"},
                                                 show_index=False, **W)
+        self.batch_table.on_edit(self._batch_edit)
+        self._acc_batch = {"running": False, "results": {}, "cb": None}
         self.batch_run = pn.widgets.Button(name="▶  Run selected with current config", button_type="primary", width=300)
         self.batch_stop = pn.widgets.Button(name="■  Stop", button_type="danger", width=90, disabled=True)
         self.batch_md = _html("", **W)
@@ -2564,8 +2667,91 @@ class JalebiApp:
             if os.path.isdir(d) and glob.glob(os.path.join(d, "*x1d.fits")):
                 rows.append({"name": os.path.basename(d), "path": d, "distance_pc": self.distance.value, "rv_kms": self.rv.value, "status": ""})
         act.info("lte", "batch: %d targets with x1d files under %s", len(rows), root)
-        self.batch_table.value = pd.DataFrame(rows, columns=["name", "path", "distance_pc", "rv_kms", "status"])
-        self.batch_md.object = f'<div class="sf-note">{len(rows)} targets</div>'
+        df = pd.DataFrame(rows)
+        for c in self._batch_columns():
+            if c not in df:
+                df[c] = np.nan if c not in ("status", "accretion") else ""
+        self.batch_table.value = df[self._batch_columns()]
+        self.batch_md.object = f'<div class="sf-note">{len(rows)} targets; estimating accretion from the H I lines in the background …</div>'
+        self._batch_accretion_start()
+
+    # 0.24: accretion columns of the Batch table (one per calibrated H I line + the combined value)
+    @staticmethod
+    def _batch_columns():
+        from .accretion import CALIBRATIONS
+        return (["name", "path", "distance_pc", "rv_kms", "av", "mstar", "rstar", "status"]
+                + [f"logLacc_{k}" for k in CALIBRATIONS] + ["logLacc", "logLacc_err", "logMdot", "accretion"])
+
+    def _batch_accretion_start(self):
+        """Estimate L_acc / Mdot for every scanned target in a background thread (spectrum + continuum only,
+        no slab fit) and fill the Batch columns as results arrive."""
+        st = self._acc_batch
+        if st["running"]:
+            return
+        df = self.batch_table.value.copy()
+        if df.empty:
+            return
+        cfg = self.current_config(light=True) if hasattr(self, "current_config") else self.cfg
+        st.update(running=True, results={}, todo=len(df))
+
+        def worker():
+            from . import accretion as AC
+            from .pipeline import prepare, target_config
+            for _, row in df.iterrows():
+                key = row["name"]
+                try:
+                    c = target_config(cfg, row)
+                    for k in ("av", "mstar", "rstar"):
+                        v = row.get(k)
+                        if v is not None and np.isfinite(float(v)):
+                            setattr(c.target, k, float(v))
+                    spec = prepare(c)
+                    t, r = AC.run_spectrum(c, spec, outdir=None, say=lambda m: None)
+                    st["results"][key] = {"cols": AC.catalogue_columns(t, r), "res": r, "status": "ok"}
+                except Exception as ex:
+                    st["results"][key] = {"cols": {}, "res": {}, "status": f"failed: {ex}"}
+            st["running"] = False
+
+        threading.Thread(target=act.thread_target(worker), daemon=True, name="jalebi-batch-accretion").start()
+        st["cb"] = pn.state.add_periodic_callback(self._batch_accretion_poll, period=2000)
+
+    @_bokeh_safe
+    def _batch_accretion_poll(self):
+        st = self._acc_batch
+        df = self.batch_table.value.copy()
+        for i, row in df.iterrows():
+            r = st["results"].get(row["name"])
+            if r is None:
+                continue
+            for c in self._batch_columns():
+                if c in r["cols"]:
+                    df.at[i, c] = r["cols"][c]
+            df.at[i, "accretion"] = r["status"] + (" (upper limit)" if r["cols"].get("logLacc_upper_limit") else "")
+            self._batch_recompute_mdot(df, i, r.get("res", {}))
+        self.batch_table.value = df
+        n = len(st["results"])
+        if not st["running"]:
+            if st.get("cb") is not None:
+                st["cb"].stop(); st["cb"] = None
+            self.batch_md.object = f'<div class="sf-note">{len(df)} targets; accretion estimated for {n}</div>'
+
+    def _batch_recompute_mdot(self, df, i, res):
+        """log Mdot from the row's log L_acc with the M*, R* typed into the table (no re-measurement)."""
+        from .accretion import log_mdot
+        lacc = df.at[i, "logLacc"] if "logLacc" in df else np.nan
+        ms, rs = self._num(df.at[i, "mstar"]), self._num(df.at[i, "rstar"])
+        rin = self.cfg.fit.accretion.rin_over_rstar
+        if lacc is not None and np.isfinite(float(lacc)) and ms and rs:
+            df.at[i, "logMdot"] = float(log_mdot(float(lacc), ms, rs, rin))
+
+    @_bokeh_safe
+    def _batch_edit(self, event):
+        if getattr(event, "column", None) in ("mstar", "rstar"):
+            df = self.batch_table.value.copy()
+            self._batch_recompute_mdot(df, event.row, {})
+            self.batch_table.value = df
+        elif getattr(event, "column", None) in ("av", "distance_pc"):
+            pn.state.notifications.info("A_V / distance changed: re-scan to re-measure the H I lines")
 
     def _batch_start(self):
         sel = self.batch_table.selected_dataframe

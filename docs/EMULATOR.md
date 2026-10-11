@@ -263,7 +263,10 @@ jitter of B_ν; now 1e-4 K) and the cell-centre rule refined both axes.
 
 At fit time `spot_check` draws ~200 random (T, log N) per unit (20 temperatures × 10 columns, one opacity product
 per T) and compares the projected table with the exact model on the disk's pixels and σ, at the disk's f_ref and
-a_max. A unit above 0.1σ or 0.1 % falls back to the exact model, with a warning, a log line and
+a_max. With `fallback: relative` (the default since 0.22.1) a unit falls back to the exact model only when the
+emulator's error exceeds what the fit's own exact model at `fit.oversample` would make (the triangle inequality on
+the same random points), i.e. only when exact would be the more accurate choice; `absolute` restores the 0.21 rule
+(any miss of 0.1σ or 0.1 % falls back) and `never` never falls back. A fallback comes with a warning, a log line and
 `diagnostics.json["emulator"]["fallback"]`; the check's numbers and time go to `["spot_check"]`. The spot check
 costs 4 s for the FZ_Tau_quick set and 27 s for the 8 full-range units (the exact model at the table's oversample is most of it).
 

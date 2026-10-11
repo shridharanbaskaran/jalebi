@@ -231,6 +231,20 @@ class FitProblem:
                     th.append(base.get(p.name, 0.5 * (p.lo + p.hi)))
         return np.clip(np.array(th, float), self.lo + 1e-6 * (self.hi - self.lo), self.hi - 1e-6 * (self.hi - self.lo))
 
+    def with_data(self, y) -> "FitProblem":
+        """0.24: a shallow copy with new continuum-subtracted data on the same pixels (a continuum variant): the
+        model, its emulator tables, the LSF operator, noise and windows are shared, only `y` changes."""
+        import copy
+        y = np.asarray(y, float)
+        if y.shape != np.shape(self.y):
+            raise ValueError(f"with_data: {y.shape} values for {np.shape(self.y)} fit pixels")
+        p = copy.copy(self)
+        p.y = y
+        for attr in ("_lin", "_linear", "_linear_problem"):        # cached linear solvers hold the old data
+            if hasattr(p, attr):
+                setattr(p, attr, None)
+        return p
+
     def params_from_theta(self, theta) -> tuple[dict[str, dict], float]:
         """Component parameter dict (for SlabModel.evaluate) and the noise scale."""
         P = {k: dict(v) for k, v in self._base.items()}

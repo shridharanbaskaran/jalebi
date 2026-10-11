@@ -32,7 +32,7 @@ problem; the fit log lists the removed parameters and every area that stays in t
 | area in `fixed:` | — | not a parameter: its flux is subtracted at the fixed value |
 | area with a Gaussian `priors:` entry | kept in the sampler | the prior would be ignored by the linear solve |
 | noise scale `log_s` | **no** (but see below) | multiplies every σ; sampled |
-| per-sub-band continuum offsets | **none exist** | the continuum is estimated and subtracted before the fit (`pipeline.prepare`); the likelihood has no offset terms, so there is nothing to remove. (If offsets are added later, they are linear and would be extra columns of the same solve.) |
+| per-sub-band continuum offsets / spline | optional since 0.22 (`fit.continuum_fit: offset | spline`) | linear coefficients with Gaussian priors, solved jointly with the areas: extra columns of the same solve (profile: penalised BVLS; marginalise: block Gram matrix, cached since 0.22.2); `none` (default) has no such terms |
 
 ## profile (DuCKLinG-style)
 

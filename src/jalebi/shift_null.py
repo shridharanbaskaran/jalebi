@@ -197,12 +197,37 @@ def template_bank(prob, P: dict, unit: str, lead: str, s: ShiftNullSettings) -> 
 
 
 # ------------------------------------------------------------------------------------------------ main
-def shift_null(prob, theta, settings: ShiftNullSettings | None = None, target: str = "") -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(table, curves) for every independent unit of the problem at `theta` (see the module docstring)."""
+def null_cache(prob, theta, settings: ShiftNullSettings | None = None) -> dict:
+    """Everything of the test that does not depend on the data: the shift plans and, per unit, the high-passed
+    template bank built at `theta` (0.24: the continuum-robustness stage scores every continuum variant against
+    the bank of the main fit, so a variant costs one model call instead of a bank of them)."""
     s = settings or ShiftNullSettings()
-    P, log_s = prob.params_from_theta(theta)
+    P, _ = prob.params_from_theta(theta)
     wave = np.asarray(prob.wave, float)
     seg = segment_ids(wave)
+    vs = np.arange(s.v_min_kms, s.v_max_kms + 1e-6, s.step_kms)
+    vs = np.concatenate([-vs[::-1], vs])
+    plans = [shift_plan(wave, v, seg) for v in vs]
+    _, flux = unit_flux_folded(prob.model, P)
+    banks = {}
+    for unit, lead in prob.all_units().items():
+        tu = flux.get(unit)
+        if tu is None:
+            continue
+        bank = template_bank(prob, P, unit, lead, s) or [tu]
+        banks[unit] = [highpass(wave, b, s.highpass_um, seg) for b in bank]
+    return {"settings": s, "wave": wave, "seg": seg, "vs": vs, "plans": plans, "banks": banks}
+
+
+def shift_null(prob, theta, settings: ShiftNullSettings | None = None, target: str = "",
+               cache: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(table, curves) for every independent unit of the problem at `theta` (see the module docstring).  With a
+    `cache` from null_cache (possibly built at another theta / continuum), its template banks are reused."""
+    s = settings or (cache["settings"] if cache is not None else ShiftNullSettings())
+    if cache is None:
+        cache = null_cache(prob, theta, s)
+    P, log_s = prob.params_from_theta(theta)
+    wave, seg, vs, plans = cache["wave"], cache["seg"], cache["vs"], cache["plans"]
     total, flux = unit_flux_folded(prob.model, P)
     corr = prob.continuum_solution(theta, total)[1] if getattr(prob, "cont", None) is not None and prob.cont.n else 0.0
     r = np.asarray(prob.y, float) - corr - total                    # best-fit residual, no unit signal
@@ -210,16 +235,12 @@ def shift_null(prob, theta, settings: ShiftNullSettings | None = None, target: s
     w = np.asarray(prob.weights, float) / (np.asarray(prob.sigma, float) ** 2 * s2)
     w = np.where(np.isfinite(w), w, 0.0)
     r_hp = highpass(wave, np.nan_to_num(r), s.highpass_um, seg)
-    vs = np.arange(s.v_min_kms, s.v_max_kms + 1e-6, s.step_kms)
-    vs = np.concatenate([-vs[::-1], vs])
-    plans = [shift_plan(wave, v, seg) for v in vs]
     rows, curves = [], []
     for unit, lead in prob.all_units().items():
         tu = flux.get(unit)
-        if tu is None:
+        if tu is None or unit not in cache["banks"]:
             continue
-        bank = template_bank(prob, P, unit, lead, s) or [tu]
-        bank_hp = [highpass(wave, b, s.highpass_um, seg) for b in bank]
+        bank_hp = cache["banks"][unit]
         tu_hp = highpass(wave, tu, s.highpass_um, seg)
         sig = r_hp + tu_hp                                           # residual + the unit's own fitted signal
         z0s = [_match(b, sig, w) for b in bank_hp]

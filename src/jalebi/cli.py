@@ -598,6 +598,143 @@ def detect_prob(config: str, target: Optional[str] = typer.Option(None, help=_TA
     rprint(t[cols].to_string(index=False))
 
 
+@app.command("robustness")
+def robustness_cmd(outdirs: List[str] = typer.Argument(..., help="finished fit folder(s), or one results root with --survey"),
+                   survey: bool = typer.Option(False, "--survey", help="every <ROOT>/*/ with a best_fit.json; merged into "
+                                               "<ROOT>/continuum_robustness_survey.csv"),
+                   workers: int = typer.Option(1, "--workers", help="parallel folders"),
+                   force: bool = typer.Option(False, "--force", help="redo folders that already have continuum_robustness.csv"),
+                   backend: Optional[str] = typer.Option(None, "--backend", help="exact | emulator (overrides fit.model_backend)"),
+                   refit: Optional[str] = typer.Option(None, "--refit", help="local | de")):
+    """0.24: continuum robustness of finished fits (jalebi.robustness, docs/ROBUSTNESS.md).
+
+    Each fit is refitted under ~20 continuum variants (estimators + per-band offsets/tilts) and every molecule is
+    scored with the shift-null S: robust / continuum-dependent / not detected, plus the continuum systematic on
+    T, log N, log NA.  Writes continuum_robustness.csv, continuum_variants.csv/.npz/.png into each folder."""
+    import glob
+    from joblib import Parallel, delayed
+    from . import robustness as RB
+    if survey:
+        if len(outdirs) != 1:
+            raise typer.BadParameter("--survey takes one results root")
+        root = outdirs[0]
+        dirs = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "best_fit.json")))
+    else:
+        root, dirs = None, list(outdirs)
+    todo = [d for d in dirs if force or not os.path.exists(os.path.join(d, "continuum_robustness.csv"))]
+    rprint(f"robustness: {len(todo)} of {len(dirs)} folder(s) to do")
+
+    def one(d):
+        try:
+            from .config import ProjectConfig
+            st = RB.settings_from_config(ProjectConfig.load(os.path.join(d, "config.yaml")))
+            if refit:
+                st.refit = refit
+            t = RB.run_outdir(d, settings=st, backend=backend, say=lambda m: None)
+            return d, RB.describe(t), None
+        except Exception as e:
+            return d, "", repr(e)
+
+    res = Parallel(n_jobs=max(1, workers))(delayed(one)(d) for d in todo) if workers > 1 else [one(d) for d in todo]
+    for d, txt, err in res:
+        rprint(f"  {os.path.basename(os.path.normpath(d))}: " + (f"[red]failed[/red] {err}" if err else txt))
+    if root:
+        t = RB.survey_table(root)
+        if len(t):
+            rprint(f"{len(t)} rows -> {os.path.join(root, 'continuum_robustness_survey.csv')}")
+            rprint(t.groupby(["molecule", "class"]).size().unstack(fill_value=0).to_string())
+
+
+@app.command("accretion")
+def accretion_cmd(outdirs: List[str] = typer.Argument(None, help="finished fit folder(s) (prep.csv + config.yaml), "
+                                                       "or one results root with --survey"),
+                  survey: bool = typer.Option(False, "--survey", help="every <ROOT>/*/ with a prep.csv; merged into "
+                                              "<ROOT>/accretion_survey.csv"),
+                  targets: Optional[str] = typer.Option(None, "--targets", help="targets csv (name, path, distance_pc, "
+                                                         "av, mstar, rstar, lstar, teff, ...): run on the spectra directly"),
+                  config: Optional[str] = typer.Option(None, "--config", "-c", help="config for --targets (default: built-in)"),
+                  workers: int = typer.Option(1, "--workers"),
+                  water: Optional[str] = typer.Option(None, "--water", help="local | global | none"),
+                  out: Optional[str] = typer.Option(None, "--out", help="csv of the merged results (targets mode)")):
+    """0.24: accretion luminosity and rate from the mid-IR H I lines (jalebi.accretion; Shridharan et al. 2026,
+    A&A 708, A22), with a local water fit (+-0.5 um) subtracted around every line.  Every H I line is measured;
+    log L_acc per calibrated line and combined over the water-free lines (9-6), (8-6), (10-7);
+    Mdot = 1.25 L_acc R* / (G M*).  Writes accretion.csv / .json / .png."""
+    import glob
+    import pandas as pd
+    from joblib import Parallel, delayed
+    from . import accretion as AC
+    from .config import ProjectConfig
+    if targets:
+        base = ProjectConfig.load(config) if config else ProjectConfig()
+        tab = pd.read_csv(targets)
+
+        def one_t(row):
+            try:
+                from .pipeline import prepare
+                cfg = base.model_copy(deep=True)
+                for k, v in row.items():
+                    if k in type(cfg.target).model_fields and k != "extraction" and pd.notna(v):
+                        setattr(cfg.target, k, v)
+                if pd.notna(row.get("extract_ra", None)) and pd.notna(row.get("extract_dec", None)):
+                    cfg.target.extraction.ra, cfg.target.extraction.dec = row["extract_ra"], row["extract_dec"]
+                if water:
+                    cfg.fit.accretion.water = water
+                spec = prepare(cfg)
+                outdir = cfg.output_dir(spec.name)
+                t, r = AC.run_spectrum(cfg, spec, outdir=outdir, say=lambda m: None)
+                return {"name": row.get("name"), **AC.catalogue_columns(t, r)}, None
+            except Exception as e:
+                return {"name": row.get("name")}, repr(e)
+
+        rows = Parallel(n_jobs=max(1, workers))(delayed(one_t)(r) for _, r in tab.iterrows()) if workers > 1 \
+            else [one_t(r) for _, r in tab.iterrows()]
+        df = pd.DataFrame([r for r, _ in rows])
+        for (r, e) in rows:
+            rprint(f"  {r.get('name')}: " + (f"[red]failed[/red] {e}" if e else f"log Lacc {r.get('logLacc', float('nan')):.2f}"))
+        dest = out or os.path.splitext(targets)[0] + "_accretion.csv"
+        df.to_csv(dest, index=False)
+        rprint(f"{len(df)} rows -> {dest}")
+        return
+    if not outdirs:
+        raise typer.BadParameter("give fit folder(s), a root with --survey, or --targets")
+    if survey:
+        root = outdirs[0]
+        dirs = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "prep.csv")))
+    else:
+        root, dirs = None, list(outdirs)
+
+    def one(d):
+        try:
+            t, r = AC.run_outdir(d, say=lambda m: None) if not water else _acc_with_water(d, water)
+            return d, AC.describe(r), None
+        except Exception as e:
+            return d, "", repr(e)
+
+    res = Parallel(n_jobs=max(1, workers))(delayed(one)(d) for d in dirs) if workers > 1 else [one(d) for d in dirs]
+    for d, txt, err in res:
+        rprint(f"  {os.path.basename(os.path.normpath(d))}: " + (f"[red]failed[/red] {err}" if err else txt))
+    if root:
+        t = AC.survey_table(root)
+        rprint(f"{len(t)} rows -> {os.path.join(root, 'accretion_survey.csv')}" if len(t) else "no accretion.json written")
+
+
+def _acc_with_water(d, water):
+    from . import accretion as AC
+    from .config import ProjectConfig
+    from .data import load_csv
+    cfg = ProjectConfig.load(os.path.join(d, "config.yaml"))
+    cfg.fit.accretion.water = water
+    spec = load_csv(os.path.join(d, "prep.csv"))
+    gm = None
+    if water == "global":
+        from .pipeline import global_model_fn
+        from .shift_null import problem_from_outdir
+        _, prob, theta, _ = problem_from_outdir(d)
+        gm = global_model_fn(prob, theta)
+    return AC.run_spectrum(cfg, spec, outdir=d, global_model=gm, say=lambda m: None)
+
+
 @app.command("shift-null")
 def shift_null_cmd(outdirs: List[str] = typer.Argument(..., help="finished fit folder(s) (config.yaml + best_fit.json), "
                                                          "or one results root with --survey"),

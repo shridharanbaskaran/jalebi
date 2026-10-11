@@ -46,6 +46,20 @@ RUN_ONLY_KEYS = {
     ("linedata", "data_dir"),
     ("report",),
     ("fit", "shift_null"),          # 0.23: post-processing only
+    ("fit", "continuum_robustness"),    # 0.24: post-processing only
+    ("fit", "accretion"),               # 0.24: post-processing only
+    ("target", "av"), ("target", "mstar"), ("target", "rstar"), ("target", "lstar"), ("target", "teff"),   # 0.24
+}
+
+
+# Keys added after 0.23 that change the fit only when set away from their default: at the default they are left
+# out of the key, so checkpoints written by 0.22/0.23 (e.g. the survey_0.22 chains) stay valid under 0.24.
+DEFAULT_OMITTED_KEYS = {
+    ("continuum", "refine_tol"): 0.0,
+    ("continuum", "clip_sigma"): 3.0,
+    ("continuum", "clip_iter"): 10,
+    ("continuum", "clip_mode"): "auto",
+    ("continuum", "intervals"): [],
 }
 
 
@@ -54,6 +68,8 @@ def _strip(d: dict, path: tuple = ()) -> dict:
     for k, v in d.items():
         p = path + (k,)
         if p in RUN_ONLY_KEYS:
+            continue
+        if p in DEFAULT_OMITTED_KEYS and v == DEFAULT_OMITTED_KEYS[p]:
             continue
         out[k] = _strip(v, p) if isinstance(v, dict) else v
     return out

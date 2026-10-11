@@ -102,6 +102,11 @@ class ContinuumSettings:
     # spline (manual anchors)
     anchors: list = field(default_factory=list)   # wavelengths (micron)
     anchor_width: int = 3           # pixels averaged around each anchor
+    # sgclip (0.24; ctool-like: iterative one-sided sigma clipping + Savitzky-Golay, Zhang+2026 / Pontoppidan+2026)
+    clip_sigma: float = 3.0         # clip pixels this many robust sigma from the smooth baseline (one-sided)
+    clip_iter: int = 10             # maximum clip / smooth iterations
+    clip_mode: str = "auto"         # emission | absorption | auto (per interval, from the residual skewness)
+    intervals: list = field(default_factory=list)   # [{range: [lo, hi], mode: emission|absorption|auto}, ...]
     # banzatti
     banzatti_file: str = os.path.join(DATA_FILES, "cont_ranges_Banzatti+2025.csv")
 
@@ -111,7 +116,7 @@ class ContinuumSettings:
         return d
 
 
-METHODS = ["irsqr", "median_sg", "asls", "aspls", "convex_hull", "rolling_min", "spline", "banzatti", "none", "given"]
+METHODS = ["irsqr", "median_sg", "asls", "aspls", "convex_hull", "rolling_min", "spline", "banzatti", "sgclip", "none", "given"]
 
 
 # ------------------------------------------------------------------------------------
@@ -282,8 +287,71 @@ def cont_banzatti(wave, flux, use, s: ContinuumSettings):
     return _pchip_clamped(np.asarray(xs)[o], np.asarray(ys)[o])(wave)
 
 
+def _sgclip_interval(f: np.ndarray, sw: int, order: int, clip: float, n_iter: int, mode: str) -> tuple[np.ndarray, str]:
+    """One interval of the sgclip estimator: Savitzky-Golay baseline, clip the outliers on one side (lines),
+    replace them by the baseline, repeat.  Returns (baseline, mode used)."""
+    work = f.copy()
+    sw = min(sw, len(f) - 1 if (len(f) - 1) % 2 else len(f) - 2)
+    if sw <= order + 1:
+        return np.full_like(f, np.nanmedian(f)), mode
+    base = savgol_filter(work, sw, order, mode="nearest")
+    used = mode
+    if mode == "auto":
+        r = f - base
+        med = np.median(r)
+        sig = 1.4826 * np.median(np.abs(r - med)) or np.std(r) or 1.0
+        skew = float(np.mean(((r - med) / sig) ** 3))
+        used = "emission" if skew >= 0 else "absorption"
+    keep = np.ones(len(f), bool)
+    for _ in range(max(n_iter, 1)):
+        base = savgol_filter(work, sw, order, mode="nearest")
+        r = f - base
+        rk = r[keep]
+        med = np.median(rk)
+        sig = 1.4826 * np.median(np.abs(rk - med))
+        if not np.isfinite(sig) or sig <= 0:
+            break
+        new = (r < clip * sig) if used == "emission" else (r > -clip * sig)
+        if np.array_equal(new, keep):
+            break
+        keep = new
+        work = np.where(keep, f, base)
+    return savgol_filter(work, sw, order, mode="nearest"), used
+
+
+def cont_sgclip(wave, flux, use, s: ContinuumSettings):
+    """Iterative one-sided sigma clipping + Savitzky-Golay smoothing (0.24), the approach of the JDISC `ctool`
+    (Pontoppidan et al. 2026; Zhang et al. 2026): emission-dominated intervals clip positive outliers, absorption-
+    dominated ones negative outliers.  Intervals come from `s.intervals` ([{range: [lo, hi], mode}]); the rest of
+    the band is one interval with `s.clip_mode` (auto = from the sign of the residual skewness)."""
+    f = _fill(wave, flux, use)
+    sw = s.sg_window if s.sg_window % 2 else s.sg_window + 1
+    out = np.full_like(f, np.nan)
+    todo = np.ones(len(f), bool)
+    for iv in s.intervals or []:
+        lo, hi = (iv.get("range") if isinstance(iv, dict) else iv[:2])
+        mode = (iv.get("mode", "auto") if isinstance(iv, dict) else (iv[2] if len(iv) > 2 else "auto"))
+        m = (wave >= lo) & (wave <= hi) & todo
+        if m.sum() < max(sw // 2, 10):
+            continue
+        idx = np.flatnonzero(m)
+        out[idx], _ = _sgclip_interval(f[idx], sw, s.sg_order, s.clip_sigma, s.clip_iter, mode)
+        todo[idx] = False
+    if todo.any():
+        idx = np.flatnonzero(todo)
+        # contiguous runs of the remaining pixels
+        runs = np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1)
+        for r in runs:
+            if len(r) < 10:
+                out[r] = np.nanmedian(f[r])
+                continue
+            out[r], _ = _sgclip_interval(f[r], sw, s.sg_order, s.clip_sigma, s.clip_iter, s.clip_mode)
+    return out
+
+
 ESTIMATORS = {"irsqr": cont_irsqr, "median_sg": cont_median_sg, "asls": cont_asls, "aspls": cont_aspls, "convex_hull": cont_convex_hull,
-              "rolling_min": cont_rolling_min, "spline": cont_spline, "banzatti": cont_banzatti}
+              "rolling_min": cont_rolling_min, "spline": cont_spline, "banzatti": cont_banzatti,
+              "sgclip": cont_sgclip}
 
 
 # ------------------------------------------------------------------------------------

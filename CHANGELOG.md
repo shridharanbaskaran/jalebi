@@ -3,6 +3,50 @@
 All notable changes to JALEBI. The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [0.24.0] — 2026-10-11 — continuum robustness, H I accretion, sgclip continuum
+
+### Added
+- **Continuum robustness stage** (`jalebi.robustness`, `fit.continuum_robustness`, on by default; docs/ROBUSTNESS.md;
+  idea and flagging rule by B. Shridharan).
+  - Every fit is refitted under about 20 continua:
+    - the fit continuum;
+    - 6 estimator variants (IRSQR q 0.05/0.2, knots 15/40, median_sg, sgclip);
+    - 13 per-sub-band offset + tilt perturbations, scaled by the disk's own estimator spread (0.5–5 %).
+  - Each refit is local from the best fit (or a short DE with `refit: de`). Every molecule is scored with the
+    shift-null S against the main fit's template bank (`shift_null.null_cache`).
+  - Classes: robust (detected and in ≥ 90 % of variants), continuum-dependent, not detected (≤ 10 %).
+  - σ_cont on T, log N, log NA, flagged continuum-limited when σ_cont > σ_post.
+  - Files: continuum_robustness.csv, continuum_variants.csv/.npz/.png, robustness.json (per-variant
+    checkpoint); catalogue `<unit>_robust`, `_frac`, `_<p>_syst`.
+  - `jalebi robustness RESULTS --survey` runs it on finished fits.
+- **Accretion from the mid-IR H I lines** (`jalebi.accretion`, `fit.accretion`, on by default; docs/ACCRETION.md),
+  following Shridharan et al. 2026, A&A 708, A22.
+  - Every H I line in the spectrum is measured after a local LTE water fit (±0.5 µm, H I lines masked) is
+    subtracted, then a Gaussian on a core-masked linear local continuum.
+  - Each of the 6 calibrated lines gives log L_acc (A&A Table 1 coefficients, Monte Carlo errors) and log Ṁ.
+  - The combined value is a weighted mean over the water-free (9–6), (8–6), (10–7);
+    Ṁ = 1.25 L_acc R★/(G M★).
+  - Files: accretion.csv/.json/.png; catalogue columns `logLacc`, `logMdot`, `logLacc_<line>`, `F_<line>`, ...
+  - `jalebi accretion` on fit folders, `--survey` roots, or `--targets` tables.
+- **App:**
+  - new **Accretion** tab;
+  - the **Batch** tab estimates L_acc / Ṁ for every scanned target in the background (one column per
+    calibrated line plus the combined value; editing M★ / R★ recomputes Ṁ);
+  - A_V, M★, R★ columns.
+- **`continuum.method: sgclip`:** iterative one-sided sigma clipping + Savitzky–Golay with an emission /
+  absorption / auto mode per interval (`continuum.intervals`), after the JDISC `ctool` (Zhang+2026).
+- **`continuum.refine_tol`:** stop model-aware refinement once χ² improves by less than this fraction.
+- **`target.av` / `mstar` / `rstar` / `lstar` / `teff`:** read from target tables by `target_config`.
+- `FitProblem.with_data`, `pipeline.run_post_stages`, `pipeline.global_model_fn`.
+
+### Changed
+- `shift_null.shift_null(..., cache=)` accepts a precomputed template bank (identical results without one).
+- `runs/shift_null_calibrate.py`: detection rates over every disk of a class (was: only the disks where the
+  molecule was fitted).
+- Resume key: continuum keys added in 0.24 are left out at their defaults, so 0.22/0.23 checkpoints (the
+  survey_0.22 chains) stay valid; the new post-processing and stellar-parameter keys are run-only.
+- Docs: EMULATOR.md (0.22.1 fallback rule), LINEAR.md (continuum columns), RESUME.md (run-only keys).
+
 ## [0.23.2] — 2026-10-10 — area draws
 
 ### Fixed

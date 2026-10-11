@@ -28,7 +28,10 @@ Every checkpoint carries a key: a SHA-256 of
   (not the bytes — cubes are large);
 * the config with the run-only keys removed: `output`, `fit.resume`, `fit.mcmc.processes`, `fit.mcmc.checkpoint`,
   `fit.mcmc.nsteps`, `fit.optimise.workers`, `fit.grid.n_jobs`, `fit.dynesty.processes` / `.checkpoint`,
-  `fit.emulator.cache_dir` / `.read_only` / `.rebuild` / `.spot_check`, `linedata.data_dir`, `report`;
+  `fit.emulator.cache_dir` / `.read_only` / `.rebuild` / `.spot_check`, `linedata.data_dir`, `report`,
+  `fit.shift_null` (0.23), `fit.continuum_robustness`, `fit.accretion`, `target.av` / `.mstar` / `.rstar` /
+  `.lstar` / `.teff` (0.24); continuum keys added in 0.24 (`refine_tol`, `clip_sigma`, `clip_iter`, `clip_mode`,
+  `intervals`) are left out while they hold their defaults, so 0.22/0.23 checkpoints stay valid;
 * the model version: the shared-table model version and LSF version (`jalebi.emulator_shared`), the line
   truncation and a stage-format version (`jalebi.resume.STAGE_FORMAT_VERSION`).
 
