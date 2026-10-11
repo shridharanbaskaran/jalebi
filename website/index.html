@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JALEBI</title>
+<link rel="canonical" href="https://shridharanbaskaran.github.io/jalebi/">
+<link rel="icon" type="image/png" href="media/spiral.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="JALEBI: JWST Analysis of Line Emission with Bayesian Inference">
+<meta property="og:description" content="Simultaneous LTE slab fitting of JWST/MIRI-MRS spectra: continuum, molecule detection, joint fits, MCMC posteriors, IFU line and velocity maps, rotation diagrams.">
+<meta property="og:url" content="https://shridharanbaskaran.github.io/jalebi/">
+<meta property="og:image" content="https://shridharanbaskaran.github.io/jalebi/media/poster.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#08080a">
+<meta name="description" content="JALEBI: JWST Analysis of Line Emission with Bayesian Inference. Simultaneous LTE slab fitting of JWST/MIRI-MRS spectra.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one long product story. A pinned live chart of real JALEBI output morphs as the reader scrolls
+   (right column on desktop, top half on phones), followed by video, quickstart, citation and credits. */
+:root {
+  --bg: #08080a; --bg-2: #111114; --bg-3: #19191d; --line: #2a2a30;
+  --ink: #f3efe7; --muted: #a29d93; --faint: #6d6a64;
+  --syrup-1: #ffc93d; --syrup-2: #ff8a1f; --syrup-3: #e8541a;
+  --h2o: #3e9bff; --h2o-w: #8ccbff; --co2: #34d399; --co2-13: #a7f3d0; --c2h2: #ffb020; --hcn: #c77dff;
+  --co: #2ec4b6; --h2: #ffd84d; --abs: #b388ff; --model: #ff4d5e;
+  --display: "Unbounded", "Arial Black", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --gutter: clamp(16px, 4vw, 48px);
+  --header-h: 56px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; margin: 0; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--syrup-2); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+p { margin: 0; }
+code, pre, .mono { font-family: var(--mono); }
+
+/* header */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 50; height: var(--header-h);
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-inline: var(--gutter);
+  background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: var(--display); font-weight: 700; letter-spacing: 0.04em; }
+.brand img { width: 28px; height: 28px; }
+.nav { display: flex; gap: clamp(12px, 2.5vw, 28px); font-size: 14px; color: var(--muted); }
+.nav a { text-decoration: none; }
+.nav a:hover { color: var(--ink); }
+.nav .gh { color: var(--ink); border: 1px solid var(--line); padding: 4px 12px; border-radius: 999px; }
+@media (max-width: 560px) { .nav .opt { display: none; } }
+
+/* hero */
+.hero { padding-inline: var(--gutter); padding-block: clamp(48px, 9vw, 120px) clamp(32px, 6vw, 72px);
+  display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(24px, 5vw, 72px); align-items: center; max-width: 1360px; margin: 0 auto; }
+.eyebrow { font-family: var(--mono); font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.wordmark { font-family: var(--display); font-weight: 800; font-size: clamp(64px, 12vw, 168px); line-height: 0.92; letter-spacing: -0.01em;
+  background: linear-gradient(100deg, var(--syrup-1), var(--syrup-2) 55%, var(--syrup-3)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  margin-block: 14px 18px; }
+.acronym { font-size: clamp(16px, 1.6vw, 20px); color: var(--muted); margin-bottom: 22px; }
+.acronym b { color: var(--syrup-1); font-weight: 600; }
+.lede { font-size: clamp(20px, 2.1vw, 26px); line-height: 1.4; max-width: 30ch; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 999px; text-decoration: none; font-weight: 600; font-size: 15px; }
+.btn.primary { background: linear-gradient(100deg, var(--syrup-1), var(--syrup-2)); color: #1a0d00; }
+.btn.ghost { border: 1px solid var(--line); color: var(--ink); }
+.btn:hover { filter: brightness(1.08); }
+.meta { margin-top: 22px; font-family: var(--mono); font-size: 13px; color: var(--faint); }
+.spiral { width: min(100%, 440px); justify-self: center; aspect-ratio: 1; display: grid; place-items: center; position: relative; }
+.spiral::before { content: ""; position: absolute; inset: 12%; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--syrup-2) 38%, transparent), transparent 70%); filter: blur(30px); }
+.spiral img { width: 86%; height: auto; position: relative; animation: spin 60s linear infinite; }
+@keyframes spin { to { transform: rotate(-360deg); } }
+@media (max-width: 860px) { .hero { grid-template-columns: 1fr; } .spiral { order: -1; width: min(60vw, 280px); } }
+
+/* story */
+.story { position: relative; display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: clamp(24px, 4vw, 64px);
+  padding-inline: var(--gutter); max-width: 1440px; margin: 0 auto; }
+.stage { position: sticky; top: calc(env(safe-area-inset-top, 0px) + var(--header-h) + 3vh); height: calc(94vh - var(--header-h)); grid-column: 2; grid-row: 1;
+  border-radius: 22px; background: radial-gradient(120% 90% at 70% 0%, #16161b, var(--bg-2) 60%); border: 1px solid var(--line); overflow: hidden; }
+.stage canvas { width: 100%; height: 100%; display: block; }
+.stage .tag { position: absolute; left: 18px; bottom: 14px; right: 18px; display: flex; justify-content: space-between; gap: 12px;
+  font-family: var(--mono); font-size: 12px; color: var(--faint); pointer-events: none; }
+.steps { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; }
+.step { min-height: 92vh; display: flex; flex-direction: column; justify-content: center; gap: 16px; padding-block: 8vh; max-width: 30rem; }
+.step .k { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--syrup-2); }
+.step h2 { font-family: var(--display); font-weight: 700; font-size: clamp(30px, 3.4vw, 46px); line-height: 1.08; letter-spacing: -0.01em; }
+.step p { color: var(--muted); font-size: 18px; max-width: 34ch; }
+.spec { display: flex; flex-wrap: wrap; gap: 8px 18px; font-family: var(--mono); font-size: 14px; color: var(--ink); }
+.spec span { display: inline-flex; align-items: baseline; gap: 6px; }
+.spec i { font-style: normal; color: var(--faint); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; transform: translateY(-1px); }
+@media (max-width: 900px) {
+  .story { grid-template-columns: 1fr; }
+  .stage { grid-column: 1; height: 48vh; top: calc(env(safe-area-inset-top, 0px) + var(--header-h) + 8px); z-index: 5; border-radius: 18px;
+    box-shadow: 0 18px 40px 10px var(--bg); }
+  .steps { grid-column: 1; grid-row: 2; }
+  .step { min-height: 66vh; justify-content: flex-start; padding-block: 3vh 10vh; max-width: none; }
+  .stage { height: 44vh; }
+  .step p { max-width: none; }
+}
+
+/* sections after the story */
+.section { padding-inline: var(--gutter); padding-block: clamp(64px, 10vw, 140px) 0; max-width: 1240px; margin: 0 auto; }
+.section h2.big { font-family: var(--display); font-weight: 700; font-size: clamp(32px, 4.6vw, 60px); line-height: 1.05; }
+.section .sub { color: var(--muted); font-size: 19px; margin-top: 14px; max-width: 52ch; }
+.video { margin-top: 36px; border-radius: 22px; overflow: hidden; border: 1px solid var(--line); background: #000; }
+.video video { width: 100%; height: auto; display: block; aspect-ratio: 16 / 9; }
+.ways { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 36px; }
+.way { background: var(--bg-2); border: 1px solid var(--line); border-radius: 20px; padding: 24px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.way h3 { font-family: var(--display); font-weight: 500; font-size: 22px; }
+.way p { color: var(--muted); font-size: 16px; }
+.way img { border-radius: 12px; border: 1px solid var(--line); width: 100%; height: auto; }
+.code { position: relative; background: #0b0b0e; border: 1px solid var(--line); border-radius: 14px; min-width: 0; }
+.code pre { margin: 0; padding: 16px 18px; overflow-x: auto; font-size: 14px; line-height: 1.6; color: var(--ink); }
+.code .c { color: var(--faint); } .code .k2 { color: var(--syrup-1); } .code .s { color: var(--co2); }
+.copy { position: absolute; top: 8px; right: 8px; font: 500 12px var(--mono); color: var(--muted); background: var(--bg-3); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+.copy:hover { color: var(--ink); }
+@media (max-width: 600px) { .stage .tag { display: none; } }
+@media (max-width: 900px) { .ways { grid-template-columns: 1fr; } }
+.box { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 0; margin-top: 36px; border-top: 1px solid var(--line); }
+.box div { padding: 22px 22px 22px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.box h3 { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+.box p { color: var(--muted); font-size: 15px; }
+.quick { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 36px; }
+@media (max-width: 900px) { .quick { grid-template-columns: 1fr; } }
+.quick h3 { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 500; margin-bottom: 10px; }
+.team { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 32px; margin-top: 36px; align-items: start; }
+@media (max-width: 900px) { .team { grid-template-columns: 1fr; } }
+.team .names { font-family: var(--display); font-weight: 500; font-size: clamp(22px, 2.4vw, 30px); line-height: 1.3; }
+.team .aff { color: var(--muted); margin-top: 10px; }
+.credits { color: var(--faint); font-size: 14px; display: grid; gap: 8px; }
+footer { padding-inline: var(--gutter); padding-block: 80px 48px; max-width: 1240px; margin: 0 auto; color: var(--faint); font-size: 14px;
+  display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+@media (prefers-reduced-motion: reduce) { .spiral img { animation: none; } html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#top"><img src="media/spiral.png" alt="">JALEBI</a>
+  <nav class="nav" aria-label="Sections">
+    <a href="#story" class="opt">Tour</a>
+    <a href="#video" class="opt">Video</a>
+    <a href="#start">Quickstart</a>
+    <a href="#cite" class="opt">Cite</a>
+    <a class="gh" href="https://github.com/shridharanbaskaran/jalebi" target="_blank" rel="noopener">GitHub ↗</a>
+  </nav>
+</header>
+
+<main id="top">
+<section class="hero">
+  <div>
+    <div class="eyebrow">Open source · JWST / MIRI-MRS · v0.22</div>
+    <h1 class="wordmark">JALEBI</h1>
+    <div class="acronym"><b>J</b>WST <b>A</b>nalysis of <b>L</b>ine <b>E</b>mission with <b>B</b>ayesian <b>I</b>nference</div>
+    <p class="lede">Fit every molecule in a planet-forming disk spectrum at once, and see what the data can and cannot tell you.</p>
+    <div class="cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn ghost" href="#video">Watch the 90-second tour</a>
+    </div>
+    <div class="meta">Python ≥ 3.10 · BSD-3-Clause · terminal, web app and Python API</div>
+  </div>
+  <div class="spiral"><img src="media/spiral.png" alt="The JALEBI spiral logo" width="520" height="506"></div>
+</section>
+
+<section class="story" id="story" aria-label="How JALEBI works, step by step">
+  <div class="stage" aria-hidden="true"><canvas id="cv"></canvas><div class="tag"><span id="tagL">FZ Tau · JWST GO 1549</span><span id="tagR">real JALEBI output</span></div></div>
+  <div class="steps">
+    <article class="step"><div class="k">The data</div><h2>One spectrum, 4.9 to 28.7 µm.</h2>
+      <p>FZ Tau, a young disk observed by JWST's mid-infrared spectrograph. Every spike is a molecular line, and most bumps are bands of thousands of them.</p>
+      <div class="spec"><span>11 637 <i>pixels</i></span><span>12 <i>sub-bands</i></span></div></article>
+    <article class="step"><div class="k">Data in</div><h2>Twelve sub-bands, kept apart.</h2>
+      <p>JALEBI reads the pipeline's Level-3 files band by band. Each keeps its own pixels and its own line-spread function, so overlaps are fitted as observed and never stitched.</p>
+      <div class="spec"><span>4 <i>channels</i></span><span>× 3 <i>grating settings</i></span></div></article>
+    <article class="step"><div class="k">The tangle</div><h2>123 874 lines in four microns.</h2>
+      <p>Between 13.4 and 17.6 µm the line lists hold 61 662 water transitions, with the Q-branches of C₂H₂, HCN, CO₂ and ¹³CO₂ on top.</p>
+      <div class="spec"><span><span class="dot" style="background:var(--c2h2)"></span>C₂H₂</span><span><span class="dot" style="background:var(--hcn)"></span>HCN</span><span><span class="dot" style="background:var(--co2)"></span>CO₂</span><span><span class="dot" style="background:var(--co2-13)"></span>¹³CO₂</span></div></article>
+    <article class="step"><div class="k">Continuum</div><h2>Find the continuum, then refine it.</h2>
+      <p>Seven estimators, with the Q-branches protected. A model-aware pass subtracts the best-fit gas and refits the continuum through what is left. Then it is removed, leaving pure line emission.</p>
+      <div class="spec"><span>7 <i>methods</i></span><span>3.3 mJy <i>median refinement</i></span></div></article>
+    <article class="step"><div class="k">Detection</div><h2>Only what the data need.</h2>
+      <p>Every candidate molecule gets LTE templates, all solved together. A molecule is kept when removing it costs ΔBIC &gt; 10.</p>
+      <div class="spec"><span>33 <i>candidates</i></span><span>7 <i>detected in FZ Tau</i></span></div></article>
+    <article class="step"><div class="k">Joint fit</div><h2>Every molecule, one model.</h2>
+      <p>Each species is an LTE slab with a column density, a temperature and an emitting area. Overlapping bands compete for the same flux, so all of them are fitted at the same time.</p>
+      <div class="spec"><span><span class="dot" style="background:var(--h2o)"></span>H₂O hot <i>925 K</i></span><span><span class="dot" style="background:var(--h2o-w)"></span>H₂O warm <i>506 K</i></span><span><span class="dot" style="background:var(--co2)"></span>CO₂ <i>498 K</i></span></div></article>
+    <article class="step"><div class="k">Check it</div><h2>A fit you can audit.</h2>
+      <p>The red line is the joint model and the trace below it is the residual. Areas are solved exactly by non-negative least squares at every step.</p>
+      <div class="spec"><span>χ²<sub>red</sub> 2.93</span><span>6 <i>components</i></span><span>13.45–17.5 <i>µm</i></span></div></article>
+    <article class="step"><div class="k">Uncertainty</div><h2>The posterior, not just a best fit.</h2>
+      <p>Differential evolution finds the optimum, then emcee samples the joint posterior. Degeneracies show up as ridges, like temperature against column density.</p>
+      <div class="spec"><span>H₂O hot <i>T = 925 ± 17 K</i></span><span><i>log N = 18.77 ± 0.05</i></span><span>48 <i>walkers × 5000 steps</i></span></div></article>
+    <article class="step"><div class="k">IFU cubes</div><h2>Jets, in motion.</h2>
+      <p>Cubes become line and velocity maps once the star is removed plane by plane. In HV Tau C the [Fe II] jet shows one lobe approaching and one receding.</p>
+      <div class="spec"><span>[Fe II] 5.34 <i>µm</i></span><span>±60 <i>km/s</i></span><span>MINDS <i>PID 1282</i></span></div></article>
+    <article class="step"><div class="k">Rotation diagrams</div><h2>Temperature. Extinction. Spin.</h2>
+      <p>Line fluxes become level populations for H₂, CO, OH and H₂O. HV Tau C's H₂ moves up once corrected for dust, then splits into warm and hot gas.</p>
+      <div class="spec"><span>723 K <i>+</i> 2152 K</span><span>A<sub>V</sub> 6.2 <i>mag</i></span><span>OPR 3.28</span></div></article>
+    <article class="step"><div class="k">Absorption</div><h2>Gas in front of the light, too.</h2>
+      <p>A cold screen against the continuum: F = F<sub>c</sub>[1 − f<sub>c</sub>(1 − e<sup>−τ</sup>)]. On a synthetic test with known truth, JALEBI recovers it alongside the emission behind.</p>
+      <div class="spec"><span>T <i>125 ± 5 K (120)</i></span><span>v <i>−40 km/s (−40)</i></span><span>f<sub>c</sub> <i>0.59 (0.60)</i></span></div></article>
+  </div>
+</section>
+
+<section class="section" id="video">
+  <h2 class="big">The 90-second tour.</h2>
+  <p class="sub">Everything above, in motion, with sound. Made from real JALEBI output.</p>
+  <div class="video"><video controls playsinline preload="metadata" poster="media/poster.jpg" src="media/jalebi-90s.mp4"></video></div>
+</section>
+
+<section class="section" id="ways">
+  <h2 class="big">Three ways in.</h2>
+  <p class="sub">One YAML config drives all three, so a fit started in the terminal opens in the web app and reruns from Python.</p>
+  <div class="ways">
+    <div class="way"><h3>Terminal</h3><p>Prepare, detect, fit and batch whole surveys.</p>
+      <div class="code"><pre><span class="k2">jalebi</span> prep   my_disk.yaml
+<span class="k2">jalebi</span> detect my_disk.yaml
+<span class="k2">jalebi</span> fit    my_disk.yaml
+<span class="k2">jalebi</span> batch  my_disk.yaml targets.csv</pre></div></div>
+    <div class="way"><h3>Web app</h3><p>Three modules: LTE slab fit, cube maps and rotation diagrams.</p>
+      <img src="media/app.jpg" alt="The JALEBI web app showing a velocity map of HV Tau C" loading="lazy" width="1200" height="937"></div>
+    <div class="way"><h3>Python</h3><p>Every stage is a function you can call and inspect.</p>
+      <div class="code"><pre><span class="k2">from</span> jalebi.config <span class="k2">import</span> ProjectConfig
+<span class="k2">from</span> jalebi.pipeline <span class="k2">import</span> run_pipeline
+
+cfg = ProjectConfig.load(<span class="s">"my_disk.yaml"</span>)
+run = run_pipeline(cfg)
+print(run.mcmc.summary())</pre></div></div>
+  </div>
+</section>
+
+<section class="section" id="box">
+  <h2 class="big">Everything in the box.</h2>
+  <div class="box">
+    <div><h3>Simultaneous LTE slab fitting</h3><p>Many molecules at once, with opacity groups, isotopologue ties and radial temperature gradients.</p></div>
+    <div><h3>Seven continuum methods</h3><p>IRSQR, median + Savitzky–Golay, ASLS, convex hull, rolling minimum, clicked anchors and line-free windows, plus model-aware refinement.</p></div>
+    <div><h3>Automatic detection</h3><p>LTE templates for every candidate in one NNLS solve, judged by ΔBIC in each molecule's own windows.</p></div>
+    <div><h3>Bayesian posteriors</h3><p>Grid, differential evolution and emcee, with Laplace errors at the optimum and nested sampling for evidences.</p></div>
+    <div><h3>Absorption screens</h3><p>Cold gas against the continuum with a covering fraction and its own velocity, fitted with the emission.</p></div>
+    <div><h3>IFU cube maps</h3><p>Point-source removal, moment and centroid-velocity maps, channel maps, PV cuts and region spectra.</p></div>
+    <div><h3>Rotation diagrams</h3><p>H₂, CO, OH and H₂O with extinction, ortho/para ratio and curve-of-growth optical depth.</p></div>
+    <div><h3>Bundled line lists</h3><p>HITRAN 2020 and HITEMP for 18 molecules, with any HITRAN species downloadable.</p></div>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <h2 class="big">Up and running in a minute.</h2>
+  <p class="sub">The interactive installer checks your machine, sets up an environment and fits a synthetic disk to prove it works.</p>
+  <div class="quick">
+    <div><h3>Install</h3><div class="code"><button class="copy" type="button" data-copy="i1">Copy</button><pre id="i1">git clone https://github.com/shridharanbaskaran/jalebi
+cd jalebi
+python install.py</pre></div></div>
+    <div><h3>First run</h3><div class="code"><button class="copy" type="button" data-copy="i2">Copy</button><pre id="i2">jalebi doctor        <span class="c"># check the install</span>
+jalebi demo          <span class="c"># fit a synthetic disk</span>
+jalebi serve --show  <span class="c"># open the web app</span></pre></div></div>
+  </div>
+</section>
+
+<section class="section" id="cite">
+  <h2 class="big">Cite JALEBI.</h2>
+  <p class="sub">If JALEBI helps your research, please cite the software, together with HITRAN/HITEMP, emcee and the methods you used.</p>
+  <div class="quick" style="grid-template-columns:1fr">
+    <div class="code"><button class="copy" type="button" data-copy="bib">Copy</button><pre id="bib">@software{baskaran_jalebi_2026,
+  author  = {Baskaran, Shridharan},
+  title   = {JALEBI: JWST Analysis of Line Emission with Bayesian Inference},
+  version = {0.22.0},
+  year    = {2026},
+  license = {BSD-3-Clause},
+  url     = {https://github.com/shridharanbaskaran/jalebi}
+}</pre></div>
+  </div>
+</section>
+
+<section class="section" id="team">
+  <h2 class="big">Made at TIFR.</h2>
+  <div class="team">
+    <div><div class="names">Shridharan B, Bihan Banerjee and the TSFPE Group</div>
+      <div class="aff">Tata Institute of Fundamental Research, Mumbai</div></div>
+    <div class="credits">
+      <div>FZ Tau: JWST GO 1549 (Pontoppidan et al. 2024). HV Tau C: MINDS, PID 1282.</div>
+      <div>Line lists: HITRAN 2020, HITEMP and TIPS-2021. Sampling: emcee.</div>
+      <div>Based on observations with the NASA/ESA/CSA James Webb Space Telescope, obtained from MAST at STScI.</div>
+    </div>
+  </div>
+</section>
+</main>
+<footer><span>JALEBI v0.22 · BSD-3-Clause</span><a href="https://github.com/shridharanbaskaran/jalebi" target="_blank" rel="noopener">github.com/shridharanbaskaran/jalebi</a></footer>
+
+<script>
+(() => {
+  // ---------- copy buttons ----------
+  document.querySelectorAll(".copy").forEach(b => b.addEventListener("click", () => {
+    const pre = document.getElementById(b.dataset.copy); const txt = pre.innerText;
+    const done = () => { b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1600); };
+    try {
+      navigator.clipboard.writeText(txt).then(done, () => { selectText(pre); b.textContent = "Selected"; });
+    } catch (e) { selectText(pre); b.textContent = "Selected"; }
+  }));
+  function selectText(el) { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+
+  // ---------- the pinned chart ----------
+  const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  const stage = cv.parentElement, steps = [...document.querySelectorAll(".step")];
+  const tagL = document.getElementById("tagL"), tagR = document.getElementById("tagR");
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const C = {}; ["--ink", "--muted", "--faint", "--line", "--syrup-1", "--syrup-2", "--syrup-3", "--h2o", "--h2o-w", "--co2", "--co2-13", "--c2h2",
+    "--hcn", "--co", "--h2", "--abs", "--model", "--bg-2"].forEach(k => C[k.slice(2)] = css(k));
+  const MONO = '500 {s}px "IBM Plex Mono", ui-monospace, monospace', SANS = '600 {s}px "IBM Plex Sans", Arial, sans-serif';
+  const font = (f, s) => f.replace("{s}", s);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let D = null, W = 0, H = 0, dpr = 1, S = 0, Sdraw = 0, raf = 0;
+
+  const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+  const ease = u => { u = clamp(u); return u < .5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2; };
+  const seg = (p, a, b) => ease((p - a) / (b - a));
+  const mix = (a, b, u) => a + (b - a) * u;
+  const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+
+  function resize() {
+    const r = stage.getBoundingClientRect(); dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); draw(true);
+  }
+  // plot frame in CSS px
+  function frame(xl, yl, box) {
+    const [x, y, w, h] = box;
+    return { X: v => x + (v - xl[0]) / (xl[1] - xl[0]) * w, Y: v => y + h - (v - yl[0]) / (yl[1] - yl[0]) * h, x, y, w, h, xl, yl };
+  }
+  function box(bottomPad = 46) {
+    const small = W < 520; const l = small ? 40 : 58, r = small ? 14 : 24, t = small ? 40 : 54;
+    return [l, t, W - l - r, H - t - bottomPad - (small ? 10 : 14)];
+  }
+  function axes(F, xlabel, ylabel, a = 1, xt = null, yt = null) {
+    ctx.save(); ctx.globalAlpha *= a;
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(F.x, F.y + F.h + .5); ctx.lineTo(F.x + F.w, F.y + F.h + .5); ctx.stroke();
+    ctx.fillStyle = C.faint; ctx.font = font(MONO, W < 520 ? 10 : 12); ctx.textAlign = "center"; ctx.textBaseline = "top";
+    const ticks = xt || niceTicks(F.xl[0], F.xl[1], W < 520 ? 4 : 7);
+    ticks.forEach(v => { const px = F.X(v); if (px < F.x - 1 || px > F.x + F.w + 1) return; ctx.fillRect(px, F.y + F.h, 1, 5); ctx.fillText(fmt(v), px, F.y + F.h + 8); });
+    if (xlabel) { ctx.fillText(xlabel, F.x + F.w / 2, F.y + F.h + 26); }
+    if (yt) { ctx.textAlign = "right"; ctx.textBaseline = "middle"; yt.forEach(v => { const py = F.Y(v); if (py < F.y - 1 || py > F.y + F.h + 1) return; ctx.fillText(fmt(v), F.x - 8, py); }); }
+    if (ylabel) { ctx.save(); ctx.translate(14, F.y + F.h / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(ylabel, 0, 0); ctx.restore(); }
+    ctx.restore();
+  }
+  function niceTicks(a, b, n) {
+    const span = b - a, raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw))), st = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n) || 10 * mag;
+    const out = []; for (let v = Math.ceil(a / st) * st; v <= b + 1e-9; v += st) out.push(+v.toFixed(6)); return out;
+  }
+  const fmt = v => Math.abs(v) >= 1000 ? String(Math.round(v)) : (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : String(+v.toFixed(2)));
+  function line(F, xs, ys, color, lw = 1.2, a = 1, step = false, cut = Infinity) {
+    ctx.save(); ctx.globalAlpha *= a; ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = "round"; ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < xs.length; i++) {
+      if (ys[i] == null || xs[i] > cut) { if (xs[i] > cut) break; started = false; continue; }
+      const px = F.X(xs[i]), py = F.Y(ys[i]);
+      if (!started) { ctx.moveTo(px, py); started = true; } else if (step) { const pp = F.X((xs[i - 1] + xs[i]) / 2); ctx.lineTo(pp, ctx._ly); ctx.lineTo(pp, py); ctx.lineTo(px, py); } else ctx.lineTo(px, py);
+      ctx._ly = py;
+    }
+    ctx.stroke(); ctx.restore();
+  }
+  function band(F, xs, lo, hi, color, a) {
+    ctx.save(); ctx.globalAlpha *= a; ctx.fillStyle = color; ctx.beginPath();
+    for (let i = 0; i < xs.length; i++) { const px = F.X(xs[i]), py = F.Y(hi[i]); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    for (let i = xs.length - 1; i >= 0; i--) ctx.lineTo(F.X(xs[i]), F.Y(lo[i]));
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  function clip(F) { ctx.save(); ctx.beginPath(); ctx.rect(F.x, F.y - 4, F.w, F.h + 8); ctx.clip(); }
+  function label(txt, x, y, color, size = 13, align = "left", weight = SANS) {
+    ctx.save(); ctx.fillStyle = color; ctx.font = font(weight, size); ctx.textAlign = align; ctx.textBaseline = "alphabetic"; ctx.fillText(txt, x, y); ctx.restore();
+  }
+
+  const BANDCOL = ["#64d2ff", "#4aa8ff", "#5e8bff", "#7b6cff", "#9a5cff", "#bf5af2", "#e05ad0", "#ff5f9e", "#ff6f6f", "#ff8a3d", "#ffb020", "#ffd84d"];
+  const Q = [["C₂H₂", 13.705, "c2h2"], ["HCN", 14.035, "hcn"], ["CO₂", 14.98, "co2"], ["¹³CO₂", 15.42, "co2-13"]];
+  const ORDER = [["H2O_hot", "h2o", "H₂O hot"], ["H2O_warm", "h2o-w", "H₂O warm"], ["CO2", "co2", "CO₂"], ["13CO2", "co2-13", "¹³CO₂"], ["C2H2", "c2h2", "C₂H₂"], ["HCN", "hcn", "HCN"]];
+  const WIN = [13.42, 17.55];
+
+  // ---------- scenes: each draws itself at progress p in [0,1] ----------
+  function sFull(p, ctr) {
+    const F = frame([4.8, 28.8], [0.8, 2.08], box()); const fl = D.full;
+    const tint = ctr.tint || 0;
+    axes(F, "wavelength (µm)", "Fν (Jy)", 1, null, [1, 1.5, 2]);
+    clip(F);
+    let cur = -1, xs = [], ys = [];
+    const flush = () => { if (!xs.length) return; const c = tint > 0 ? mixColor(C.ink, BANDCOL[cur], tint) : C.ink; line(F, xs, ys, c, 1.1); xs = []; ys = []; };
+    for (const [w, f, b] of fl) { if (b !== cur) { flush(); cur = b; } xs.push(w); ys.push(f); }
+    flush();
+    if (tint > 0) {
+      ctx.save(); ctx.globalAlpha = tint; ctx.font = font(MONO, W < 520 ? 10 : 12); ctx.textAlign = "center";
+      const names = ["1A", "1B", "1C", "2A", "2B", "2C", "3A", "3B", "3C", "4A", "4B", "4C"];
+      names.forEach((n, i) => { const pts = fl.filter(q => q[2] === i); if (!pts.length) return; const xm = (pts[0][0] + pts[pts.length - 1][0]) / 2;
+        ctx.fillStyle = BANDCOL[i]; ctx.fillText(n, F.X(xm), F.y + 14 + (i % 2) * 16); });
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  function mixColor(a, b, u) {
+    const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+    const r = Math.round(mix(pa >> 16 & 255, pb >> 16 & 255, u)), g = Math.round(mix(pa >> 8 & 255, pb >> 8 & 255, u)), bl = Math.round(mix(pa & 255, pb & 255, u));
+    return `rgb(${r},${g},${bl})`;
+  }
+  function sZoom(p) {
+    const z = seg(p, 0.0, 0.45);
+    const xl = [mix(4.8, WIN[0], z), mix(28.8, WIN[1], z)], yl = [mix(0.8, 0.97, z), mix(2.08, 1.8, z)];
+    const F = frame(xl, yl, box());
+    axes(F, "wavelength (µm)", "Fν (Jy)", 1, null, niceTicks(yl[0], yl[1], 4));
+    clip(F);
+    // full envelope fades out while the window spectrum fades in
+    if (z < 1) { let cur = -1, xs = [], ys = []; const fl = D.full;
+      const flush = () => { if (xs.length) line(F, xs, ys, C.ink, 1.1, 1 - z); xs = []; ys = []; };
+      for (const [w, f, b] of fl) { if (b !== cur) { flush(); cur = b; } xs.push(w); ys.push(f); } flush(); }
+    line(F, D.win.w, D.win.flux, C.ink, 1.1, z, true);
+    Q.forEach(([n, x, c], i) => { const a = seg(p, 0.45 + 0.1 * i, 0.6 + 0.1 * i); if (a <= 0) return;
+      ctx.save(); ctx.globalAlpha = 0.18 * a; ctx.fillStyle = C[c]; ctx.fillRect(F.X(x - 0.045), F.y, Math.max(3, F.X(x + 0.045) - F.X(x - 0.045)), F.h); ctx.restore();
+      label(n, F.X(x), F.y + 18 + (i % 2) * 18, C[c], W < 520 ? 12 : 14, "center"); });
+    ctx.restore();
+  }
+  function winFrame(yl, bottom) { return frame(WIN, yl, box(bottom)); }
+  function sCont(p) {
+    const u = seg(p, 0.62, 0.95); // subtraction
+    const yl = [mix(0.97, -0.06, u), mix(1.8, 0.74, u)];
+    const F = winFrame(yl);
+    axes(F, "wavelength (µm)", u < 0.5 ? "Fν (Jy)" : "Fν − continuum (Jy)", 1, null, niceTicks(yl[0], yl[1], 4));
+    clip(F);
+    const w = D.win.w, c0 = D.win.cont, c1 = D.win.cont1;
+    const ys = D.win.flux.map((f, i) => f - u * c0[i]);
+    line(F, w, ys, C.ink, 1.1, 1, true);
+    const a = seg(p, 0.0, 0.15) * (1 - u);
+    const r = seg(p, 0.25, 0.55);
+    const cc = c0.map((v, i) => (v + r * (c1[i] - v)) * (1 - u));
+    line(F, w, c0.map(v => v * (1 - u)), C["syrup-2"], 2.4, a * (1 - r * 0.6));
+    if (r > 0) line(F, w, cc, C["syrup-1"], 3, a * r);
+    ctx.restore();
+    if (a > 0.05) { label("first pass", F.x + 8, F.y + 16, C["syrup-2"], 13, "left", MONO); if (r > 0.05) label("model-aware refinement", F.x + 8, F.y + 34, C["syrup-1"], 13, "left", MONO); }
+  }
+  function sDetect(p) {
+    const b = box(30); const [x, y, w, h] = b;
+    const rows = D.detect, n = rows.length, rh = h / n;
+    const lw = W < 520 ? 74 : 110, x0 = x + lw, x1 = x + w - (W < 520 ? 60 : 90);
+    const X = v => x0 + (x1 - x0) * Math.log10(1 + Math.max(v, 0)) / Math.log10(3e4);
+    const names = { H2O_rovib: "H₂O ν₂", H2O_hot: "H₂O hot", CO: "CO", H2O_warm: "H₂O warm", CO2: "CO₂", "13CO": "¹³CO", HCN: "HCN", C2H2: "C₂H₂", H2O_cold: "H₂O cold", NH3: "NH₃", CH4: "CH₄", C4H2: "C₄H₂" };
+    const cols = { H2O_rovib: "h2o", H2O_hot: "h2o", CO: "co", H2O_warm: "h2o-w", CO2: "co2", "13CO": "co", HCN: "hcn" };
+    const xt = X(10);
+    ctx.save(); ctx.strokeStyle = C["syrup-2"]; ctx.setLineDash([5, 5]); ctx.beginPath(); ctx.moveTo(xt, y - 8); ctx.lineTo(xt, y + h); ctx.stroke(); ctx.restore();
+    label("ΔBIC = 10", xt + 6, y - 12, C["syrup-2"], 12, "left", MONO);
+    rows.forEach(([k, v, det], i) => {
+      const g = seg(p, 0.05 + 0.04 * i, 0.45 + 0.04 * i), yy = y + i * rh + rh / 2;
+      label(names[k] || k, x0 - 10, yy + 5, det ? C.ink : C.faint, W < 520 ? 11 : 14, "right");
+      const xb = X(v * g), bh = Math.min(16, rh * 0.55);
+      if (xb > x0) { ctx.save(); ctx.fillStyle = det ? C[cols[k] || "ink"] : C.line; roundRect(x0, yy - bh / 2, xb - x0, bh, bh / 2); ctx.fill(); ctx.restore(); }
+      if (g > 0.1) label((v >= 100 ? Math.round(v * g).toLocaleString("en").replace(/,/g, " ") : (v * g).toFixed(1)), Math.max(xb, x0) + 8, yy + 4, det ? C.ink : C.faint, 11, "left", MONO);
+    });
+  }
+  function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+  function stack(fills) {
+    const w = D.win.w, n = w.length; let base = new Array(n).fill(0); const layers = [];
+    ORDER.forEach(([k, c], j) => { const g = fills[j]; if (g <= 0) return; const top = base.map((b, i) => b + D.win.units[k][i] * g); layers.push([base, top, c]); base = top; });
+    return [layers, base];
+  }
+  function fillsAt(p) { const t = [0.05, 0.22, 0.4, 0.4, 0.58, 0.76]; return t.map(a => seg(p, a, a + 0.16)); }
+  function sFill(p, resid = 0) {
+    const ymax = 0.72;
+    const F = winFrame([-0.05, ymax], resid ? mix(46, 140, resid) : 46);
+    axes(F, resid > 0.5 ? null : "wavelength (µm)", "Fν − continuum (Jy)", 1, null, [0, 0.2, 0.4, 0.6]);
+    clip(F);
+    const fills = resid ? [1, 1, 1, 1, 1, 1] : fillsAt(p);
+    const [layers, model] = stack(fills);
+    layers.forEach(([lo, hi, c]) => band(F, D.win.w, lo, hi, C[c], 0.9));
+    line(F, D.win.w, D.win.line, C.ink, 1.1, 1, true);
+    ctx.restore();
+    clip(F);
+    if (resid > 0) line(F, D.win.w, model, C.model, 1.3, 0.95, true, mix(WIN[0], WIN[1], seg(resid, 0, 0.7)));
+    ctx.restore();
+    // legend
+    let lx = F.x + 6; const ly = F.y + 14;
+    ORDER.forEach(([k, c, nm], j) => { if (k === "13CO2") return; const a = resid ? 1 : clamp(fills[j] * 3); if (a <= 0) return;
+      ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = C[c]; ctx.beginPath(); ctx.arc(lx + 5, ly - 4, 5, 0, 7); ctx.fill(); ctx.restore();
+      label(nm, lx + 14, ly, C.ink, W < 520 ? 11 : 13); ctx.font = font(SANS, W < 520 ? 11 : 13); lx += 14 + ctx.measureText(nm).width + 16; });
+    if (resid > 0) {
+      const bh = 70, by = F.y + F.h + 34, R = frame(WIN, [-0.16, 0.16], [F.x, by, F.w, bh * clamp(resid * 2)]);
+      ctx.save(); ctx.globalAlpha = clamp(resid * 2);
+      const res = D.win.line.map((v, i) => v - model[i]);
+      ctx.beginPath(); ctx.rect(R.x, R.y, R.w, R.h); ctx.clip();
+      ctx.strokeStyle = C.line; ctx.beginPath(); ctx.moveTo(R.x, R.Y(0)); ctx.lineTo(R.x + R.w, R.Y(0)); ctx.stroke();
+      line(R, D.win.w, res, C.muted, 1, 1, true);
+      ctx.restore();
+      ctx.save(); ctx.globalAlpha = clamp(resid * 2); axes(frame(WIN, [0, 1], [F.x, by, F.w, bh]), "wavelength (µm)", null, 1); ctx.restore();
+      label("residual", F.x + 6, by + 14, C.faint, 12, "left", MONO);
+      label("joint model", F.x + F.w - 6, F.y + 14, C.model, 13, "right", MONO);
+    }
+  }
+  function sPost(p) {
+    const b = box(); const [x, y, w, h] = b;
+    const s = D.samples, N = Math.round(mix(60, s["H2O_hot.T"].length, seg(p, 0.05, 0.75)));
+    const wide = W > 640;
+    const sz = Math.min(wide ? (w - 40) * 0.62 : w, h);
+    const main = frame([18.6, 18.95], [860, 990], [x, y + 20, sz - 20, sz - 50]);
+    axes(main, "H₂O hot  log N (cm⁻²)", "H₂O hot  T (K)", 1, [18.65, 18.75, 18.85, 18.95], [880, 920, 960]);
+    ctx.save(); ctx.beginPath(); ctx.rect(main.x, main.y, main.w, main.h); ctx.clip();
+    for (let i = 0; i < N; i++) { const px = main.X(s["H2O_hot.logN"][i]), py = main.Y(s["H2O_hot.T"][i]);
+      ctx.fillStyle = hexA(C["h2o-w"], 0.32); ctx.fillRect(px - 1.2, py - 1.2, 2.4, 2.4); }
+    ctx.restore();
+    const post = D.post;
+    label(`T = ${post["H2O_hot.T"][1].toFixed(0)} ± ${((post["H2O_hot.T"][2] - post["H2O_hot.T"][0]) / 2).toFixed(0)} K`, main.x + 10, main.y + 18, C.ink, 13, "left", MONO);
+    label(`ρ(T, log N) = ${corr(s["H2O_hot.logN"], s["H2O_hot.T"]).toFixed(2)}`, main.x + 10, main.y + 36, C["syrup-1"], 13, "left", MONO);
+    if (wide) {
+      const hx = x + sz + 10, hw = w - sz - 10, hh = (sz - 90) / 3;
+      [["H2O_hot.T", "H₂O hot T (K)", "h2o"], ["H2O_warm.logN", "H₂O warm log N", "h2o-w"], ["CO2.T", "CO₂ T (K)", "co2"]].forEach(([k, lab, c], j) => {
+        const a = seg(p, 0.2 + 0.15 * j, 0.45 + 0.15 * j); if (a <= 0) return;
+        const v = s[k].slice(0, N), lo = Math.min(...s[k]), hi = Math.max(...s[k]); const nb = 28, hist = new Array(nb).fill(0);
+        v.forEach(q => hist[Math.min(nb - 1, Math.floor((q - lo) / (hi - lo) * nb))]++); const m = Math.max(...hist, 1);
+        const by = y + 30 + j * (hh + 30);
+        ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = hexA(C[c], 0.75);
+        hist.forEach((q, i) => { const bw = hw / nb; ctx.fillRect(hx + i * bw, by + hh - q / m * hh, bw - 1, q / m * hh); });
+        ctx.restore();
+        label(lab, hx, by - 6, C.muted, 12, "left", MONO);
+        const pp = D.post[k]; label(`${pp[1].toFixed(k.endsWith("T") ? 0 : 2)} +${(pp[2] - pp[1]).toFixed(k.endsWith("T") ? 0 : 2)} −${(pp[1] - pp[0]).toFixed(k.endsWith("T") ? 0 : 2)}`, hx + hw, by - 6, C.ink, 12, "right", MONO);
+      });
+    }
+  }
+  function corr(a, b) { const n = a.length; let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+    let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; sab += da * db; saa += da * da; sbb += db * db; } return sab / Math.sqrt(saa * sbb); }
+  function velColor(v, I) {
+    const stops = [[-60, [100, 210, 255]], [-30, [62, 155, 255]], [0, [150, 140, 170]], [30, [255, 77, 140]], [60, [255, 69, 58]]];
+    let c = stops[0][1]; for (let i = 0; i < stops.length - 1; i++) { const [a, ca] = stops[i], [b, cb] = stops[i + 1]; if (v >= a && v <= b) { const u = (v - a) / (b - a); c = ca.map((q, j) => q + (cb[j] - q) * u); } }
+    if (v > 60) c = stops[4][1]; const k = 0.35 + 0.65 * I; return `rgb(${c.map(q => Math.round(q * k)).join(",")})`;
+  }
+  function sJet(p) {
+    const vm = D.vmap, b = box(30), side = Math.min(b[2] * (W > 640 ? 0.62 : 1), b[3]);
+    const x0 = b[0] + (W > 640 ? 0 : (b[2] - side) / 2), y0 = b[1] + (b[3] - side) / 2;
+    const [e0, e1, f0, f1] = vm.ext, lim = 2.4;
+    const X = v => x0 + (lim - v) / (2 * lim) * side, Y = v => y0 + (lim - v) / (2 * lim) * side;
+    const dxp = (e0 - e1) / (vm.nx - 1), dyp = (f1 - f0) / (vm.ny - 1);
+    const reveal = seg(p, 0.0, 0.5);
+    ctx.save(); ctx.beginPath(); ctx.rect(x0, y0, side, side); ctx.clip();
+    ctx.fillStyle = "#050507"; ctx.fillRect(x0, y0, side, side);
+    for (let j = 0; j < vm.ny; j++) for (let i = 0; i < vm.nx; i++) {
+      const k = j * vm.nx + i, I = vm.I[k], v = vm.v[k]; const ra = e0 - i * dxp, de = f0 + j * dyp;
+      const px = X(ra + dxp / 2), py = Y(de + dyp / 2), pw = Math.abs(X(ra - dxp / 2) - px) + 0.6, ph = Math.abs(Y(de - dyp / 2) - py) + 0.6;
+      ctx.fillStyle = v == null ? `rgb(${Math.round(8 + 30 * I)},${Math.round(10 + 45 * I)},${Math.round(14 + 55 * I)})` : velColor(v, I);
+      ctx.globalAlpha = v == null ? 1 : reveal; ctx.fillRect(px, py, pw, ph);
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+    ctx.save(); ctx.strokeStyle = C.line; ctx.strokeRect(x0 + .5, y0 + .5, side - 1, side - 1);
+    const pa = 25 * Math.PI / 180; ctx.setLineDash([5, 6]); ctx.strokeStyle = hexA("#ffffff", 0.45);
+    ctx.beginPath(); ctx.moveTo(X(-2.3 * Math.sin(pa)), Y(-2.3 * Math.cos(pa))); ctx.lineTo(X(2.3 * Math.sin(pa)), Y(2.3 * Math.cos(pa))); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.fillStyle = C.h2; ctx.beginPath(); ctx.arc(X(0), Y(0), 4, 0, 7); ctx.fill(); ctx.restore();
+    const la = seg(p, 0.35, 0.6);
+    ctx.save(); ctx.globalAlpha = la; label("receding", X(1.4), Y(1.7), "#ff6961", 14, "center"); label("approaching", X(1.25), Y(-1.35), "#64d2ff", 14, "center"); ctx.restore();
+    // colour bar
+    const cbx = W > 640 ? x0 + side + 30 : x0, cby = W > 640 ? y0 + 20 : y0 + side + 14, cbw = W > 640 ? 14 : side, cbh = W > 640 ? side - 40 : 10;
+    for (let i = 0; i < 100; i++) { const v = -60 + 120 * i / 99; ctx.fillStyle = velColor(v, 1);
+      if (W > 640) ctx.fillRect(cbx, cby + cbh - (i + 1) * cbh / 100, cbw, cbh / 100 + 1); else ctx.fillRect(cbx + i * cbw / 100, cby, cbw / 100 + 1, cbh); }
+    if (W > 640) { label("+60 km/s", cbx + 22, cby + 10, C.muted, 12, "left", MONO); label("−60 km/s", cbx + 22, cby + cbh, C.muted, 12, "left", MONO); label("[Fe II] 5.34 µm", x0 + 10, y0 + 20, C.ink, 13, "left", MONO); }
+    else { label("−60", cbx, cby + 26, C.muted, 11, "left", MONO); label("+60 km/s", cbx + cbw, cby + 26, C.muted, 11, "right", MONO); }
+  }
+  function sRot(p) {
+    const h2 = D.h2, F = frame([0, 16500], [12.9, 18.4], box());
+    axes(F, "upper-level energy E_u (K)", "log₁₀ N_u / g_u", 1, [0, 4000, 8000, 12000, 16000], [13, 14, 15, 16, 17, 18]);
+    const lift = seg(p, 0.15, 0.5), cur = seg(p, 0.5, 0.85);
+    const E = [...Array(200).keys()].map(i => i * 16500 / 199), f = h2.fit;
+    const wv = E.map(e => f.log_warm0 - e / (f.Twarm[0] * Math.LN10)), hv = E.map(e => f.log_hot0 - e / (f.Thot[0] * Math.LN10));
+    const tv = wv.map((a, i) => Math.log10(Math.pow(10, a) + Math.pow(10, hv[i])));
+    if (cur > 0) { const cut = 16500 * cur; clip(F); ctx.setLineDash([6, 5]); line(F, E, wv, C["h2o-w"], 1.4, 0.8, false, cut); line(F, E, hv, C.hcn, 1.4, 0.8, false, cut); ctx.setLineDash([]); line(F, E, tv, C.ink, 2.4, 1, false, cut); ctx.restore(); }
+    const pts = h2.v00.map(q => [...q, "o"]).concat(h2.v11.map(q => [...q, "s"]));
+    pts.forEach(([lab, eu, yd, yo, mk], i) => {
+      const a = seg(p, 0.0 + 0.012 * i, 0.08 + 0.012 * i); if (a <= 0) return;
+      const yy = mix(yo == null ? yd : yo, yd, lift), px = F.X(eu), py = F.Y(yy), col = mk === "o" ? C.h2 : "#ff5fa2";
+      ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 2;
+      const filled = lift > 0.5 || yo == null;
+      ctx.beginPath(); mk === "o" ? ctx.arc(px, py, 5.5, 0, 7) : ctx.rect(px - 5, py - 5, 10, 10); filled ? ctx.fill() : ctx.stroke(); ctx.restore();
+    });
+    label(lift < 0.5 ? "observed" : (cur < 0.3 ? "corrected for extinction (A_V = 6.2)" : "warm 723 K + hot 2152 K"), F.x + F.w - 6, F.y + 16, C.muted, 13, "right", MONO);
+    label("● v = 0–0   ■ v = 1–1", F.x + 8, W < 600 ? F.y + 34 : F.y + 16, C.faint, 12, "left", MONO);
+  }
+  function sAbs(p) {
+    const A = D.abs, w = A.w;
+    const lo = Math.min(...A.flux, ...A.cont.map((c, i) => c + A.em[i] + A.ab[i])) * 0.97, hi = Math.max(...A.cont.map((c, i) => c + A.em[i])) * 1.05;
+    const F = frame([14.6, 15.4], [lo, hi], box());
+    axes(F, "wavelength (µm)", "Fν (Jy)", 1, null, niceTicks(lo, hi, 4));
+    clip(F);
+    const ge = seg(p, 0.1, 0.4), ga = seg(p, 0.35, 0.7);
+    const top1 = A.cont.map((c, i) => c + A.em[i] * ge), top2 = top1.map((t, i) => t + A.ab[i] * ga);
+    band(F, w, A.cont, top1, C.co2, 0.85); band(F, w, top1, top2, C.abs, 0.85);
+    line(F, w, A.cont, C["syrup-2"], 2.2); line(F, w, A.flux, C.ink, 1.1, 1, true);
+    ctx.restore();
+    label("continuum", F.x + 8, F.y + 16, C["syrup-2"], 12, "left", MONO);
+    ctx.save(); ctx.globalAlpha = clamp(ge * 2); label("hot CO₂ emission", F.x + 8, F.y + 34, C.co2, 12, "left", MONO); ctx.restore();
+    ctx.save(); ctx.globalAlpha = clamp(ga * 2); label("cold CO₂ screen", F.x + 8, F.y + 52, C.abs, 12, "left", MONO); ctx.restore();
+  }
+
+  const SCENES = [
+    p => sFull(p, { tint: 0 }),
+    p => sFull(p, { tint: seg(p, 0.1, 0.55) * (1 - seg(p, 0.85, 1)) }),
+    p => sZoom(p),
+    p => sCont(p),
+    p => sDetect(p),
+    p => sFill(p),
+    p => sFill(1, seg(p, 0.05, 0.8)),
+    p => sPost(p),
+    p => sJet(p),
+    p => sRot(p),
+    p => sAbs(p),
+  ];
+  const TAGS = [["FZ Tau · JWST GO 1549", "4.9–28.7 µm"], ["FZ Tau · 12 sub-bands", "Level-3 x1d"], ["FZ Tau · 13.4–17.6 µm", "123 874 transitions"],
+    ["FZ Tau · continuum", "IRSQR + model-aware"], ["FZ Tau · template detection", "ΔBIC, log scale"], ["FZ Tau · joint fit", "6 components"],
+    ["FZ Tau · joint fit", "χ²red 2.93"], ["FZ Tau · emcee posterior", "2 500 of 192 000 samples"], ["HV Tau C · MINDS PID 1282", "centroid velocity"],
+    ["HV Tau C · H₂", "rotation diagram"], ["synthetic test spectrum", "known truth"]];
+  // crossfade only where the kind of plot changes
+  const SAME = [true, true, true, false, false, true, false, false, false, false];
+
+  function progress() {
+    const vh = innerHeight, anchor = vh * (innerWidth <= 900 ? 0.78 : 0.55);
+    let s = 0;
+    for (const el of steps) { const r = el.getBoundingClientRect(); s += clamp((anchor - r.top) / r.height); }
+    return clamp(s, 0, steps.length - 1e-4);
+  }
+  function draw(force) {
+    if (!D) return;
+    const s = Sdraw;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    const i = Math.floor(s), p = s - i;
+    const xf = 0.14;
+    if (i + 1 < SCENES.length && p > 1 - xf && !SAME[i]) {
+      const u = ease((p - (1 - xf)) / xf);
+      ctx.globalAlpha = 1 - u; SCENES[i](p); ctx.globalAlpha = u; SCENES[i + 1](0); ctx.globalAlpha = 1;
+    } else SCENES[i](p);
+    const t = TAGS[Math.min(i, TAGS.length - 1)]; if (tagL.textContent !== t[0]) { tagL.textContent = t[0]; tagR.textContent = t[1]; }
+  }
+  function loop() {
+    raf = 0; const target = progress();
+    Sdraw = reduce ? target : Sdraw + (target - Sdraw) * 0.22;
+    if (Math.abs(target - Sdraw) < 0.0008) Sdraw = target;
+    draw(); if (Sdraw !== target) raf = requestAnimationFrame(loop);
+  }
+  const kick = () => { if (!raf) raf = requestAnimationFrame(loop); };
+  addEventListener("scroll", kick, { passive: true });
+  addEventListener("resize", () => { resize(); kick(); });
+  fetch("data.json").then(r => r.json()).then(d => { D = d; Sdraw = progress(); resize(); }).catch(() => {
+    tagR.textContent = "chart data could not be loaded"; });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => draw());
+})();
+</script>
+</body>
+</html>
